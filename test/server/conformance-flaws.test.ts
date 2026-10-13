@@ -21,6 +21,9 @@ const CASES: [Flaw, RegExp][] = [
   ['long-read-link', /read link stops/],
   ['discard-leaves-object', /discard removes/],
   ['finalize-throws-when-missing', /says null/],
+  ['unconditional-setfile', /setFile never replaces/],
+  ['racy-caps', /caps hold under a race/],
+  ['settles-stale', /old revision/],
 ]
 
 describe('the conformance suite fails unsafe adapters', () => {

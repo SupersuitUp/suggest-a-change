@@ -6,7 +6,7 @@
 // It is written to FAIL an unsafe adapter: reusable or unconditioned upload links, files or follow-ups lost on a
 // round trip, a day's count that includes every put, a stale write that erases a status or a claim, a create
 // that is not atomic, a read link that outlives its time limit, a refused object left in storage.
-import type { HostedStore, StoredReport } from './handlers.ts'
+import { reportRevision, type HostedStore, type StoredReport } from './handlers.ts'
 
 export interface StoreHarness {
   store: HostedStore
@@ -38,6 +38,8 @@ const mk = (member: string, receivedAt = '2026-10-12T09:00:00.000Z'): StoredRepo
 const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 73, 72, 68, 82])
 const TEXT = new TextEncoder().encode('this is plainly not an image at all')
 const link = (h: StoreHarness, id: string, file: string, type: string, bytes: number) => h.store.uploadUrl({ reportId: id, file, type, bytes })
+const CAPS = { max: 10, maxVoice: 50, voiceTotalMs: 900_000, closed: ['live', 'sent-to-template', 'filed', 'not-now'] }
+const rv = async (store: HostedStore, id: string) => reportRevision((await store.get(id))!)
 const FUP = { followId: 'f1', words: 'more', at: '2026-10-12T10:00:00.000Z', by: 'member', voice: [{ file: 'v.webm', ms: 1000 }] }
 
 export const checks: { name: string; run(h: StoreHarness): Promise<void> }[] = [
@@ -61,7 +63,7 @@ export const checks: { name: string; run(h: StoreHarness): Promise<void> }[] = [
   } },
   { name: 'countToday counts reports, not puts: refused duplicates and other writes do not add to it', async run({ store, now, advance }) {
     const r = mk('amy', new Date(now()).toISOString()); await store.put(r)
-    await store.put(r); await store.put({ ...r }); await store.setFile(r.id, 'a.png', { pending: { type: 'image/png', bytes: 1 } }); await store.addFollowUp(r.id, FUP)
+    await store.put(r); await store.put({ ...r }); await store.setFile(r.id, 'a.png', { pending: { type: 'image/png', bytes: 1 } }); await store.addFollowUp(r.id, FUP, CAPS)
     ok((await store.countToday('amy')) === 1, `countToday counted ${await store.countToday('amy')} for one report`)
     ok((await store.countToday('ben')) === 0, 'countToday counted another member')
     await advance(26 * 3600_000)
@@ -70,7 +72,7 @@ export const checks: { name: string; run(h: StoreHarness): Promise<void> }[] = [
   { name: 'files and follow-ups survive a round trip through get and listFor, and get returns a copy', async run({ store }) {
     const r = mk('amy'); await store.put(r)
     await store.setFile(r.id, 'a.png', { type: 'image/png', bytes: 16, sha256: 'ab'.repeat(32) })
-    await store.addFollowUp(r.id, FUP)
+    await store.addFollowUp(r.id, FUP, CAPS)
     for (const got of [(await store.get(r.id))!, (await store.listFor('amy')).find((x) => x.id === r.id)!]) {
       ok(got.files?.['a.png']?.sha256 === 'ab'.repeat(32), 'a verified file did not come back')
       ok(got.followUps?.length === 1 && got.followUps[0].followId === 'f1' && got.followUps[0].voice[0].file === 'v.webm', 'a follow-up did not come back')
@@ -85,9 +87,9 @@ export const checks: { name: string; run(h: StoreHarness): Promise<void> }[] = [
     await store.setFile(r.id, 'a.png', null)
     const f = (await store.get(r.id))!.files ?? {}
     ok(!('a.png' in f) && 'b.png' in f, 'setFile did not touch only the one file')
-    ok((await store.addFollowUp(r.id, FUP)) === 'added' && (await store.addFollowUp(r.id, FUP)) === 'exists', 'addFollowUp is not once per followId')
+    ok((await store.addFollowUp(r.id, FUP, CAPS)) === 'added' && (await store.addFollowUp(r.id, FUP, CAPS)) === 'exists', 'addFollowUp is not once per followId')
     ok((await store.get(r.id))!.followUps!.length === 1, 'a repeated follow-up was stored twice')
-    ok((await store.addFollowUp('r-20260101000000-zzzzzz', FUP)) === 'missing', 'addFollowUp on a missing report did not say so')
+    ok((await store.addFollowUp('r-20260101000000-zzzzzz', FUP, CAPS)) === 'missing', 'addFollowUp on a missing report did not say so')
   } },
   { name: 'a stale write cannot erase a status, a claim, a file or a follow-up written at the same moment', async run({ store }) {
     const r = mk('amy'); await store.put(r)
@@ -96,7 +98,7 @@ export const checks: { name: string; run(h: StoreHarness): Promise<void> }[] = [
       store.setFile(r.id, 'a.png', { pending: { type: 'image/png', bytes: 1 } }),
       store.setStatus(r.id, { status: 'with-freeda', by: 'mac', at: '2026-10-12T10:00:00.000Z' }),
       store.claimApproval(r.id, 'mo', 600_000),
-      store.addFollowUp(r.id, FUP),
+      store.addFollowUp(r.id, FUP, CAPS),
     ])
     const got = (await store.get(r.id))!
     ok(got.timeline.length === 2 && got.timeline[1].status === 'with-freeda', 'a concurrent write erased the status')
@@ -138,14 +140,58 @@ export const checks: { name: string; run(h: StoreHarness): Promise<void> }[] = [
   } },
   { name: 'settle needs a claim, is per maintainer, and reopen offers the report again', async run({ store }) {
     const r = mk('amy'); await store.put(r)
-    ok((await store.settle(r.id, 'mo')) === false, 'settle without a claim said yes')
+    ok((await store.settle(r.id, 'mo', await rv(store, r.id))) === 'unclaimed', 'settle without a claim said yes')
     await store.claim(r.id, 'mo', 600_000)
-    ok((await store.settle(r.id, 'mo')) === true && (await store.settle(r.id, 'mo')) === true, 'settle is not idempotent')
+    ok((await store.settle(r.id, 'mo', await rv(store, r.id))) === 'settled' && (await store.settle(r.id, 'mo', await rv(store, r.id))) === 'settled', 'settle is not idempotent')
     ok(!(await store.listOpenFor('mo', { limit: 10 })).some((x) => x.id === r.id), 'a settled report is still open for the maintainer who settled it')
     ok((await store.listOpenFor('lee', { limit: 10 })).some((x) => x.id === r.id), 'one maintainer settling closed the report for another')
     ok((await store.reopen(r.id)) === true, 'reopen of a settled report said nothing was cleared')
     ok((await store.listOpenFor('mo', { limit: 10 })).some((x) => x.id === r.id), 'reopen did not offer the report again')
     ok((await store.reopen(r.id)) === false, 'reopen of an unsettled report said it cleared something')
+  } },
+  { name: 'a settle that carries an old revision is refused and the report is offered again with what was added', async run({ store }) {
+    for (const add of [
+      async (id: string) => { await store.addFollowUp(id, FUP, CAPS) },
+      async (id: string) => { await store.setFile(id, 'a.png', { type: 'image/png', bytes: 16, sha256: 'cd'.repeat(32) }) },
+    ]) {
+      const r = mk('amy'); await store.put(r)
+      await store.claim(r.id, 'mo', 600_000)
+      const seen = await rv(store, r.id) // what the Mac was shown by its list
+      await add(r.id) // something arrives before the Mac settles
+      ok((await store.settle(r.id, 'mo', seen)) === 'stale', 'a settle on an old snapshot was accepted')
+      const again = (await store.listOpenFor('mo', { limit: 10 })).find((x) => x.id === r.id)
+      ok(!!again, 'the report was not offered again after a stale settle')
+      ok(reportRevision(again!) !== seen, 'the report offered again does not carry the addition')
+      await store.claim(r.id, 'mo', 600_000)
+      ok((await store.settle(r.id, 'mo', reportRevision(again!))) === 'settled', 'a settle on the current snapshot was refused')
+    }
+  } },
+  { name: 'the follow-up caps hold under a race: of fifteen racing follow-ups exactly the cap are added', async run({ store }) {
+    const r = mk('amy'); await store.put(r)
+    const got = await Promise.all(Array.from({ length: 15 }, (_, i) => store.addFollowUp(r.id, { ...FUP, followId: `f${i}`, voice: [] }, CAPS)))
+    ok(got.filter((x) => x === 'added').length === 10 && got.filter((x) => x === 'full').length === 5, `fifteen racing follow-ups gave ${got.join(',')}`)
+    ok((await store.get(r.id))!.followUps!.length === 10, 'more follow-ups were stored than the cap')
+    const v = mk('amy'); await store.put({ ...v, voice: [{ file: 'v0.webm', ms: 100_000 }] })
+    const vg = await Promise.all(Array.from({ length: 6 }, (_, i) => store.addFollowUp(v.id, { ...FUP, followId: `g${i}`, voice: [{ file: `w${i}.webm`, ms: 300_000 }] }, CAPS)))
+    ok(vg.filter((x) => x === 'added').length === 2, `racing voice follow-ups past the total gave ${vg.join(',')}`)
+  } },
+  { name: 'addFollowUp refuses a reused file name and a closed report', async run({ store }) {
+    const r = mk('amy'); await store.put({ ...r, voice: [{ file: 'v0.webm', ms: 10 }] })
+    ok((await store.addFollowUp(r.id, { ...FUP, voice: [{ file: 'v0.webm', ms: 10 }] }, CAPS)) === 'clash', 'a reused file name was accepted')
+    await store.setStatus(r.id, { status: 'not-now', by: 'owner', at: 'x' })
+    ok((await store.addFollowUp(r.id, { ...FUP, followId: 'late', voice: [] }, CAPS)) === 'closed', 'a follow-up was added to a closed report')
+  } },
+  { name: 'setFile never replaces a verified entry, and an older pending never replaces a newer one', async run({ store }) {
+    const r = mk('amy'); await store.put(r)
+    const verified = { type: 'image/png', bytes: 16, sha256: 'ef'.repeat(32) }
+    ok((await store.setFile(r.id, 'a.png', { pending: { type: 'image/png', bytes: 16, issuedAt: 100 } })) === true, 'a first pending was refused')
+    ok((await store.setFile(r.id, 'a.png', { pending: { type: 'image/png', bytes: 16, issuedAt: 50 } })) === false, 'an older pending replaced a newer one')
+    ok((await store.setFile(r.id, 'a.png', { pending: { type: 'image/png', bytes: 32, issuedAt: 200 } })) === true, 'a newer pending did not replace the older')
+    ok((await store.setFile(r.id, 'a.png', verified)) === true, 'a verification did not replace its pending entry')
+    ok((await store.setFile(r.id, 'a.png', { pending: { type: 'image/png', bytes: 16, issuedAt: 999 } })) === false, 'a pending entry replaced a verified one')
+    ok((await store.setFile(r.id, 'a.png', { ...verified, sha256: '00'.repeat(32) })) === false, 'a second verification replaced the first')
+    ok((await store.setFile(r.id, 'a.png', null)) === false, 'a verified entry was removed')
+    ok((await store.get(r.id))!.files!['a.png'].sha256 === verified.sha256, 'the verified entry changed')
   } },
   { name: 'claimApproval is first-wins and atomic; the holder keeps it; it can be released; it expires', async run({ store, advance }) {
     const r = mk('amy'); await store.put(r)

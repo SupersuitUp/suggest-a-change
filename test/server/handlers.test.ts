@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { createReportHandlers, type TellEvent } from '../../src/server/index.ts'
+import { createReportHandlers, reportRevision, type TellEvent } from '../../src/server/index.ts'
 import { makeMemoryStore } from './memory-store.ts'
 
 const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 73, 72, 68, 82])
 const sha = async (b: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', b as BufferSource))].map((x) => x.toString(16).padStart(2, '0')).join('')
 
 let n = 0
+let lastSetup: { h: ReturnType<typeof createReportHandlers>; mem: ReturnType<typeof makeMemoryStore>; call: (m: string, p: string, w: { user?: string; agent?: string } | null, b?: unknown) => Request }
+/** The settle a Mac makes: it carries the revision of what it was shown (the stored report as it stands). */
+const settle = async (agent: string, id: string) => lastSetup.h.agentSettle(lastSetup.call('POST', 'x', { agent }, { revision: reportRevision((await lastSetup.mem.store.get(id))!) }), id)
 const newId = () => `r-20261012090000-${String(100000 + ++n).slice(1).padStart(6, 'a')}`
 const rid = () => `r-20261012090000-a${String(++n).padStart(5, '0')}`
 
@@ -40,6 +43,7 @@ function setup(extra: { limits?: Record<string, number>; tell?: (e: TellEvent) =
     expect(fin.status).toBe(200)
     return id
   }
+  lastSetup = { h, mem, call }
   return { mem, h, call, draft, send, withPhoto }
 }
 
@@ -225,8 +229,8 @@ describe('hosted report handlers', () => {
     expect(await mem.collectedKeys(id)).toEqual([])
     const list = (await (await h.agentList(call('GET', 'x', { agent: 'mo' }))).json()) as { reports: { id: string }[] }
     expect(list.reports.map((r) => r.id)).toEqual([id])
-    expect((await h.agentSettle(call('POST', 'x', { agent: 'lee' }, {}), id)).status).toBe(409) // lee never claimed it
-    const res = await h.agentSettle(call('POST', 'x', { agent: 'mo' }, {}), id)
+    expect((await settle('lee', id)).status).toBe(409) // lee never claimed it
+    const res = await settle('mo', id)
     expect(res.status).toBe(200)
     expect(mem.reports.get(id)!.timeline.map((t) => t.status)).toEqual(['received', 'with-freeda'])
     expect(await mem.collectedKeys(id)).toEqual([`collected/reports/${id}/a.png`])
@@ -236,7 +240,7 @@ describe('hosted report handlers', () => {
     const file = await h.agentFile(call('GET', 'x', { agent: 'mo' }), id, 'a.png')
     expect(file.status).toBe(200)
     expect(((await file.json()) as { sha256: string }).sha256).toBe(await sha(PNG))
-    expect((await h.agentSettle(call('POST', 'x', { agent: 'mo' }, {}), id)).status).toBe(200) // twice is fine
+    expect((await settle('mo', id)).status).toBe(200) // twice is fine
     expect(mem.reports.get(id)!.timeline).toHaveLength(2)
   })
 
@@ -436,11 +440,11 @@ describe('what is added after the Mac collected it reaches the Mac', () => {
     const { h, call, send } = setup()
     const { id } = await send('amy')
     expect(await list(h, call)).toEqual([id])
-    await h.agentSettle(call('POST', 'x', { agent: 'mo' }, {}), id)
+    await settle('mo', id)
     expect(await list(h, call)).toEqual([])
     await h.append(call('POST', 'a', { user: 'amy' }, { followId: 'f1', words: 'one more thing' }), id)
     expect(await list(h, call)).toEqual([id])
-    expect((await h.agentSettle(call('POST', 'x', { agent: 'mo' }, {}), id)).status).toBe(200) // settle runs again
+    expect((await settle('mo', id)).status).toBe(200) // settle runs again
     expect(await list(h, call)).toEqual([])
   })
 
@@ -456,12 +460,12 @@ describe('what is added after the Mac collected it reaches the Mac', () => {
     await put('a.png')
     mem.advance(61 * 60_000) // b.png never came, so the Mac is given the report without it
     expect(await list(h, call)).toEqual([id])
-    await h.agentSettle(call('POST', 'x', { agent: 'mo' }, {}), id)
+    await settle('mo', id)
     expect(await mem.collectedKeys(id)).toHaveLength(1)
     expect(await list(h, call)).toEqual([])
     await put('b.png')
     expect(await list(h, call)).toEqual([id])
-    await h.agentSettle(call('POST', 'x', { agent: 'mo' }, {}), id)
+    await settle('mo', id)
     expect(await mem.collectedKeys(id)).toHaveLength(2)
     expect((await mem.objectKeys(id)).every((k) => k.startsWith('collected/'))).toBe(true)
   })
@@ -541,7 +545,7 @@ describe('the file link the Mac is given', () => {
     const { h, call, mem, withPhoto } = setup()
     const id = await withPhoto()
     await h.agentList(call('GET', 'x', { agent: 'mo' }))
-    await h.agentSettle(call('POST', 'x', { agent: 'mo' }, {}), id)
+    await settle('mo', id)
     const got = (await (await h.agentFile(call('GET', 'x', { agent: 'mo' }), id, 'a.png')).json()) as { url: string; sha256: string; bytes: number; expiresAt: number }
     expect(got).toMatchObject({ sha256: await sha(PNG), bytes: PNG.length })
     expect(Array.from((await mem.getViaLink(got.url))!)).toEqual(Array.from(PNG))
@@ -555,5 +559,76 @@ describe('the file link the Mac is given', () => {
     const again = await h.uploadUrl(call('POST', 'u', { user: 'amy' }, { reportId: id, file: 'a.png', type: 'image/png', bytes: PNG.length }))
     expect(await again.json()).toEqual({ done: true }) // no link is issued for a verified file
     expect(mem.calls.uploadUrl).toBe(1)
+  })
+})
+
+describe('races between a Mac and a member', () => {
+  const list = async (h: ReturnType<typeof setup>['h'], call: ReturnType<typeof setup>['call']) => ((await (await h.agentList(call('GET', 'x', { agent: 'mo' }))).json()) as { reports: { id: string; revision: string }[] }).reports
+
+  it('a settle needs the revision the list gave; one that grew since is refused and offered again with the addition', async () => {
+    const { h, call, send } = setup()
+    const { id } = await send('amy')
+    const [seen] = await list(h, call)
+    expect(seen.id).toBe(id)
+    expect((await h.agentSettle(call('POST', 'x', { agent: 'mo' }, {}), id)).status).toBe(400)
+    // something arrives between the Mac's list and its settle
+    expect((await h.append(call('POST', 'a', { user: 'amy' }, { followId: 'f1', words: 'one more thing' }), id)).status).toBe(200)
+    const stale = await h.agentSettle(call('POST', 'x', { agent: 'mo' }, { revision: seen.revision }), id)
+    expect(stale.status).toBe(409)
+    expect(await stale.json()).toMatchObject({ stale: true })
+    const [again] = await list(h, call)
+    expect(again.id).toBe(id)
+    expect(again.revision).not.toBe(seen.revision)
+    expect(((again as unknown) as { followUps: unknown[] }).followUps).toHaveLength(1)
+    expect((await h.agentSettle(call('POST', 'x', { agent: 'mo' }, { revision: again.revision }), id)).status).toBe(200)
+  })
+
+  it('fifteen follow-ups at once make ten', async () => {
+    const { h, call, send, mem } = setup()
+    const { id } = await send('amy')
+    const got = await Promise.all(Array.from({ length: 15 }, (_, i) => h.append(call('POST', 'a', { user: 'amy' }, { followId: `f${i}`, words: 'w' }), id)))
+    expect(got.filter((r) => r.status === 200)).toHaveLength(10)
+    expect(mem.reports.get(id)!.followUps).toHaveLength(10)
+  })
+
+  it('a verified file is not replaced by a stale pending write', async () => {
+    const { h, call, mem, withPhoto } = setup()
+    const id = await withPhoto()
+    expect(await mem.store.setFile(id, 'a.png', { pending: { type: 'image/png', bytes: 1, issuedAt: Date.now() + 1e9 } })).toBe(false)
+    const again = await h.finalize(call('POST', 'f', { user: 'amy' }, { file: 'a.png' }), id)
+    expect(again.status).toBe(200)
+    expect(mem.calls.discard).toBe(0)
+  })
+})
+
+describe('who may add to a report, and when', () => {
+  it('only the report\'s owner adds to it: a maintainer\'s follow-up is refused like a missing report', async () => {
+    const { h, call, send } = setup()
+    const { id } = await send('amy')
+    const add = (user: string) => h.append(call('POST', 'a', { user }, { followId: 'f1', words: 'hello' }), id)
+    const theirs = await add('mo'); const missing = await h.append(call('POST', 'a', { user: 'mo' }, { followId: 'f1', words: 'hello' }), 'r-20261012090000-zzzzzz')
+    expect([theirs.status, await theirs.text()]).toEqual([missing.status, await missing.text()])
+    expect((await add('amy')).status).toBe(200)
+  })
+
+  it('a follow-up on an ended report is refused and does not reopen it', async () => {
+    const { h, call, send, mem } = setup()
+    const { id } = await send('amy')
+    const st = (status: string) => h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status }), id)
+    await h.agentList(call('GET', 'x', { agent: 'mo' })); expect((await settle('mo', id)).status).toBe(200)
+    for (const s of ['planned', 'waiting-on-owner', 'not-now']) expect((await st(s)).status, s).toBe(200)
+    const res = await h.append(call('POST', 'a', { user: 'amy' }, { followId: 'late', words: 'wait' }), id)
+    expect(res.status).toBe(409)
+    expect(mem.reports.get(id)!.followUps ?? []).toHaveLength(0)
+    expect(((await (await h.agentList(call('GET', 'x', { agent: 'mo' }))).json()) as { reports: unknown[] }).reports).toHaveLength(0)
+  })
+
+  it('a voice file\'s link is capped by its declared length, so ten seconds cannot claim 25 MB', async () => {
+    const { h, call, send } = setup()
+    const { id } = await send('amy', { voice: [{ file: 'v.webm', ms: 10_000 }] })
+    const ask = (bytes: number) => h.uploadUrl(call('POST', 'u', { user: 'amy' }, { reportId: id, file: 'v.webm', type: 'audio/webm', bytes }))
+    expect((await ask(25 * 2 ** 20)).status).toBe(413)
+    expect((await ask(2 * 2 ** 20)).status).toBe(413)
+    expect((await ask(1_000_000)).status).toBe(200)
   })
 })

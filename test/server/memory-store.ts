@@ -1,8 +1,8 @@
 // The in-memory HostedStore this repo's tests run against. It must itself pass runStoreConformance.
 // `flaw` builds a deliberately UNSAFE variant, one per rule the suite exists to enforce; the suite must fail each.
-import { sniffType, type FileState, type HostedStore, type StoreHarness, type StoredReport } from '../../src/server/index.ts'
+import { reportRevision, sniffType, type FileState, type HostedStore, type StoreHarness, type StoredReport } from '../../src/server/index.ts'
 
-export type Flaw = 'reusable-links' | 'unconditioned-links' | 'drops-files' | 'drops-followups' | 'counts-every-put' | 'stale-write' | 'stale-claim' | 'non-atomic-create' | 'long-read-link' | 'discard-leaves-object' | 'finalize-throws-when-missing'
+export type Flaw = 'reusable-links' | 'unconditioned-links' | 'drops-files' | 'drops-followups' | 'counts-every-put' | 'stale-write' | 'stale-claim' | 'non-atomic-create' | 'long-read-link' | 'discard-leaves-object' | 'finalize-throws-when-missing' | 'unconditional-setfile' | 'racy-caps' | 'settles-stale'
 
 const hex = async (b: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', b as BufferSource))].map((x) => x.toString(16).padStart(2, '0')).join('')
 const day = (ms: number) => new Date(ms).toISOString().slice(0, 10)
@@ -67,15 +67,36 @@ export function makeMemoryStore(start = Date.parse('2026-10-12T09:00:00Z'), flaw
       return { type: sniffType(b.subarray(0, 64)), bytes: b.length, sha256: await hex(b) }
     },
     async discard(a) { calls.discard++; if (flaw !== 'discard-leaves-object') { objects.delete(key(a.reportId, a.file)); objects.delete(`collected/${key(a.reportId, a.file)}`) } },
-    async setFile(id, file, state: FileState | null) { await rmw(id, (r) => { r.files = { ...(r.files ?? {}) }; if (state) r.files[file] = copy(state); else delete r.files[file] }) },
-    async addFollowUp(id, f) {
+    async setFile(id, file, state: FileState | null) {
+      const r = reports.get(id); if (!r) return false
+      const cur = r.files?.[file]
+      if (flaw !== 'unconditional-setfile') {
+        if (cur?.sha256) return false // a verified entry is never replaced or removed
+        if (state?.pending && cur?.pending && (state.pending.issuedAt ?? 0) < (cur.pending.issuedAt ?? 0)) return false // an older link never replaces a newer one
+      }
+      await rmw(id, (x) => { x.files = { ...(x.files ?? {}) }; if (state) x.files[file] = copy(state); else delete x.files[file] })
+      return true
+    },
+    async addFollowUp(id, f, caps) {
       const r = reports.get(id); if (!r) return 'missing'
       if ((r.followUps ?? []).some((x) => x.followId === f.followId)) return 'exists'
+      if (caps.closed.includes(r.timeline[r.timeline.length - 1]?.status)) return 'closed'
+      const ups = r.followUps ?? []
+      const names = new Set([...((r.media as { file: string }[] | undefined) ?? []).map((m) => m.file), ...((r.voice as { file: string }[] | undefined) ?? []).map((v) => v.file), ...ups.flatMap((u) => u.voice.map((v) => v.file))])
+      if (f.voice.some((v) => names.has(v.file))) return 'clash'
+      const ms = [...((r.voice as { ms: number }[] | undefined) ?? []), ...ups.flatMap((u) => u.voice), ...f.voice].reduce((n, v) => n + v.ms, 0)
+      if (ups.length >= caps.max || ups.reduce((n, u) => n + u.voice.length, 0) + f.voice.length > caps.maxVoice || ms > caps.voiceTotalMs) return 'full'
+      if (flaw === 'racy-caps') await tick() // the check above is stale by the time the write lands
       await rmw(id, (x) => { x.followUps = [...(x.followUps ?? []), copy(f)] })
       return 'added'
     },
     async claim(id, by, leaseMs) { const c = claims.get(`${id}|${by}`); claims.set(`${id}|${by}`, { until: clock + leaseMs, settled: c?.settled ?? false }) },
-    async settle(id, by) { const c = claims.get(`${id}|${by}`); if (!c) return false; c.settled = true; return true },
+    async settle(id, by, revision) {
+      const c = claims.get(`${id}|${by}`); if (!c) return 'unclaimed'
+      const r = reports.get(id)
+      if (flaw !== 'settles-stale' && r && reportRevision(r) !== revision) { claims.delete(`${id}|${by}`); return 'stale' }
+      c.settled = true; return 'settled'
+    },
     async reopen(id) {
       let any = false
       for (const [k, c] of [...claims]) if (k.startsWith(`${id}|`) && c.settled) { claims.delete(k); any = true }

@@ -12,7 +12,7 @@ import { effectiveLimits, type Limits } from './rate.ts'
 import { ACCEPTED_TYPES, canonicalType, sameType } from './sniff.ts'
 
 export interface TimelineEntry { status: string; by: string; at: string; step?: string; note?: string }
-export interface FileState { pending?: { type: string; bytes: number }; type?: string; bytes?: number; sha256?: string; at?: string }
+export interface FileState { pending?: { type: string; bytes: number; issuedAt?: number }; type?: string; bytes?: number; sha256?: string; at?: string }
 export interface FollowUp { followId: string; words: string; at: string; by: string; voice: { file: string; ms: number }[] }
 export interface StoredReport {
   id: string
@@ -23,6 +23,14 @@ export interface StoredReport {
   files?: Record<string, FileState>
   followUps?: FollowUp[]
   [field: string]: unknown
+}
+
+/** What a collector saw of a report: its verified files and its follow-ups. A store computes this from its own copy,
+ *  inside `settle`, and settles only when it equals what the collector says it collected. */
+export function reportRevision(r: Pick<StoredReport, 'files' | 'followUps'>): string {
+  const files = Object.entries(r.files ?? {}).filter(([, v]) => v.sha256).map(([k, v]) => `${k}=${String(v.sha256).slice(0, 12)}`).sort()
+  const ups = (r.followUps ?? []).map((f) => f.followId).sort()
+  return `f:${files.join(',')}|u:${ups.join(',')}`
 }
 
 /** What an app's storage adapter implements, and must pass `runStoreConformance` against its real storage.
@@ -44,14 +52,19 @@ export interface HostedStore {
   finalize(a: { reportId: string; file: string }): Promise<{ type: string | null; bytes: number; sha256: string } | null>
   /** Deletes the object (a refused one) so nothing unverified stays in storage. */
   discard(a: { reportId: string; file: string }): Promise<void>
-  /** Sets (or with null removes) one entry of the report's `files`, touching nothing else. */
-  setFile(id: string, file: string, state: FileState | null): Promise<void>
-  /** Adds a follow-up, once per followId, touching nothing else. */
-  addFollowUp(id: string, followUp: FollowUp): Promise<'added' | 'exists' | 'missing'>
+  /** Conditionally sets (or with null removes) one entry of the report's `files`, touching nothing else. A verified
+   *  entry is NEVER replaced or removed. A pending entry is replaced by a verified one, or by a pending one at least as
+   *  recent (`issuedAt`), never by an older pending one. True when it applied. */
+  setFile(id: string, file: string, state: FileState | null): Promise<boolean>
+  /** Adds a follow-up once per followId, enforcing the caps INSIDE the atomic write: at most `max` follow-ups, at most
+   *  `maxVoice` voice notes across them, at most `voiceTotalMs` of voice across the whole report, no reused file name,
+   *  and none when the report's last status is one of `closed`. */
+  addFollowUp(id: string, followUp: FollowUp, caps: { max: number; maxVoice: number; voiceTotalMs: number; closed: string[] }): Promise<'added' | 'exists' | 'missing' | 'full' | 'clash' | 'closed'>
   /** Records that `by` holds this report for `leaseMs`; offered again to `by` when it passes without a settle. */
   claim(id: string, by: string, leaseMs: number): Promise<void>
-  /** Records that `by` has the report. False when `by` never claimed it. */
-  settle(id: string, by: string): Promise<boolean>
+  /** Settles the report for `by` only if the report is still what the collector saw (`revision`, from `reportRevision`).
+   *  'stale' when something was added since: the claim is dropped so the next list offers the report again. */
+  settle(id: string, by: string, revision: string): Promise<'settled' | 'stale' | 'unclaimed'>
   /** Clears every maintainer's settled mark so the report is offered again. True when any was cleared. */
   reopen(id: string): Promise<boolean>
   /** Appends to the timeline only when the last status is still `expectFrom` (when given); false when it is not. */
@@ -94,6 +107,8 @@ export const BODY_CAP = 4 * WORDS_MAX * 4 + 64 * 1024
 export const APPROVAL_LEASE_MS = 7 * 24 * 3600_000
 export const READ_TTL_MS = 5 * 60_000
 export const VOICE_FILE_BYTES = 25 * 2 ** 20
+/** A voice file may be this many bytes per declared second (768 kbit/s, generous for any recorder) plus a little slack: ten seconds cannot claim 25 MB. */
+export const VOICE_BYTES_PER_SECOND = 96_000
 /** How long a report with missing attachments waits before it is offered to a Mac anyway. */
 export const INCOMPLETE_GRACE_MS = 60 * 60_000
 const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
@@ -141,12 +156,12 @@ const fileNames = (r: StoredReport): string[] => [
   ...(r.followUps ?? []).flatMap((f) => f.voice.map((v) => v.file)),
 ]
 
-interface Declared { kind: 'media' | 'voice'; type?: string; bytes?: number; sha256?: string }
+interface Declared { kind: 'media' | 'voice'; type?: string; bytes?: number; sha256?: string; ms?: number }
 function declaredFile(r: StoredReport, file: string): Declared | null {
   const m = ((r.media as { file: string; type: string; bytes: number; sha256?: string }[] | undefined) ?? []).find((x) => x.file === file)
   if (m) return { kind: 'media', type: m.type, bytes: m.bytes, ...(m.sha256 ? { sha256: m.sha256 } : {}) }
-  const v = ((r.voice as { file: string }[] | undefined) ?? []).some((x) => x.file === file) || (r.followUps ?? []).some((f) => f.voice.some((x) => x.file === file))
-  return v ? { kind: 'voice' } : null
+  const v = ((r.voice as { file: string; ms: number }[] | undefined) ?? []).find((x) => x.file === file) ?? (r.followUps ?? []).flatMap((f) => f.voice).find((x) => x.file === file)
+  return v ? { kind: 'voice', ms: v.ms } : null
 }
 
 export function createReportHandlers(opts: ReportHandlerOptions) {
@@ -289,14 +304,19 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const words = raw.words === undefined ? '' : str(raw.words, WORDS_MAX)
     if (!followId) return bad('followId is needed')
     if (words === null) return bad('words is too long or not text')
-    const r = await readable(id, member); if (!r) return notFound()
+    // Only the report's owner adds to it (a follow-up's voice is uploaded with owner-only links, so a maintainer's could never arrive);
+    // a maintainer speaks to the member through status notes.
+    const r = await readable(id, member, { ownerOnly: true }); if (!r) return notFound()
     if ((r.followUps ?? []).some((f) => f.followId === followId)) return json(200, { id, followId }) // a repeat
+    if (END.includes(lastStatus(r))) return json(409, { error: 'this suggestion is closed; start a new one' })
     const v = voiceEntries(raw.voice, limits.followUpVoiceNotes, new Set(fileNames(r))); if ('error' in v) return bad(v.error)
-    const had = [...((r.voice as { ms: number }[] | undefined) ?? []), ...(r.followUps ?? []).flatMap((f) => f.voice)].reduce((n, x) => n + x.ms, 0)
-    if (had + v.voice.reduce((n, x) => n + x.ms, 0) > limits.voiceTotalMs) return bad('the voice notes are too long in total')
-    if ((r.followUps ?? []).length >= limits.followUps) return bad('this report has all the follow-ups it can take')
-    const added = await store.addFollowUp(id, { followId, words, at: iso(now()), by: roleOf(member), voice: v.voice.map(({ file, ms }) => ({ file, ms })) })
+    // The caps are enforced again inside the store's atomic write: the read above is only a fast path.
+    const added = await store.addFollowUp(id, { followId, words, at: iso(now()), by: roleOf(member), voice: v.voice.map(({ file, ms }) => ({ file, ms })) },
+      { max: limits.followUps, maxVoice: limits.followUps * limits.followUpVoiceNotes, voiceTotalMs: limits.voiceTotalMs, closed: [...END] })
     if (added === 'missing') return notFound()
+    if (added === 'closed') return json(409, { error: 'this suggestion is closed; start a new one' })
+    if (added === 'full') return bad('this report has all the follow-ups or voice it can take')
+    if (added === 'clash') return bad('a voice note reuses a file name')
     if (added === 'added') {
       await store.reopen(id) // a Mac that already collected this report is offered it again, with what is new
       await tell({ type: 'followed-up', reportId: id, member })
@@ -319,11 +339,11 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     if (want.kind === 'media' && !sameType(want.type, t)) return bad('the type is not the one the report declared')
     if (want.kind === 'voice' && !t.startsWith('audio/')) return bad('a voice note must be audio')
     const n = bytes as number
-    const cap = want.kind === 'voice' ? VOICE_FILE_BYTES : String(want.type).startsWith('video/') ? limits.videoBytes : limits.imageBytes
+    const cap = want.kind === 'voice' ? Math.min(VOICE_FILE_BYTES, Math.ceil(((want.ms ?? 0) / 1000) * VOICE_BYTES_PER_SECOND) + 65_536) : String(want.type).startsWith('video/') ? limits.videoBytes : limits.imageBytes
     if (n > cap || (want.bytes !== undefined && n > want.bytes)) return json(413, { error: 'that file is larger than this report allows' })
     if (r.files?.[file]?.sha256) return json(200, { done: true }) // already stored and verified: a retry has nothing to do
     const link = await store.uploadUrl({ reportId, file, type: t, bytes: n })
-    await store.setFile(reportId, file, { pending: { type: t, bytes: n } })
+    await store.setFile(reportId, file, { pending: { type: t, bytes: n, issuedAt: now() } })
     return json(200, { url: link.url, headers: link.headers, maxBytes: n })
   }
 
@@ -369,7 +389,8 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
       await store.claim(r.id, by, LEASE_MS)
       out.push(r)
     }
-    return json(200, { reports: out })
+    // `revision` is what this Mac is being shown; it goes back with the settle so a report that grew in between is not settled.
+    return json(200, { reports: out.map((r) => ({ ...r, revision: reportRevision(r) })) })
   }
 
   async function agentFile(req: Request, id: string, file: string): Promise<Response> {
@@ -389,7 +410,11 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const got = await readBody(req, BODY_CAP, true); if ('res' in got) return got.res // no body is expected; one past the cap is refused
     const r = isReportId(id) ? await store.get(id) : null
     if (!r) return notFound()
-    if (!(await store.settle(id, by))) return json(409, { error: 'this report was not claimed by this Mac' })
+    const revision = typeof got.body.revision === 'string' ? got.body.revision : null
+    if (!revision) return bad('revision is needed: the one the list gave for this report')
+    const settled = await store.settle(id, by, revision)
+    if (settled === 'unclaimed') return json(409, { error: 'this report was not claimed by this Mac' })
+    if (settled === 'stale') return json(409, { error: 'this report changed after it was listed; list again', stale: true })
     const moves = mayMove(lastStatus(r), 'with-freeda')
     if (moves) await store.setStatus(id, { status: 'with-freeda', by: FLOW['with-freeda'].actor, at: iso(now()) }, lastStatus(r))
     await store.moveCollected(id)

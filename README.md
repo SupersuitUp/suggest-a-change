@@ -170,10 +170,10 @@ const h = createReportHandlers({
 | `POST /api/reports/:id/finalize` | `finalize` | 200, 401, 404, 409 (not arrived yet), 422 (contents are not the declared type) |
 | `GET /api/reports/mine` | `mine` | 200, 401 |
 | `GET /api/reports/:id` | `one(req, id)` | 200, 401, 404 (missing and not yours look the same) |
-| `POST /api/reports/:id/append` | `append(req, id)` | 200, 400, 401, 404 |
+| `POST /api/reports/:id/append` | `append(req, id)` | 200, 400, 401, 404 (not the owner's: same as missing), 409 (the suggestion has ended) |
 | `GET /api/agent/reports` | `agentList` | 200 `{ reports }`: one page (20, oldest first) of what is open for this Mac, each claimed for ten minutes; a report whose files are still arriving waits up to an hour |
 | `GET /api/agent/reports/:id/files/:file` | `agentFile(req, id, file)` | 200 `{ url, expiresAt, type, bytes, sha256 }` (the link lives five minutes), 404 |
-| `POST /api/agent/reports/:id/settle` | `agentSettle` | 200, 409 |
+| `POST /api/agent/reports/:id/settle` | `agentSettle` | body `{ revision }` (the one the list gave this report): 200, 400 (no revision), 409 (not claimed, or `stale`: something was added since the list, so the report is offered again) |
 | `POST /api/agent/reports/:id/claim-approval` | `agentClaimApproval` | 200, or 409 `{ claimedBy }` |
 | `POST /api/agent/reports/:id/status` | `agentStatus` | 200, 400, 409 |
 
@@ -181,11 +181,13 @@ A client adapter's `uploadPart` asks `upload-url`, PUTs the bytes straight to st
 
 The role stored on a report comes from the signed-in member and the `maintainers` list. A `who` sent by the phone is ignored; a report carrying `timeline`, `status`, `plan` or `decision` is refused. `sniffType(firstBytes)` names a file by its bytes (jpeg, png, webp, heic/heif, gif, mp4/mov, webm, m4a/aac, mp3, wav, ogg/opus; anything else is `null`) and `finalize` refuses a file whose bytes are not the type it was declared as.
 
+**Settle carries a revision.** `agentList` gives each report a `revision`; the Mac sends it back with `settle`, and the store settles only if the report still has exactly that content. A follow-up or file that arrived in between answers 409 `stale`, drops the claim, and the next list offers the report with the addition. Adapters compute the same value with `reportRevision`.
+
 **The collector MUST verify.** `agentFile` answers the verified `bytes` and `sha256`; a Mac that downloads the link must check both before it trusts the file.
 
 **The approval.** Moves before the owner is asked (`with-freeda`, `planned`, `waiting-on-owner`) need no claim. Leaving `waiting-on-owner`, starting `being-made` and any end status need the Mac that holds the approval (taken atomically if nobody holds it, otherwise 409 with who does). The holder can release it, and it lapses after seven days.
 
-**What a storage adapter implements** (`HostedStore`). Every method that changes a report is narrow and atomic: `put` is create-only (`created`, `exists`, or `limit` when the member's day is full, counted in the same transaction), and `setFile`, `addFollowUp`, `setStatus(expectFrom)`, `claimApproval`, `claim`, `settle` and `reopen` each change one thing. A real adapter implements these with a transaction or a precondition, never "read the report, change a copy, write it back": that rolls back a status or a claim written in between. Upload links must be create-only and one-time with the size and type fixed in their conditions (a Firebase or S3 signed PUT with `if-generation-match: 0` or `If-None-Match: *`), `discard` must delete a refused object, and `readUrl` links must expire after `ttlMs`.
+**What a storage adapter implements** (`HostedStore`). Every method that changes a report is narrow and atomic: `put` is create-only (`created`, `exists`, or `limit` when the member's day is full, counted in the same transaction), and `setFile` (never replaces a verified entry; an older pending never replaces a newer one), `addFollowUp` (the caps, a reused file name and an ended report are checked inside the write), `setStatus(expectFrom)`, `claimApproval`, `claim`, `settle` and `reopen` each change one thing. A real adapter implements these with a transaction or a precondition, never "read the report, change a copy, write it back": that rolls back a status or a claim written in between. Upload links must be create-only and one-time with the size and type fixed in their conditions (a Firebase or S3 signed PUT with `if-generation-match: 0` or `If-None-Match: *`), `discard` must delete a refused object, and `readUrl` links must expire after `ttlMs`.
 
 **Every adapter must pass the conformance suite**, against the adapter and its real storage:
 
