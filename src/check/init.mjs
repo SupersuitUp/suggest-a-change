@@ -115,7 +115,7 @@ export function initApp({ repo, app, owner = 'Owner' }) {
   const cfgPath = join(root, 'home-screen.json')
   if (existsSync(cfgPath)) { try { cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) } catch { cfg = {} } }
   const appDir = appDirFor(root, cfg)
-  if (!(relative(root, resolve(root, appDir)) && !relative(root, resolve(root, appDir)).startsWith('..') && !isAbsolute(relative(root, resolve(root, appDir))))) throw new UsageError(`${appDir}: the app directory is outside ${root}, so init will not write there`)
+  if (relative(root, resolve(root, appDir)).startsWith('..') || isAbsolute(relative(root, resolve(root, appDir)))) throw new UsageError(`${appDir}: the app directory is outside ${root}, so init will not write there`)
   if (!existsSync(join(root, appDir))) throw new UsageError(`${appDir}: no Next app directory here; init wires the app router (pass nothing else, or create the app first)`)
   const id = (app ?? String(pkg.name ?? 'app').replace(/^@[^/]+\//, '')).replace(/[^A-Za-z0-9-]/g, '-').replace(/^-+|-+$/g, '') || 'app'
   const log = { did: [], kept: [], notes: [] }

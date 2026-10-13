@@ -30,6 +30,7 @@ export class UsageError extends Error {}
 //   code      the source with comments, strings and JSX text blanked
 //   elements  every JSX element name, e.g. "SuggestEntry" or "ui.Shell"
 //   attrs     every JSX attribute name, e.g. "data-suggest-entry"
+//   jsxExprs  the code of every {expression} inside JSX (attribute values and children)
 // It is not a parser: it decides "is this < the start of JSX" from the token before it, and a regular
 // expression literal holding a quote can confuse it. Nothing it finds inside a string literal counts.
 const JSX_AFTER = new Set(['return', 'yield', 'await', 'case', 'default', 'else', 'in', 'of', 'do', 'void', 'typeof', 'delete', 'throw'])
@@ -38,7 +39,7 @@ const blankOf = (t) => t.replace(/[^\n]/g, ' ')
 export function scan(src) {
   const n = src.length
   let i = 0, plain = '', code = ''
-  const elements = new Set(), attrs = new Set()
+  const elements = new Set(), attrs = new Set(), jsxExprs = []
   const emit = (raw, c = raw) => { plain += raw; code += c }
   const emitBlank = (raw) => emit(raw, blankOf(raw))
   const stringEnd = (q) => { let j = i + 1; while (j < n && src[j] !== q && src[j] !== '\n') j += src[j] === '\\' ? 2 : 1; return Math.min(j + 1, n) }
@@ -48,8 +49,11 @@ export function scan(src) {
     if (src[i] === '/' && src[i + 1] === '*') { let j = src.indexOf('*/', i + 2); j = j < 0 ? n : j + 2; emitBlank(src.slice(i, j)); i = j; return true }
     return false
   }
+  const jsxExpr = () => { const at = code.length; emit('{'); i++; scanCode(true); jsxExprs.push(code.slice(at + 1, -1)) }
   const jsxStart = () => {
     if (!/[A-Za-z_$>]/.test(src[i + 1] ?? '')) return false
+    // A TSX generic arrow: `<T,>(x) =>` or `<T extends X>(x) =>` (not JSX, whatever precedes it).
+    if (/^<(?:const\s+)?[A-Za-z_$][\w$]*\s*(?:,|extends\s+[^=\s])/.test(src.slice(i, i + 80))) return false
     let k = code.length - 1
     while (k >= 0 && /\s/.test(code[k])) k--
     if (k < 0) return true
@@ -95,7 +99,7 @@ export function scan(src) {
       const c = src[i]
       if (c === '/' && src[i + 1] === '>') { emitBlank('/>'); i += 2; return }
       if (c === '>') { emitBlank('>'); i++; children(); return }
-      if (c === '{') { emit('{'); i++; scanCode(true); continue }
+      if (c === '{') { jsxExpr(); continue }
       const a = /^[\w$:.-]+/.exec(src.slice(i, i + 200))
       if (!a) { emitBlank(c); i++; continue }
       attrs.add(a[0]); emitBlank(a[0]); i += a[0].length
@@ -104,7 +108,7 @@ export function scan(src) {
       emitBlank('='); i++
       tagSpace()
       if (src[i] === '"' || src[i] === "'") skipString()
-      else if (src[i] === '{') { emit('{'); i++; scanCode(true) }
+      else if (src[i] === '{') jsxExpr()
       else if (src[i] === '<') element()
     }
   }
@@ -114,14 +118,14 @@ export function scan(src) {
       while (j < n && src[j] !== '<' && src[j] !== '{') j++
       if (j > i) { emitBlank(src.slice(i, j)); i = j }
       if (i >= n) return
-      if (src[i] === '{') { emit('{'); i++; scanCode(true); continue }
+      if (src[i] === '{') { jsxExpr(); continue }
       if (src[i + 1] === '/') { let e = src.indexOf('>', i); e = e < 0 ? n : e + 1; emitBlank(src.slice(i, e)); i = e; return }
       if (/[A-Za-z_$>]/.test(src[i + 1] ?? '')) element()
       else { emitBlank('<'); i++ }
     }
   }
   scanCode(false)
-  return { plain, code, elements, attrs }
+  return { plain, code, elements, attrs, jsxExprs }
 }
 
 /** The source with comments blanked (strings and JSX text kept). */
@@ -135,30 +139,48 @@ function rendersDirectly(s) {
     /\bcreateElement\(\s*(?:[\w$]+\.)?SuggestEntry\b|\bjsxs?\(\s*(?:[\w$]+\.)?SuggestEntry\b/.test(s.code)
 }
 
-// A name is "used" when the file renders it as an element (or hands it to createElement / jsx).
-function used(s, name) {
+// A name is "used" when the file renders it as an element, hands it to createElement / jsx, passes it as a
+// value inside JSX (`<Providers Layout={Shell}>`, `components={{ Shell }}`), or renders a const it was
+// assigned to (`const W = Shell; <W />`). Calling something with it (`String(Shell)`) is not using it.
+function used(s, name, seen = new Set()) {
+  if (seen.has(name) || seen.size > 4) return false
+  seen.add(name)
   for (const e of s.elements) if (e === name || e.startsWith(name + '.')) return true
-  return new RegExp(`\\b(?:createElement|jsxs?)\\(\\s*${esc(name)}\\b`).test(s.code)
+  if (new RegExp(`\\b(?:createElement|jsxs?)\\(\\s*${esc(name)}\\b`).test(s.code)) return true
+  const asValue = new RegExp(`(?:^|[\\s,\\[{:?])${esc(name)}(?=\\s*(?:$|[,\\]}:]))`)
+  if (s.jsxExprs.some((x) => asValue.test(x))) return true
+  for (const m of s.code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*(?:;|\n|$)/g)) if (m[2] === name && used(s, m[1], seen)) return true
+  return false
 }
 
-// The local files a file hands components to: each import with the names it binds (followed only when one of
-// them is rendered), and re-exports (followed always: a barrel file renders nothing itself).
-function hopsOf(plain) {
-  const hops = []
+const items = (list) => list.split(',').map((t) => t.trim()).filter((t) => t && !/^type\s/.test(t)).map((t) => { const as = t.split(/\s+as\s+/); return { from: as[0].trim(), to: (as[1] ?? as[0]).trim() } })
+
+// What a file imports (each local name with the name it has in the other file), re-exports, and exports.
+function infoOf(plain) {
+  const imports = [], reexports = [], locals = [], declared = new Set()
   for (const m of plain.matchAll(/\bimport\s+(?!\()(type\s+)?([^'";]*?)\s*from\s*['"]([^'"]+)['"]/g)) {
     if (m[1]) continue
-    const clause = m[2], names = []
+    const clause = m[2], list = []
     const def = /^([A-Za-z_$][\w$]*)/.exec(clause)
-    if (def) names.push(def[1])
+    if (def) list.push({ local: def[1], imported: 'default' })
     const named = /\{([^}]*)\}/.exec(clause)
-    if (named) for (const part of named[1].split(',')) { const t = part.trim(); if (!t || /^type\s/.test(t)) continue; const as = t.split(/\s+as\s+/); names.push((as[1] ?? as[0]).trim()) }
+    if (named) for (const it of items(named[1])) list.push({ local: it.to, imported: it.from })
     const ns = /\*\s*as\s+([A-Za-z_$][\w$]*)/.exec(clause)
-    if (ns) names.push(ns[1])
-    hops.push({ spec: m[3], names })
+    if (ns) list.push({ local: ns[1], imported: '*' })
+    imports.push({ spec: m[3], list })
   }
-  for (const m of plain.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[\w$]+\.)?(?:dynamic|lazy)\(\s*\(\s*\)\s*=>\s*import\(\s*['"]([^'"]+)['"]/g)) hops.push({ spec: m[2], names: [m[1]] })
-  for (const m of plain.matchAll(/\bexport\s*(?:\*(?:\s*as\s+[\w$]+)?|\{[^}]*\})\s*from\s*['"]([^'"]+)['"]/g)) hops.push({ spec: m[1], names: null })
-  return hops
+  for (const m of plain.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[\w$]+\.)?(?:dynamic|lazy)\(\s*\(\s*\)\s*=>\s*import\(\s*['"]([^'"]+)['"]/g)) imports.push({ spec: m[2], list: [{ local: m[1], imported: 'default' }] })
+  for (const m of plain.matchAll(/\bexport\s*(type\s*)?\{([^}]*)\}(\s*from\s*['"]([^'"]+)['"])?/g)) {
+    if (m[1]) continue
+    if (m[4]) reexports.push({ spec: m[4], list: items(m[2]).map((it) => ({ imported: it.from, exported: it.to })) })
+    else for (const it of items(m[2])) { locals.push({ local: it.from, exported: it.to }); declared.add(it.to) }
+  }
+  for (const m of plain.matchAll(/\bexport\s*\*\s*(?:as\s+([A-Za-z_$][\w$]*)\s*)?from\s*['"]([^'"]+)['"]/g)) reexports.push(m[1] ? { spec: m[2], ns: m[1] } : { spec: m[2], star: true })
+  for (const m of plain.matchAll(/\bexport\s+(?:declare\s+)?(?:const|let|var|function\*?|async\s+function\*?|class)\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1])
+  const def = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*(?:;|\n|$)/.exec(plain)
+  if (def && !/^(function|class|async)$/.test(def[1])) locals.push({ local: def[1], exported: 'default' })
+  if (/\bexport\s+default\b/.test(plain)) declared.add('default')
+  return { imports, reexports, locals, declared }
 }
 
 const scanned = new Map()
@@ -166,27 +188,55 @@ function scanFile(file) {
   const text = readFileSync(file, 'utf8')
   const hit = scanned.get(file)
   if (hit && hit.text === text) return hit.s
-  const s = scan(text)
+  const sc = scan(text)
+  const s = { ...sc, ...infoOf(sc.plain) }
   scanned.set(file, { text, s })
   return s
 }
 
-// A file "renders the entry" when it does itself, or when it renders a component it imports (the binding
-// must appear as an element in the importing file) that does, to DEPTH hops. Which component inside an
-// imported file renders the entry is not checked.
-function rendersEntry(file, aliases, depth, seen = new Set()) {
-  if (seen.has(file)) return false
-  seen.add(file)
+// "Renders the entry", with the import names carried through. fileRenders: the file renders it, directly or
+// by rendering an import (the local name must be used in the file) whose export renders it. exportRenders:
+// the module's export `name` renders it ('*' means any export). A re-export passes the NAME on, so a barrel
+// that also re-exports an entry-bearing Shell covers nobody who only renders its Button. Which component
+// inside a file that defines the name renders the entry is not checked; the file is.
+function fileRenders(file, aliases, depth, seen) {
+  const key = 'F:' + file
+  if (seen.has(key)) return false
+  seen.add(key)
   const s = scanFile(file)
   if (rendersDirectly(s)) return true
   if (depth <= 0) return false
-  for (const hop of hopsOf(s.plain)) {
-    if (hop.names && !hop.names.some((b) => used(s, b))) continue
-    const target = resolveImport(file, hop.spec, aliases)
-    if (target && rendersEntry(target, aliases, depth - 1, seen)) return true
+  for (const imp of s.imports) {
+    const live = imp.list.filter((it) => used(s, it.local))
+    if (!live.length) continue
+    const t = resolveImport(file, imp.spec, aliases)
+    if (t && live.some((it) => exportRenders(t, it.imported, aliases, depth - 1, seen))) return true
   }
   return false
 }
+
+function exportRenders(file, name, aliases, depth, seen) {
+  const key = `E:${file}#${name}`
+  if (seen.has(key)) return false
+  seen.add(key)
+  const s = scanFile(file)
+  const via = (spec, as) => { const t = resolveImport(file, spec, aliases); return !!t && depth > 0 && exportRenders(t, as, aliases, depth - 1, seen) }
+  let named = false
+  for (const r of s.reexports) {
+    if (r.ns && (name === '*' || name === r.ns)) { named = true; if (via(r.spec, '*')) return true }
+    for (const it of r.list ?? []) if (name === '*' || it.exported === name) { named = true; if (via(r.spec, it.imported)) return true }
+  }
+  for (const l of s.locals) {
+    if (name !== '*' && l.exported !== name) continue
+    for (const imp of s.imports) for (const it of imp.list) if (it.local === l.local) { named = true; if (via(imp.spec, it.imported)) return true }
+  }
+  if (named) return false
+  if ((name === '*' || s.declared.has(name)) && fileRenders(file, aliases, depth, seen)) return true
+  for (const r of s.reexports) if (r.star && via(r.spec, name)) return true
+  return false
+}
+
+const rendersEntry = (file, aliases, depth) => fileRenders(file, aliases, depth, new Set())
 
 function walk(dir, keep) {
   if (!existsSync(dir)) return []

@@ -1,7 +1,7 @@
 // The screen check and init, against fixture apps (test/fixtures/, made-up apps with a few files each).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -256,6 +256,42 @@ test("init refuses an app directory outside the repo", () => {
   const d = temp("init-app");
   writeFileSync(join(d, "home-screen.json"), JSON.stringify({ home: ["/"], appDir: "../elsewhere" }));
   assert.equal(run("init.mjs", ["--repo", d]).status, 2);
+  rmSync(d, { recursive: true });
+});
+
+test("a barrel that also re-exports the shell does not cover a layout that renders only its Button", () => {
+  const p = checkSuggestEverywhere({ repo: fx("barrel-false-green") });
+  assert.equal(p.length, 2, p.join("\n")); // /shelf through a named barrel, /starred through an export * barrel
+  assert.ok(p.some((x) => /the screen \/shelf has no/.test(x)) && p.some((x) => /the screen \/starred has no/.test(x)));
+});
+
+test("a name carried through import-then-export, export default, renamed and star re-exports still reaches the entry", () => {
+  const r = inspectSuggestEverywhere({ repo: fx("barrel-ok") });
+  assert.deepEqual(r.problems, []);
+  assert.equal(r.checked.length, 6);
+});
+
+test("a shell passed as a prop value or through a const alias counts as rendered", () => {
+  assert.deepEqual(checkSuggestEverywhere({ repo: fx("shell-as-value") }), []);
+});
+
+test("a TSX generic arrow is not read as a JSX element", () => {
+  const s = scan("const f = <T,>(x: T) => x;\nconst g = <U extends object>(x: U) => <SuggestEntry />;\nconst h = <const V extends string>(v: V) => v;\nexport default function L() { return <p>{f(1)}<b/></p>; }");
+  assert.deepEqual([...s.elements].sort(), ["SuggestEntry", "b", "p"]);
+});
+
+test("init accepts an app directory that is the repo root", () => {
+  const d = mkdtempSync(join(tmpdir(), "sac-root-"));
+  writeFileSync(join(d, "package.json"), JSON.stringify({ name: "rootapp", scripts: { check: "true" } }));
+  writeFileSync(join(d, "home-screen.json"), JSON.stringify({ home: ["/"], appDir: "." }));
+  writeFileSync(join(d, "layout.tsx"), "export default function L({ children }) {\n  return <html><body>{children}</body></html>\n}\n");
+  writeFileSync(join(d, "page.tsx"), "export default function P() { return <main>Home</main> }\n");
+  mkdirSync(join(d, "shelf"));
+  writeFileSync(join(d, "shelf/page.tsx"), "export default function P() { return <main>Shelf</main> }\n");
+  const r = run("init.mjs", ["--repo", d]);
+  assert.equal(r.status, 0, r.stderr);
+  const c = run("check.mjs", ["--repo", d]);
+  assert.equal(c.status, 0, c.stdout + c.stderr);
   rmSync(d, { recursive: true });
 });
 
