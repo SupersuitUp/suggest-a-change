@@ -24,6 +24,7 @@ export function draftKey({ app, account }: { app: string; account: string }): st
   return `sac:${app}:${account}`
 }
 
+/** A draft with `queued: true` is read-only for a UI: the next saveDraft replaces it with a fresh one. */
 export async function loadDraft(store: Store, key: string): Promise<Draft | undefined> {
   return store.get<Draft>('kv', key)
 }

@@ -98,6 +98,18 @@ describe('reports', () => {
     expect(fake.parts).toContain(`${report.id}/bad.png#0`)
   })
 
+  it('if the outbox write throws, the draft is not marked queued and the next save keeps the same draft and id', async () => {
+    const { store, outbox, key, report } = await setup()
+    const broken = { async enqueue() { throw new Error('storage full') } }
+    await expect(queueReport({ store, outbox: broken, report, draft: key })).rejects.toThrow('storage full')
+    expect((await loadDraft(store, key))?.queued).toBeUndefined()
+    const again = await saveDraft(store, key, { words: 'still typing' })
+    expect(again.reportId).toBe(report.id)
+    expect(again.words).toBe('still typing')
+    await queueReport({ store, outbox, report, draft: key })
+    expect(await outbox.pending()).toHaveLength(1)
+  })
+
   it('a failed upload keeps the draft and retries', async () => {
     const { store, fake, outbox, key, report } = await setup()
     await store.put('blobs', 'img-1', new Blob(['png'], { type: 'image/png' }))

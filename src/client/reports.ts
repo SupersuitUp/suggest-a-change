@@ -45,11 +45,14 @@ export async function queueReport(
   },
 ): Promise<void> {
   const at = now()
+  await outbox.enqueue({ id: opId('report', report.id), kind: 'report', body: { report, draft }, at })
+  // Marked only AFTER the report is safely in the outbox: if the enqueue throws, the draft is still the
+  // person's live draft. A save between the two writes joins this report, and the clear is guarded by the
+  // report id, so those words are never wiped.
   if (draft) {
     const d = await loadDraft(store, draft)
     if (d && d.reportId === report.id && !d.queued) await store.put('kv', draft, { ...d, queued: true })
   }
-  await outbox.enqueue({ id: opId('report', report.id), kind: 'report', body: { report, draft }, at })
   let n = 0
   for (const p of parts) {
     n++
