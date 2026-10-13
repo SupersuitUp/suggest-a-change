@@ -13,14 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: [20, 22]
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
-      # Zero dependencies, so there is nothing to install.
-      - run: npm test
+      - run: npm ci
+      # Typecheck, client tests, build, the node tests (which check the built tree), and the command.
+      - run: npm run check
       # The package must run the way the README says, from outside the repo.
       - run: |
           cd "$RUNNER_TEMP"

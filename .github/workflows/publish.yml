@@ -1,29 +1,21 @@
 # Publish @supersuit/suggest-a-change to npm through OIDC trusted publishing.
 #
-# WHY THIS EXISTS. Publishing by hand needed a one-time password in a browser on every
-# release, which put a human round trip in front of every fix reaching the wikis that
-# consume this package. On 2026-09-15 that blocked a CSS fix from reaching pcs.wiki and
-# victory-book-wiki for the whole day while every other wiki already had it.
+# WHY. Publishing by hand needs a one-time password in a browser on every release, which puts a human
+# round trip in front of every fix reaching the apps that consume this package. npm is also restricting
+# tokens that bypass 2FA, so a long-lived automation token in a secret would work today and stop working
+# on a date somebody else picked.
 #
-# It is also the direction npm is forcing. Their own banner: "npm tokens that bypass 2FA
-# are being restricted, account changes (Aug 2026) and direct publishing (Jan 2027)."
+# HOW THE TRUST WORKS. There is no token here and no NODE_AUTH_TOKEN, deliberately. GitHub mints a
+# short-lived OIDC identity for this workflow, npm verifies it against the trusted publisher configured on
+# the package, and the publish is authorised by WHO ran it rather than by a secret anyone holding it could
+# use. The trusted-publisher record on npm names this repository AND this filename, so renaming this file
+# breaks publishing until the record is updated. That is the intended behaviour rather than a trap.
 #
-# Copied from @supersuit/superskill on 2026-09-28, which copied it from docusaurus-preset-wiki, where every comment below was earned.
-# The build and fixture steps are gone because this package has no build and no fixture site.
-# A long-lived automation token in a secret would work today and stop working on a date
-# somebody else picked.
-#
-# HOW THE TRUST WORKS. There is no token here and no NODE_AUTH_TOKEN, deliberately.
-# GitHub mints a short-lived OIDC identity for this workflow, npm verifies it against the
-# trusted publisher configured on the package, and the publish is authorised by WHO ran it
-# rather than by a secret anyone holding it could use. The trusted-publisher record on npm
-# names this repository AND this filename, so renaming this file breaks publishing until
-# the record is updated. That is the intended behaviour rather than a trap.
-#
-# HOW TO RELEASE. Bump the version in package.json, add the CHANGELOG entry, commit, then:
+# HOW TO RELEASE. Bump the version in package.json, add the CHANGELOG entry, commit (with the lockfile),
+# then:
 #     git tag v0.1.0 && git push origin v0.1.0
-# The tag is the trigger. The version guard below refuses a tag that disagrees with
-# package.json, because a mismatch publishes a version nobody wrote a changelog for.
+# The tag is the trigger. The version guard below refuses a tag that disagrees with package.json, because
+# a mismatch publishes a version nobody wrote a changelog for.
 name: publish
 
 on:
@@ -45,53 +37,39 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # npm checks the environment claim inside the OIDC token, so a record that NAMES an
-    # environment the job does not declare fails as ENEEDAUTH, with nothing said about
-    # environments. This package's record names none: it is created with
+    # npm checks the environment claim inside the OIDC token, so a trusted-publisher record that NAMES an
+    # environment the job does not declare fails as ENEEDAUTH, with nothing said about environments. This
+    # package's record names none (created with
     #     npm trust github @supersuit/suggest-a-change --file publish.yml \
     #       --repo SupersuitUp/suggest-a-change --allow-publish --allow-stage-publish
-    # and `npm trust list @supersuit/suggest-a-change` shows no environment, so any value here
-    # passes. `blank` is kept to match docusaurus-preset-wiki, whose record also names none
-    # and which has published every release through this exact shape. If a record is ever
-    # given an environment, this line must change to match it in the same sitting.
+    # and `npm trust list` shows no environment), so any value here passes. If a record is ever given an
+    # environment, this line must change to match it in the same sitting.
     #
-    # The FIRST publish of a new package cannot go through this workflow: npm attaches a
-    # trusted publisher to an existing package, so 0.1.0 is published by hand (web 2FA)
-    # and the record created right after with the `npm trust` line above. Every release since is a tag push.
+    # The FIRST publish of a new package cannot go through this workflow: npm attaches a trusted publisher
+    # to an existing package, so 0.1.0 is published by hand (web 2FA) and the record created right after
+    # with the line above. Every release since is a tag push.
     environment: blank
     steps:
       - uses: actions/checkout@v5
 
       # NO `registry-url` HERE, AND THAT IS THE WHOLE TRICK.
       #
-      # Every published example of this workflow sets `registry-url: https://registry.npmjs.org`,
-      # and with OIDC it is the thing that breaks the publish. setup-node responds to that
-      # option by writing an .npmrc containing
-      #     //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
-      # and exporting NODE_AUTH_TOKEN as a placeholder. npm finds a credential already
-      # configured, so it never attempts the OIDC exchange, sends the placeholder instead, and
-      # the registry rejects it.
+      # With OIDC, setting `registry-url` is the thing that breaks the publish. setup-node responds to it by
+      # writing an .npmrc with an _authToken line and exporting NODE_AUTH_TOKEN as a placeholder. npm finds
+      # a credential already configured, never attempts the OIDC exchange, sends the placeholder, and the
+      # registry rejects it. The rejection is a 404 rather than a 401 (npm answers an unauthenticated PUT
+      # with "not found" so private names cannot be probed), so the failure reads as "the package does not
+      # exist" and says nothing about auth.
       #
-      # The rejection is a 404 rather than a 401, because npm answers an unauthenticated PUT
-      # with "not found" so that private package names cannot be probed. So the failure reads
-      # as "the package does not exist" for a package that plainly does, and says nothing
-      # about auth at all. Cost one release on 2026-09-15 (run 34978380965).
-      #
-      # Omitting it leaves npm with no configured credential, which is the state that makes it
-      # perform the OIDC exchange. The default registry is already registry.npmjs.org.
+      # Omitting it leaves npm with no configured credential, which is the state that makes it perform the
+      # OIDC exchange. The default registry is already registry.npmjs.org.
       - uses: actions/setup-node@v5
         with:
           node-version: 24
 
-      # PINNED TO 11.x, NOT `npm@latest`.
-      #
-      # OIDC trusted publishing landed in npm 11.5.1. Writing `npm@latest` here picked up
-      # npm 12.0.2 on 2026-09-15, which did not perform the exchange at all: it went straight
-      # to ENEEDAUTH, "you need to authorize this machine using npm login", as though trusted
-      # publishing did not exist. Reaching for the newest npm to be safe is what broke it.
-      #
-      # Raise this deliberately, after checking that the new major still does the exchange,
-      # rather than by floating it.
+      # PINNED TO 11.x, NOT `npm@latest`. OIDC trusted publishing landed in npm 11.5.1, and a newer major
+      # once skipped the exchange entirely and went straight to ENEEDAUTH. Raise this deliberately, after
+      # checking that the new major still does the exchange, rather than by floating it.
       - name: Pin npm to a version that performs the OIDC exchange
         run: |
           npm install -g npm@11
@@ -109,9 +87,11 @@ jobs:
           fi
           echo "OIDC identity present"
 
-      # Zero runtime dependencies and no lockfile, so there is nothing to install. The
-      # package is the product, so it is tested before it is published, never after.
-      - run: npm test
+      # The package ships a built tree (dist/), so it is installed from the lockfile, checked in full
+      # (typecheck, tests, build, and the node tests that assert every export target exists) and built
+      # BEFORE it is published, never after. `npm publish` ships whatever dist/ holds at that moment.
+      - run: npm ci
+      - run: npm run check
 
       - name: Refuse a tag that disagrees with package.json
         if: startsWith(github.ref, 'refs/tags/v')
@@ -141,8 +121,8 @@ jobs:
         # credential; ANY configured token takes precedence over it and puts the 2FA prompt
         # back, or fails as an unexplained 404.
         #
-        # The assertion below is cheap and catches the regression directly, because the
-        # symptom is otherwise indistinguishable from a missing package.
+        # The assertion below catches the regression directly, because the symptom is otherwise
+        # indistinguishable from a missing package.
         run: |
           if [ -n "${NODE_AUTH_TOKEN:-}" ] || grep -qs "_authToken" "${NPM_CONFIG_USERCONFIG:-/dev/null}"; then
             echo "A credential is configured, so npm will not attempt the OIDC exchange."

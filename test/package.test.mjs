@@ -10,9 +10,30 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 
+// Every file path an export (including each condition of a conditional export) or a bin points at.
+function targets() {
+  const out = [];
+  const walk = (name, v) => (typeof v === "string" ? out.push([name, v]) : Object.entries(v).forEach(([c, t]) => walk(`${name}[${c}]`, t)));
+  for (const [k, v] of Object.entries(pkg.exports)) walk(`export ${k}`, v);
+  for (const [k, v] of Object.entries(pkg.bin)) walk(`bin ${k}`, v);
+  return out;
+}
+
+// "./client" points into dist/, which `npm run build` makes, so this test runs after the build.
 test("every export and bin target exists", () => {
-  for (const [k, v] of Object.entries(pkg.exports)) assert.ok(existsSync(join(ROOT, v)), `export ${k} -> ${v} does not exist`);
-  for (const [k, v] of Object.entries(pkg.bin)) assert.ok(existsSync(join(ROOT, v)), `bin ${k} -> ${v} does not exist`);
+  for (const [name, v] of targets()) assert.ok(existsSync(join(ROOT, v)), `${name} -> ${v} does not exist (run npm run build)`);
+});
+
+test("the published file list covers every export and bin target", () => {
+  const covers = (path) => pkg.files.some((f) => { const p = f.replace(/^\.\//, ""); return path.replace(/^\.\//, "") === p || (p.endsWith("/") && path.replace(/^\.\//, "").startsWith(p)); });
+  for (const [name, v] of targets()) {
+    if (v === "./package.json") continue; // npm always ships package.json
+    assert.ok(covers(v), `${name} -> ${v} is not covered by "files", so it would not be published`);
+  }
+});
+
+test('"./client" ships types and ESM', () => {
+  assert.deepEqual(Object.keys(pkg.exports["./client"]).sort(), ["import", "types"]);
 });
 
 test('the "." export is the contract and the package has no runtime dependencies', () => {
