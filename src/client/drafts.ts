@@ -14,22 +14,31 @@ export interface Draft {
   /** Keys of attachments held in the `blobs` store (voice takes, images, one video). */
   attachments: string[]
   updatedAt: number
+  /** Set when the draft's report has been put in the outbox. The next save then starts a new draft. */
+  queued?: boolean
 }
 
-export const draftKey = ({ app, account }: { app: string; account: string }): string => `sac:${app}:${account}`
+/** `app` may not contain ':' (the account may), so two different pairs can never make the same key. */
+export function draftKey({ app, account }: { app: string; account: string }): string {
+  if (app.includes(':')) throw new Error(`an app name cannot contain ":" (got ${JSON.stringify(app)})`)
+  return `sac:${app}:${account}`
+}
 
 export async function loadDraft(store: Store, key: string): Promise<Draft | undefined> {
   return store.get<Draft>('kv', key)
 }
 
-/** Saves what the person has so far. The first save of a draft makes its report id; later saves keep it. */
+/** Saves what the person has so far. The first save of a draft makes its report id; later saves keep it,
+ *  until the report is queued: a save after that starts a new draft with a new id, so words typed while
+ *  the old report is still sending are never part of it and never lost when it lands. */
 export async function saveDraft(
   store: Store,
   key: string,
   fields: Partial<Pick<Draft, 'kind' | 'words' | 'attachments'>> = {},
   { now = () => Date.now(), makeId = () => newReportId() }: { now?: () => number; makeId?: () => string } = {},
 ): Promise<Draft> {
-  const had = await loadDraft(store, key)
+  const queuedBefore = await loadDraft(store, key)
+  const had = queuedBefore?.queued ? undefined : queuedBefore
   const draft: Draft = {
     reportId: had?.reportId ?? makeId(),
     words: '',
@@ -42,6 +51,8 @@ export async function saveDraft(
   return draft
 }
 
-export async function clearDraft(store: Store, key: string): Promise<void> {
+/** Clears the draft. With `reportId`, only if the draft still belongs to that report. */
+export async function clearDraft(store: Store, key: string, reportId?: string): Promise<void> {
+  if (reportId !== undefined && (await loadDraft(store, key))?.reportId !== reportId) return
   await store.del('kv', key)
 }

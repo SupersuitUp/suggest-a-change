@@ -42,24 +42,66 @@ async function setup() {
 }
 
 describe('reports', () => {
-  it('sending twice makes one report', async () => {
+  it('sending twice makes one report: two queues before a drain are one submit that lands', async () => {
     const { store, fake, outbox, key, report } = await setup()
-    await queueReport({ outbox, report, draft: key })
-    await queueReport({ outbox, report, draft: key })
+    await queueReport({ store, outbox, report, draft: key })
+    await queueReport({ store, outbox, report, draft: key })
+    expect(await outbox.pending()).toHaveLength(1)
     await outbox.drain()
-    await queueReport({ outbox, report, draft: key })
-    await outbox.drain()
-    expect(fake.reports.size).toBe(1)
+    expect(fake.calls.submit).toBe(1)
     expect([...fake.reports.keys()]).toEqual([report.id])
-    expect(fake.calls.submit).toBe(2)
     expect(await outbox.pending()).toEqual([])
     expect(await loadDraft(store, key)).toBeUndefined()
+  })
+
+  it('a replay after landing reaches the adapter again, so the store adapter must dedupe by id', async () => {
+    const { store, fake, outbox, key, report } = await setup()
+    await queueReport({ store, outbox, report, draft: key })
+    await outbox.drain()
+    await queueReport({ store, outbox, report, draft: key })
+    await outbox.drain()
+    expect(fake.calls.submit).toBe(2)
+    expect(fake.reports.size).toBe(1)
+  })
+
+  it('words typed while a report is still sending start a new draft and survive when the report lands', async () => {
+    const { store, fake, outbox, key, report } = await setup()
+    await queueReport({ store, outbox, report, draft: key })
+    const next = await saveDraft(store, key, { words: 'a second thought' })
+    expect(next.reportId).not.toBe(report.id)
+    expect(next.words).toBe('a second thought')
+    expect(next.attachments).toEqual([])
+    await outbox.drain()
+    expect([...fake.reports.keys()]).toEqual([report.id])
+    expect(fake.reports.get(report.id)?.words).toBe('the photos are small')
+    const kept = await loadDraft(store, key)
+    expect(kept).toMatchObject({ reportId: next.reportId, words: 'a second thought' })
+  })
+
+  it('one refused part and the rest landed: the refusal stays, the draft is cleared, a re-queue retries it', async () => {
+    const { store, fake, outbox, key, report } = await setup()
+    await store.put('blobs', 'good', new Blob(['g']))
+    await store.put('blobs', 'bad', new Blob(['b']))
+    const refuseBad = { ...fake.adapter, async uploadPart(id: string, file: string, part: number, bytes: Blob) { return file === 'bad.png' ? { refused: 'that image type is not accepted' } : fake.adapter.uploadPart(id, file, part, bytes) } }
+    const ob = makeOutbox({ store, reach: { check: async () => true, mark() {} }, send: makeReportSender({ store, adapter: refuseBad }) })
+    await queueReport({ store, outbox: ob, report, draft: key, parts: [{ file: 'bad.png', blob: 'bad' }, { file: 'good.png', blob: 'good' }] })
+    await ob.drain()
+    const left = await ob.pending()
+    expect(left.map((o) => o.error)).toEqual(['that image type is not accepted'])
+    expect(fake.parts).toEqual([`${report.id}/good.png#0`])
+    expect(await loadDraft(store, key)).toBeUndefined()
+    // The person tries again: the refused write is replaced by a clean one and is sent.
+    refuseBad.uploadPart = fake.adapter.uploadPart
+    await queueReport({ store, outbox: ob, report, draft: key, parts: [{ file: 'bad.png', blob: 'bad' }] })
+    await ob.drain()
+    expect(await ob.pending()).toEqual([])
+    expect(fake.parts).toContain(`${report.id}/bad.png#0`)
   })
 
   it('a failed upload keeps the draft and retries', async () => {
     const { store, fake, outbox, key, report } = await setup()
     await store.put('blobs', 'img-1', new Blob(['png'], { type: 'image/png' }))
-    await queueReport({ outbox, report, draft: key, parts: [{ file: 'a.png', blob: 'img-1' }] })
+    await queueReport({ store, outbox, report, draft: key, parts: [{ file: 'a.png', blob: 'img-1' }] })
     fake.failUploads = true
     await outbox.drain()
     // The report landed; the picture did not; the person's words and picture are still on the phone.
@@ -76,9 +118,9 @@ describe('reports', () => {
   })
 
   it('a refusal is kept with its reason and never deleted', async () => {
-    const { fake, outbox, key, report } = await setup()
+    const { store, fake, outbox, key, report } = await setup()
     fake.refuse = 'too many reports today'
-    await queueReport({ outbox, report, draft: key })
+    await queueReport({ store, outbox, report, draft: key })
     await outbox.drain()
     const [kept] = await outbox.pending()
     expect(kept.error).toBe('too many reports today')
@@ -89,8 +131,8 @@ describe('reports', () => {
   })
 
   it('a part whose attachment is gone is refused with a reason, not retried forever', async () => {
-    const { outbox, key, report } = await setup()
-    await queueReport({ outbox, report, draft: key, parts: [{ file: 'a.png', blob: 'missing' }] })
+    const { store, outbox, key, report } = await setup()
+    await queueReport({ store, outbox, report, draft: key, parts: [{ file: 'a.png', blob: 'missing' }] })
     await outbox.drain()
     const [kept] = await outbox.pending()
     expect(kept.error).toMatch(/no longer on this device/)
@@ -99,7 +141,7 @@ describe('reports', () => {
   it('the report goes before its parts, in the order they were attached', async () => {
     const { store, fake, outbox, key, report } = await setup()
     for (const k of ['p1', 'p2', 'p3']) await store.put('blobs', k, new Blob([k]))
-    await queueReport({ outbox, report, draft: key, parts: [{ file: 'one', blob: 'p1' }, { file: 'two', blob: 'p2' }, { file: 'three', blob: 'p3' }] })
+    await queueReport({ store, outbox, report, draft: key, parts: [{ file: 'one', blob: 'p1' }, { file: 'two', blob: 'p2' }, { file: 'three', blob: 'p3' }] })
     await outbox.drain()
     expect(fake.parts.map((p: string) => p.split('/')[1])).toEqual(['one#0', 'two#0', 'three#0'])
   })

@@ -38,13 +38,13 @@ describe('the outbox', () => {
 
   it('a write the receiver refuses is kept with the reason, never deleted, and does not block the queue', async () => {
     const store = await fresh()
-    const ob = makeOutbox({ store, reach: { check: async () => true, mark() {} }, send: async (o) => (o.id === 'a-1' ? { refused: 'question domain is not one the operator elected' } : 'done') })
+    const ob = makeOutbox({ store, reach: { check: async () => true, mark() {} }, send: async (o) => (o.id === 'a-1' ? { refused: 'this kind of write is not accepted' } : 'done') })
     await ob.enqueue(op('a-1'))
     await ob.enqueue(op('a-2'))
     await ob.drain()
     const left = await ob.pending()
     expect(left.map((o) => o.id)).toEqual(['a-1'])
-    expect(left[0].error).toMatch(/elected/)
+    expect(left[0].error).toMatch(/not accepted/)
     await ob.drain()
     expect((await ob.pending()).map((o) => o.id)).toEqual(['a-1'])
   })

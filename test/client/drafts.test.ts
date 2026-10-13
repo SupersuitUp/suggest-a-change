@@ -13,6 +13,11 @@ describe('drafts', () => {
     expect(draftKey({ app: 'us', account: 'alex' })).toBe('sac:us:alex')
   })
 
+  it('an app name with a colon is refused, so two pairs can never share a key; an account may have one', () => {
+    expect(() => draftKey({ app: 'us:beta', account: 'alex' })).toThrow(/cannot contain/)
+    expect(draftKey({ app: 'us', account: 'alex:2' })).toBe('sac:us:alex:2')
+  })
+
   it('a draft belongs to one app and one account: switching people never shows the other\'s draft', async () => {
     const store = await fresh()
     const alex = draftKey({ app: 'us', account: 'alex' })

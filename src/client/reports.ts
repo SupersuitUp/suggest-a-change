@@ -6,7 +6,7 @@
 //
 // The draft stays until the last write of its report has landed. A failed upload therefore keeps the
 // words and the attachments, and the next drain retries only what is left.
-import { clearDraft } from './drafts.ts'
+import { clearDraft, loadDraft } from './drafts.ts'
 import type { Store } from './idb.ts'
 import { opId } from './op-id.ts'
 import type { Op, Sent } from './outbox.ts'
@@ -14,7 +14,10 @@ import type { Op, Sent } from './outbox.ts'
 export interface Report { id: string; [field: string]: unknown }
 export interface Summary { id: string; status: string; kind?: string; at?: number; [field: string]: unknown }
 
-/** The four things an app supplies for the receiving side. Adapters for particular apps come later. */
+/** The things an app supplies for the receiving side. Adapters for particular apps come later.
+ *  REQUIREMENT: `submit` and `uploadPart` must dedupe by report id (and file and part). The outbox sends a
+ *  write at least once: a reply lost after the receiver stored it, a replay after landing, or two tabs
+ *  draining the same queue all send the same write again, and only the receiver can make that one report. */
 export interface StoreAdapter {
   submit(report: Report): Promise<'done' | { refused: string }>
   uploadPart(reportId: string, file: string, part: number, bytes: Blob): Promise<'done' | { refused: string }>
@@ -25,9 +28,14 @@ export interface StoreAdapter {
 
 export interface PartRef { file: string; part?: number; blob: string }
 
-/** Puts a report, and each attachment already held in `blobs`, in the outbox. Nothing is sent here. */
+/** Puts a report, and each attachment already held in `blobs`, in the outbox. Nothing is sent here.
+ *  Queuing marks the draft as queued, so the next save starts a fresh draft.
+ *  Queuing the same report again replaces its waiting writes (still one report). It also replaces a
+ *  refused write with a clean one, on purpose: the drain skips a refused write forever, so keeping its
+ *  reason on the new write would make the retry impossible; the old reason shows until the retry. */
 export async function queueReport(
-  { outbox, report, parts = [], draft, now = () => Date.now() }: {
+  { store, outbox, report, parts = [], draft, now = () => Date.now() }: {
+    store: Store
     outbox: { enqueue(op: Op): Promise<void> }
     report: Report
     parts?: PartRef[]
@@ -37,6 +45,10 @@ export async function queueReport(
   },
 ): Promise<void> {
   const at = now()
+  if (draft) {
+    const d = await loadDraft(store, draft)
+    if (d && d.reportId === report.id && !d.queued) await store.put('kv', draft, { ...d, queued: true })
+  }
   await outbox.enqueue({ id: opId('report', report.id), kind: 'report', body: { report, draft }, at })
   let n = 0
   for (const p of parts) {
@@ -73,7 +85,7 @@ export function makeReportSender({ store, adapter }: { store: Store; adapter: St
       // The outbox deletes this op only after we return, so look at the others.
       const others = (await store.all<Op>('outbox')).map((o) => o.value)
         .filter((o) => o.id !== op.id && !o.error && (o.body.reportId === reportId || (o.body.report as Report | undefined)?.id === reportId))
-      if (!others.length) await clearDraft(store, op.body.draft)
+      if (!others.length) await clearDraft(store, op.body.draft, reportId)
     }
     return r
   }
