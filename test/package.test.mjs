@@ -47,3 +47,11 @@ test("react is an optional peer, so the contract installs without it", () => {
     assert.equal(pkg.peerDependenciesMeta[name].optional, true);
   }
 });
+
+test("the README documents every --sac- custom property the stylesheet reads", () => {
+  const css = readFileSync(join(ROOT, pkg.exports["./styles.css"]), "utf8");
+  const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+  const used = new Set(css.match(/--sac-[a-z-]+/g));
+  assert.ok(used.size >= 10);
+  for (const v of used) assert.ok(readme.includes(`\`${v}\``), `${v} is used by styles.css but not documented in the README`);
+});
