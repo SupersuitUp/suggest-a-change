@@ -1,10 +1,11 @@
 {
   "name": "@supersuit/suggest-a-change",
   "version": "0.1.0",
-  "description": "The report format and flow behind a Suggest a change button: what a report is, who acts at each step, and the checks every app runs. Zero dependencies.",
+  "description": "The report format and flow behind a Suggest a change button: what a report is, who acts at each step, the screens, and the check every app runs. The contract has zero dependencies.",
   "type": "module",
   "bin": {
-    "suggest-a-change": "bin/suggest-a-change.mjs"
+    "suggest-a-change": "bin/suggest-a-change.mjs",
+    "suggest-a-change-check": "bin/check.mjs"
   },
   "exports": {
     ".": "./src/contract.mjs",
@@ -12,6 +13,7 @@
       "types": "./dist/client/index.d.ts",
       "import": "./dist/client/index.js"
     },
+    "./check": "./src/check/index.mjs",
     "./styles.css": "./src/client/styles.css",
     "./package.json": "./package.json"
   },
@@ -28,7 +30,7 @@
     "test:client": "vitest run",
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "test": "node --test test/*.test.mjs",
-    "check": "npm run typecheck && npm run test:client && npm run build && npm test && node bin/suggest-a-change.mjs --help"
+    "check": "npm run typecheck && npm run test:client && npm run build && npm test && node bin/suggest-a-change.mjs --help && node bin/check.mjs --help && node bin/suggest-a-change.mjs init --help"
   },
   "engines": {
     "node": ">=20"
@@ -70,5 +72,8 @@
     "react-dom": "^19.3.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.4"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

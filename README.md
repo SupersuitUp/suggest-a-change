@@ -1,6 +1,6 @@
 # @supersuit/suggest-a-change
 
-The report format and flow behind a Suggest a change button: what a report is, who acts at each step, and the checks every app runs. Zero dependencies.
+The report format and flow behind a Suggest a change button: what a report is, who acts at each step, the screens, and the check every app runs. The contract (the package root) has zero dependencies.
 
 ## 30 seconds
 
@@ -17,7 +17,7 @@ console.log(FLOW["with-freeda"]); // { actor: "mac", next: ["planned"] }
 
 The package root is the report contract: the kinds, roles, ceilings, the status list and the flow map (who performs each step and which moves are allowed), plus the functions that validate a report against them. It has no imports, so it can also be copied whole into a place that has no install step. If you copy it, keep a hash of the copy and fail a test when the bytes change; fix the contract here and copy it again.
 
-The client core is TypeScript, built to `dist/` with declarations:
+The client core is TypeScript, built to `dist/` with declarations. `"./client"` is one entry point that includes the screens, so it needs React 19 installed in the app (the contract at the package root and `"./check"` do not):
 
 ```ts
 import { openStore, makeOutbox, makeReportSender, queueReport, draftKey, saveDraft, startTake, recoverTakes } from "@supersuit/suggest-a-change/client";
@@ -47,7 +47,7 @@ const adapters: Adapters = {
 // then:                        {open && <SuggestSheet adapters={adapters} where={{ screen: "Photos", route: location.pathname }} onClose={() => setOpen(false)} />}
 ```
 
-The entry carries `data-suggest-entry` (the attribute the screen check looks for). Signed out, it opens nothing and says why. The receipt says "Got it" only after the adapter has answered `done` for the report and every attachment; until then it says the report is on the phone. Every text field the module renders sits in a `[data-voice-field]` container with a `[data-voice-control]`; a host's `Field` slot must keep that shape (it receives `FieldProps`, which is the Helm's voice field props). A voice note alone is a whole report: the recording is kept and uploaded as a part, and the receiving Mac writes the transcript.
+The entry carries `data-suggest-entry` (the attribute the screen check looks for; see "The check" below). Signed out, it opens nothing and says why. The receipt says "Got it" only after the adapter has answered `done` for the report and every attachment; until then it says the report is on the phone. Every text field the module renders sits in a `[data-voice-field]` container with a `[data-voice-control]`; a host's `Field` slot must keep that shape (it receives `FieldProps`, which is the Helm's voice field props). A voice note alone is a whole report: the recording is kept and uploaded as a part, and the receiving Mac writes the transcript.
 
 Styling: structure only, class names prefixed `sac-`. `@supersuit/suggest-a-change/styles.css` is optional defaults (16px inputs so iOS does not zoom, 44px touch targets, safe-area padding on the sheet). Re-skin it with these custom properties:
 
@@ -73,7 +73,55 @@ The four diagnostics are the app's version, the time, the screen size and the ph
 
 **Follow-ups.** Words and voice notes added to a report afterwards are queued in the outbox like the report (a `followUp` write, then one part per voice note), keep the app's refusal with a Try again, and delete their local copy only once they have landed. `StoreAdapter.append` must therefore dedupe by report id and `more.followId`.
 
-Check it (typecheck, client tests, build, node tests, the command):
+## The check: every screen carries the button
+
+`suggest-a-change-check` fails an app whose screens lack the Suggest a change entry, or whose adapters are not all supplied. Each app calls it from its own check script. Run it from the app's folder:
+
+```bash
+npx suggest-a-change-check
+npx suggest-a-change-check --help
+```
+
+Exit 0 is clean, 1 is problems (each printed with the file and the fix), 2 is a usage error or nothing to check. `--json` prints `{ ok, problems, checked, exempted }`. The flags are `--repo`, `--config`, `--app-dir` and `--adapters`.
+
+For a Next.js app (app router) it reads source, not a running app:
+
+- It takes the same screen list the home-screen check takes: every `page` file under the app directory (`appDir` in `home-screen.json`, else `src/app`, else `app`), route groups and `@slots` removed, minus the routes listed under `home` (default `/`).
+- A screen passes when its page, or any layout or template from the app directory down to the page's own folder (nested layouts and route groups included), renders `<SuggestEntry` or carries `data-suggest-entry`. That can be done through a component the file imports: relative imports and `@/` and `~/` imports are followed three levels deep.
+- A screen that should not have the button is listed in the same config file, with a reason:
+
+  ```json
+  { "home": ["/"], "suggest-a-change": { "exempt": { "/share/[token]": "opened by someone who is not a member" } } }
+  ```
+
+  An exemption with an empty reason, or for a route that no longer exists, is a problem.
+- The adapters file (`tailor/suggest-a-change.ts`, or the path under `"suggest-a-change": { "adapters": "..." }`) must export all four of `identity`, `store`, `words` and `limits`, directly or through `export *` and `export { x as y }` from a local file.
+
+What it cannot see: an entry rendered only under a condition, a component reached through more than three levels of imports, an import through a path alias other than `@/` and `~/`, and an entry that code builds from a string. It reads text, so it will say a screen is covered when the entry exists in the source and never shows at runtime. Keep the entry unconditional (a signed-out visitor is told why by the entry itself).
+
+An app with one shell and no per-screen pages (a single-page app) checks its route list instead:
+
+```js
+import { checkEntryOnRoutes } from "@supersuit/suggest-a-change/check";
+
+const problems = checkEntryOnRoutes({
+  routes: ["/", "/inbox", { route: "/print", exempt: "a printed page" }],
+  render: (route) => renderToString(<App route={route} />), // returns the route's HTML
+});
+// [] when every route's HTML has an element carrying data-suggest-entry. checkEntryOnRoutesAsync takes an async render.
+```
+
+`checkSuggestEverywhere({ repo, appDir, config, adaptersFile })` is the same check as the command, as a function that returns the problems (it throws `UsageError` when there is no app directory to check).
+
+### Wiring a new app
+
+```bash
+npx suggest-a-change init
+```
+
+Run it in the app's folder. It adds the dependency to `package.json`, writes `tailor/suggest-a-change.ts` with the four adapters stubbed (kept as it is if it exists), adds `suggest-a-change-check` to the app's check script (`living:check` if the app has one, else `check`), writes `src/components/suggest-a-change.tsx`, and renders it in the root layout. Running it again changes nothing. Then install your dependencies and fill in the four adapters. `--repo`, `--app` (the id in `words.app`) and `--owner` (the first name the receipt says) are optional; `suggest-a-change check` is the same command as `suggest-a-change-check`.
+
+Check this package (typecheck, client tests, build, node tests, the commands):
 
 ```bash
 npm ci
@@ -87,17 +135,17 @@ Development needs Node 22 or newer (vitest and jsdom); the built package runs on
 | Export | State |
 | --- | --- |
 | `"."` the report contract | here |
-| `"./client"` ids, drafts, the report outbox and the recorder (no React) | here |
+| `"./client"` ids, drafts, the report outbox and the recorder | here |
 | `"./client"` the toast, entry, sheet, receipt, My suggestions and detail (React 19, optional peer) | here |
 | `"./styles.css"` optional defaults | here |
+| `"./check"` and the `suggest-a-change-check` and `suggest-a-change init` commands | here |
 | `"./server"` the receiving side | coming |
-| `"./check"` and the `suggest-a-change-check` command, which fails an app whose screens lack the button | coming |
 
 Each export is added to `package.json` in the same change as its code, so nothing here points at a file that does not exist.
 
 ## Status
 
-Not published yet. Version 0.1.0 is the first release and is cut by its owner, then every release after is a pushed `v<version>` tag (GitHub Actions, npm trusted publishing).
+Version 0.1.0 is the first release and is published once by its owner (the first publish of a new package name cannot be a tag push). Every release after that is a pushed `v<version>` tag (GitHub Actions, npm trusted publishing). Below 1.0, additions are patch versions, so apps on `^0.1.0` take them without a change.
 
 ## License
 

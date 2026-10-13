@@ -1,0 +1,163 @@
+// The screen check and init, against fixture apps (test/fixtures/, made-up apps with a few files each).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { cpSync, mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import { checkSuggestEverywhere, checkEntryOnRoutes, checkEntryOnRoutesAsync, exportsOf, UsageError } from "../src/check/index.mjs";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const fx = (name) => join(ROOT, "test", "fixtures", name);
+const run = (bin, args) => spawnSync(process.execPath, [join(ROOT, "bin", bin), ...args], { encoding: "utf8" });
+const temp = (name) => { const d = mkdtempSync(join(tmpdir(), "sac-")); cpSync(fx(name), d, { recursive: true }); return d; };
+
+test("a clean app passes, and an exempt screen with a reason is allowed", () => {
+  assert.deepEqual(checkSuggestEverywhere({ repo: fx("green") }), []);
+});
+
+test("a screen with no entry fails", () => {
+  const p = checkSuggestEverywhere({ repo: fx("no-entry") });
+  assert.equal(p.length, 1);
+  assert.match(p[0], /src\/app\/shelf\/page\.tsx: the screen \/shelf has no Suggest a change entry/);
+});
+
+test("a missing adapter fails", () => {
+  const p = checkSuggestEverywhere({ repo: fx("missing-adapter") });
+  assert.deepEqual(p.length, 1);
+  assert.match(p[0], /the adapter "limits" is not exported/);
+  const none = checkSuggestEverywhere({ repo: fx("no-adapters") });
+  assert.match(none.join("\n"), /the adapters file is missing/);
+});
+
+test("adapters exported through export * and export { x as y } count", () => {
+  assert.deepEqual(checkSuggestEverywhere({ repo: fx("reexported") }), []);
+  assert.deepEqual([...exportsOf(join(fx("reexported"), "tailor/suggest-a-change.ts"))].sort(), ["identity", "limits", "store", "words"]);
+});
+
+test("an exempt screen needs a reason", () => {
+  const p = checkSuggestEverywhere({ repo: fx("exempt-no-reason") });
+  assert.ok(p.some((x) => /the screen \/share is exempt from Suggest a change with no reason/.test(x)), p.join("\n"));
+  assert.ok(p.some((x) => /\/gone is exempt .* there is no screen at \/gone/.test(x)), "a stale exemption is a problem too");
+});
+
+test("a nested layout, reached through a shell component and a route group, covers its pages", () => {
+  assert.deepEqual(checkSuggestEverywhere({ repo: fx("nested-ok") }), []);
+});
+
+test("only the pages under a layout that renders the entry are covered", () => {
+  const p = checkSuggestEverywhere({ repo: fx("bare-nested") });
+  assert.equal(p.length, 2, p.join("\n"));
+  assert.ok(p.every((x) => /\/plain/.test(x)) && p.some((x) => /\/plain\/deeper/.test(x)), p.join("\n"));
+});
+
+test("naming the entry in a comment or an import is not rendering it", () => {
+  const p = checkSuggestEverywhere({ repo: fx("not-rendered") });
+  assert.equal(p.length, 1);
+  assert.match(p[0], /\/shelf/);
+});
+
+test("the check reads the same screen list as the home-screen check: home routes and underscore folders are skipped", () => {
+  const d = temp("no-entry");
+  writeFileSync(join(d, "home-screen.json"), JSON.stringify({ home: ["/", "/shelf"] }));
+  assert.deepEqual(checkSuggestEverywhere({ repo: d }), []);
+  rmSync(d, { recursive: true });
+});
+
+test("an app with nothing to check is a usage error, not a pass", () => {
+  assert.throws(() => checkSuggestEverywhere({ repo: join(fx("green"), "tailor") }), UsageError);
+});
+
+test("checkEntryOnRoutes renders each route and looks for data-suggest-entry", async () => {
+  const pages = { "/a": '<main><button data-suggest-entry="">Suggest a change</button></main>', "/b": "<main>nothing</main>" };
+  const render = (r) => pages[r];
+  assert.deepEqual(checkEntryOnRoutes({ routes: ["/a"], render }), []);
+  const p = checkEntryOnRoutes({ routes: ["/a", "/b"], render });
+  assert.equal(p.length, 1);
+  assert.match(p[0], /route \/b: renders without the Suggest a change entry/);
+  assert.match(checkEntryOnRoutes({ routes: [], render })[0], /no routes/);
+  assert.match(checkEntryOnRoutes({ routes: [{ route: "/b", exempt: " " }], render })[0], /no reason/);
+  assert.deepEqual(checkEntryOnRoutes({ routes: [{ route: "/b", exempt: "a printed page" }], render }), []);
+  assert.match(checkEntryOnRoutes({ routes: ["/c"], render: () => { throw new Error("boom"); } })[0], /could not be rendered \(boom\)/);
+  assert.deepEqual(await checkEntryOnRoutesAsync({ routes: ["/a"], render: async (r) => pages[r] }), []);
+  assert.equal((await checkEntryOnRoutesAsync({ routes: ["/b"], render: async (r) => pages[r] })).length, 1);
+});
+
+test("the command: exit 0 clean, 1 problems, 2 usage, with --json and --help", () => {
+  const ok = run("check.mjs", ["--repo", fx("green")]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /Suggest a change holds/);
+  const bad = run("check.mjs", ["--repo", fx("no-entry")]);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stdout, /the screen \/shelf has no Suggest a change entry/);
+  const json = JSON.parse(run("check.mjs", ["--repo", fx("no-entry"), "--json"]).stdout);
+  assert.equal(json.ok, false);
+  assert.equal(json.problems.length, 1);
+  assert.equal(run("check.mjs", ["--bogus"]).status, 2);
+  assert.equal(run("check.mjs", ["--repo", "/nonexistent-sac-folder"]).status, 2);
+  assert.equal(run("check.mjs", ["--repo", fx("green"), "--config", "nope.json"]).status, 2);
+  const help = run("check.mjs", ["--help"]);
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /Usage: suggest-a-change-check/);
+  // the same command through the main bin
+  assert.equal(run("suggest-a-change.mjs", ["check", "--repo", fx("no-entry")]).status, 1);
+  assert.equal(run("suggest-a-change.mjs", ["nonsense"]).status, 2);
+  assert.equal(run("suggest-a-change.mjs", ["--help"]).status, 0);
+});
+
+test("init on a fixture app makes the check green", () => {
+  const d = temp("init-app");
+  assert.notEqual(run("check.mjs", ["--repo", d]).status, 0, "the unwired fixture starts red");
+  const r = run("init.mjs", ["--repo", d, "--owner", "Sam"]);
+  assert.equal(r.status, 0, r.stderr);
+  const after = run("check.mjs", ["--repo", d]);
+  assert.equal(after.status, 0, after.stdout + after.stderr);
+  const pkg = JSON.parse(readFileSync(join(d, "package.json"), "utf8"));
+  assert.match(pkg.dependencies["@supersuit/suggest-a-change"], /^\^0\.1\./);
+  assert.equal(pkg.scripts.check, "tsc --noEmit && suggest-a-change-check");
+  assert.ok(existsSync(join(d, "tailor/suggest-a-change.ts")));
+  const stub = readFileSync(join(d, "tailor/suggest-a-change.ts"), "utf8");
+  assert.match(stub, /app: "pantry", owner: "Sam"/);
+  assert.match(readFileSync(join(d, "src/app/layout.tsx"), "utf8"), /<SuggestChange \/>\{children\}/);
+  rmSync(d, { recursive: true });
+});
+
+test("init is idempotent and never overwrites an adapters file", () => {
+  const d = temp("init-app");
+  writeFileSync(join(d, "tailor.keep"), "");
+  run("init.mjs", ["--repo", d]);
+  const files = ["package.json", "tailor/suggest-a-change.ts", "src/app/layout.tsx", "src/components/suggest-a-change.tsx"];
+  const first = files.map((f) => readFileSync(join(d, f), "utf8"));
+  const again = run("init.mjs", ["--repo", d]);
+  assert.equal(again.status, 0);
+  assert.match(again.stdout, /already wired; nothing changed/);
+  assert.deepEqual(files.map((f) => readFileSync(join(d, f), "utf8")), first);
+  writeFileSync(join(d, "tailor/suggest-a-change.ts"), "// mine\nexport const identity = 1; export const store = 2; export const words = 3; export const limits = 4;\n");
+  run("init.mjs", ["--repo", d, "--owner", "Other"]);
+  assert.match(readFileSync(join(d, "tailor/suggest-a-change.ts"), "utf8"), /^\/\/ mine/);
+  rmSync(d, { recursive: true });
+});
+
+test("init refuses what it does not understand (exit 2) and prefers the living:check script", () => {
+  assert.equal(run("init.mjs", ["--repo", join(fx("green"), "tailor")]).status, 2);
+  assert.equal(run("init.mjs", ["--wat"]).status, 2);
+  const d = temp("init-app");
+  const pkgPath = join(d, "package.json");
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+  pkg.scripts["living:check"] = "node living/a.mjs";
+  writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+  run("init.mjs", ["--repo", d]);
+  const out = JSON.parse(readFileSync(pkgPath, "utf8"));
+  assert.equal(out["scripts"]["living:check"], "node living/a.mjs && suggest-a-change-check");
+  assert.equal(out.scripts.check, "tsc --noEmit");
+  rmSync(d, { recursive: true });
+});
+
+test("the check does not import react or the client", () => {
+  for (const f of ["index.mjs", "cli.mjs", "init.mjs", "args.mjs"]) {
+    // init.mjs holds the text of generated files, which do import react; only its own imports count.
+    const src = readFileSync(join(ROOT, "src/check", f), "utf8").split("const stubFor")[0];
+    assert.ok(!/from ["'](react|react-dom|\.\.\/client)/.test(src), `${f} imports react or the client`);
+  }
+});

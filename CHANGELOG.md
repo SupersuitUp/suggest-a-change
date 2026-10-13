@@ -1,7 +1,11 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-12)
 
 First release. The report contract and flow map: kinds, roles, ceilings, statuses, who acts at each step, and report validation.
 
 The client core, exported as `./client`: IndexedDB store, op ids, the outbox (`Op.kind` is a string the host names; the module adds `report` and `reportPart`), the take recorder with crash recovery, drafts keyed `sac:<app>:<account>`, and the report sender over a `StoreAdapter`. Built to `dist/` with type declarations.
+
+The screens, exported from `./client` (React 19 as an optional peer): the entry, the sheet, the receipt, My suggestions and the detail view, a default voice field, and optional styles in `./styles.css`.
+
+The screen check, exported as `./check` and installed as the `suggest-a-change-check` command: it fails an app whose screens below home lack the Suggest a change entry (nested layouts and imported shell components are followed; an exempt screen needs a reason) or whose adapters file does not export all four of `identity`, `store`, `words` and `limits`. `checkEntryOnRoutes` does the same for an app with one shell. `suggest-a-change init` wires a new Next.js app: the dependency, adapter stubs under `tailor/`, the entry in the root layout and the check in the app's check script.

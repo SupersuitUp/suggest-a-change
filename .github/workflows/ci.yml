@@ -26,3 +26,4 @@ jobs:
       - run: |
           cd "$RUNNER_TEMP"
           node "$GITHUB_WORKSPACE/bin/suggest-a-change.mjs" --help
+          node "$GITHUB_WORKSPACE/bin/check.mjs" --help

@@ -90,3 +90,10 @@ test("no real person's first name appears in the repo's text files", async () =>
   }
   assert.ok(seen.size > 500);
 });
+
+test('"./check" and the suggest-a-change-check command are exported, and a scoped package publishes public', () => {
+  assert.equal(pkg.exports["./check"], "./src/check/index.mjs");
+  assert.equal(pkg.bin["suggest-a-change-check"], "bin/check.mjs");
+  assert.equal(pkg.publishConfig.access, "public");
+  assert.ok(!("./server" in pkg.exports), '"./server" is added with its code, not before');
+});
