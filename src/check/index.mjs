@@ -155,6 +155,17 @@ function used(s, name, seen = new Set()) {
 
 const items = (list) => list.split(',').map((t) => t.trim()).filter((t) => t && !/^type\s/.test(t)).map((t) => { const as = t.split(/\s+as\s+/); return { from: as[0].trim(), to: (as[1] ?? as[0]).trim() } })
 
+// The members of a namespace import (`import * as ui`) that a file renders: `<ui.Button />`, `ui.Shell` as a
+// value inside JSX, `createElement(ui.Shell`. Empty when the namespace is only handed on whole.
+function nsMembers(s, ns) {
+  const out = new Set(), e = esc(ns)
+  for (const el of s.elements) if (el.startsWith(ns + '.')) out.add(el.slice(ns.length + 1).split('.')[0])
+  const re = new RegExp(`\\b${e}\\.([A-Za-z_$][\\w$]*)`, 'g')
+  for (const x of s.jsxExprs) for (const m of x.matchAll(re)) out.add(m[1])
+  for (const m of s.code.matchAll(new RegExp(`\\b(?:createElement|jsxs?)\\(\\s*${e}\\.([A-Za-z_$][\\w$]*)`, 'g'))) out.add(m[1])
+  return out
+}
+
 // What a file imports (each local name with the name it has in the other file), re-exports, and exports.
 function infoOf(plain) {
   const imports = [], reexports = [], locals = [], declared = new Set()
@@ -200,7 +211,7 @@ function scanFile(file) {
 // that also re-exports an entry-bearing Shell covers nobody who only renders its Button. Which component
 // inside a file that defines the name renders the entry is not checked; the file is.
 function fileRenders(file, aliases, depth, seen) {
-  const key = 'F:' + file
+  const key = `F:${file}@${depth}`
   if (seen.has(key)) return false
   seen.add(key)
   const s = scanFile(file)
@@ -210,13 +221,18 @@ function fileRenders(file, aliases, depth, seen) {
     const live = imp.list.filter((it) => used(s, it.local))
     if (!live.length) continue
     const t = resolveImport(file, imp.spec, aliases)
-    if (t && live.some((it) => exportRenders(t, it.imported, aliases, depth - 1, seen))) return true
+    if (!t) continue
+    for (const it of live) {
+      let names = [it.imported]
+      if (it.imported === '*') { const m = nsMembers(s, it.local); if (m.size) names = [...m] }
+      if (names.some((n) => exportRenders(t, n, aliases, depth - 1, seen))) return true
+    }
   }
   return false
 }
 
 function exportRenders(file, name, aliases, depth, seen) {
-  const key = `E:${file}#${name}`
+  const key = `E:${file}#${name}@${depth}`
   if (seen.has(key)) return false
   seen.add(key)
   const s = scanFile(file)

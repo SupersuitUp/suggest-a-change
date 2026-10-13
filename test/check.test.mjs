@@ -295,6 +295,17 @@ test("init accepts an app directory that is the repo root", () => {
   rmSync(d, { recursive: true });
 });
 
+test("a namespace import is narrowed to the member that is rendered", () => {
+  const p = checkSuggestEverywhere({ repo: fx("namespace") });
+  assert.equal(p.length, 1, p.join("\n"));
+  assert.match(p[0], /the screen \/button has no Suggest a change entry/); // <ui.Button /> does not reach the shell
+  // <ui.Shell /> (/shell) passes, and so does handing the whole namespace on as a value (/whole)
+});
+
+test("a file first reached with no depth left is judged again when a shorter path reaches it", () => {
+  assert.deepEqual(checkSuggestEverywhere({ repo: fx("depth-order") }), []);
+});
+
 test("the check does not import react or the client", () => {
   for (const f of ["index.mjs", "cli.mjs", "init.mjs", "args.mjs"]) {
     // init.mjs holds the text of generated files, which do import react; only its own imports count.
