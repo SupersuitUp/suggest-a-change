@@ -3,9 +3,9 @@
 //   3. adds the check to the package's check script
 //   4. writes the wired-up entry component and renders it in the root layout
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { join, resolve, dirname, relative, sep } from 'node:path'
+import { join, resolve, dirname, relative, sep, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { appDirFor, UsageError } from './index.mjs'
+import { appDirFor, UsageError, STUB_SENTINEL } from './index.mjs'
 import { parseArgs } from './args.mjs'
 
 export const INIT_USAGE = `suggest-a-change init: wire an app to Suggest a change.
@@ -19,7 +19,7 @@ Usage: suggest-a-change init [--repo <path>] [--app <id>] [--owner <first name>]
 
 Adds the dependency to package.json, writes tailor/suggest-a-change.ts (kept if it exists), adds
 suggest-a-change-check to the check script, and renders the entry in the root layout. Running it again
-changes nothing. Then install your dependencies and fill in the adapters.
+changes nothing. Then install your dependencies and fill in the adapters (the stubs open nothing).
 Exit 0: done. Exit 2: bad arguments or not an app it understands.`
 
 const SELF = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json'), 'utf8'))
@@ -35,8 +35,9 @@ function writeIfAbsent(path, text, log, label) {
   return true
 }
 
-const stubFor = (app, owner) => `// The four things this app supplies to Suggest a change. Fill these in; the module owns everything else.
-// "suggest-a-change-check" fails until all four are exported from this file.
+const stubFor = (app, owner) => `// ${STUB_SENTINEL}. These adapters sign nobody in and refuse every report, so the button opens nothing.
+// Fill in the four below, then delete this line. "suggest-a-change-check --strict" fails while it is here.
+// The four things this app supplies to Suggest a change; the module owns everything else.
 import type { Adapters } from "${NAME}/client";
 
 /** Who is signed in: { account, role } where role is "operator", "member" or "maintainer", or null. */
@@ -79,6 +80,30 @@ export function SuggestChange() {
 }
 `
 
+// Adds a key without re-sorting the others: in its alphabetical place when the existing keys are already
+// sorted, at the end when they are not.
+function withKey(obj, key, value) {
+  const keys = Object.keys(obj)
+  const sorted = keys.every((k, i) => i === 0 || keys[i - 1].localeCompare(k) <= 0)
+  const at = sorted ? keys.findIndex((k) => k.localeCompare(key) > 0) : -1
+  const entries = Object.entries(obj)
+  entries.splice(at < 0 ? entries.length : at, 0, [key, value])
+  return Object.fromEntries(entries)
+}
+
+// The JSX {children}: the last one that is not a destructured parameter (a `{children}` after `(` or `,`, or
+// followed by `:` `=` `,`).
+function childrenSpot(src) {
+  let at = -1
+  for (const m of src.matchAll(/\{\s*children\s*\}/g)) {
+    const before = src.slice(0, m.index).trimEnd().slice(-1)
+    const after = src.slice(m.index + m[0].length).trimStart()[0]
+    if (before === '(' || before === ',' || after === ':' || after === '=' || after === ',') continue
+    at = m.index
+  }
+  return at
+}
+
 export function initApp({ repo, app, owner = 'Owner' }) {
   const root = resolve(repo)
   const pkgPath = join(root, 'package.json')
@@ -90,16 +115,17 @@ export function initApp({ repo, app, owner = 'Owner' }) {
   const cfgPath = join(root, 'home-screen.json')
   if (existsSync(cfgPath)) { try { cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) } catch { cfg = {} } }
   const appDir = appDirFor(root, cfg)
+  if (!(relative(root, resolve(root, appDir)) && !relative(root, resolve(root, appDir)).startsWith('..') && !isAbsolute(relative(root, resolve(root, appDir))))) throw new UsageError(`${appDir}: the app directory is outside ${root}, so init will not write there`)
   if (!existsSync(join(root, appDir))) throw new UsageError(`${appDir}: no Next app directory here; init wires the app router (pass nothing else, or create the app first)`)
   const id = (app ?? String(pkg.name ?? 'app').replace(/^@[^/]+\//, '')).replace(/[^A-Za-z0-9-]/g, '-').replace(/^-+|-+$/g, '') || 'app'
   const log = { did: [], kept: [], notes: [] }
 
   // 1 + 3. package.json: the dependency and the script, preserving indent and the final newline.
-  const indent = /^\{\n(\t)/.test(raw) ? '\t' : 2
+  const indent = /^\{\r?\n([ \t]+)"/.exec(raw)?.[1] ?? 2
   const had = pkg.dependencies?.[NAME] ?? pkg.devDependencies?.[NAME]
   if (had) log.kept.push(`dependency ${NAME}`)
   else {
-    pkg.dependencies = Object.fromEntries(Object.entries({ ...(pkg.dependencies ?? {}), [NAME]: `^${SELF.version}` }).sort(([a], [b]) => a.localeCompare(b)))
+    pkg.dependencies = withKey(pkg.dependencies ?? {}, NAME, `^${SELF.version}`)
     log.did.push(`added ${NAME}@^${SELF.version} to dependencies (install your dependencies next)`)
   }
   pkg.scripts ??= {}
@@ -114,7 +140,8 @@ export function initApp({ repo, app, owner = 'Owner' }) {
   if (next !== raw) writeFileSync(pkgPath, next)
 
   // 2. The adapters stub: never overwritten.
-  writeIfAbsent(join(root, 'tailor', 'suggest-a-change.ts'), stubFor(id, owner), log, 'tailor/suggest-a-change.ts')
+  if (writeIfAbsent(join(root, 'tailor', 'suggest-a-change.ts'), stubFor(id, owner), log, 'tailor/suggest-a-change.ts'))
+    log.notes.push('the adapters in tailor/suggest-a-change.ts are stubs: nobody is signed in and every report is refused, so the button opens nothing until you fill them in. Then delete the "suggest-a-change: STUB" line and use "suggest-a-change-check --strict" in your check script')
 
   // 4. The component and the root layout.
   const compPath = join(root, dirname(appDir), 'components', 'suggest-a-change.tsx')
@@ -125,13 +152,15 @@ export function initApp({ repo, app, owner = 'Owner' }) {
   else {
     const src = readFileSync(layoutPath, 'utf8')
     if (/\bSuggestChange\b|<SuggestEntry\b/.test(src)) log.kept.push(`entry in ${posix(relative(root, layoutPath))}`)
-    else if (!src.includes('{children}')) log.notes.push(`${posix(relative(root, layoutPath))} has no {children}: render <SuggestChange /> in it yourself`)
+    else if (childrenSpot(src) < 0) log.notes.push(`${posix(relative(root, layoutPath))} has no JSX {children}: render <SuggestChange /> in it yourself`)
     else {
       const spec = dotted(posix(relative(dirname(layoutPath), compPath)).replace(/\.tsx$/, ''))
       const imports = [...src.matchAll(/^import[^\n]*\n/gm)]
       const at = imports.length ? imports[imports.length - 1].index + imports[imports.length - 1][0].length : 0
       const withImport = src.slice(0, at) + `import { SuggestChange } from '${spec}'\n` + src.slice(at)
-      writeFileSync(layoutPath, withImport.replace('{children}', '<SuggestChange />{children}'))
+      const spot = childrenSpot(withImport)
+      if (spot < 0) { log.notes.push(`${posix(relative(root, layoutPath))} renders its children in a way init cannot find: render <SuggestChange /> in it yourself`); return log }
+      writeFileSync(layoutPath, withImport.slice(0, spot) + '<SuggestChange />' + withImport.slice(spot))
       log.did.push(`rendered <SuggestChange /> in ${posix(relative(root, layoutPath))}`)
     }
   }

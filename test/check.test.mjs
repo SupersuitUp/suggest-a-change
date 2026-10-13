@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { checkSuggestEverywhere, checkEntryOnRoutes, checkEntryOnRoutesAsync, exportsOf, UsageError } from "../src/check/index.mjs";
+import { scan, inspectSuggestEverywhere, checkSuggestEverywhere, checkEntryOnRoutes, checkEntryOnRoutesAsync, exportsOf, UsageError } from "../src/check/index.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fx = (name) => join(ROOT, "test", "fixtures", name);
@@ -14,6 +14,10 @@ const run = (bin, args) => spawnSync(process.execPath, [join(ROOT, "bin", bin), 
 const temp = (name) => { const d = mkdtempSync(join(tmpdir(), "sac-")); cpSync(fx(name), d, { recursive: true }); return d; };
 
 test("a clean app passes, and an exempt screen with a reason is allowed", () => {
+  const r = inspectSuggestEverywhere({ repo: fx("green") });
+  assert.deepEqual(r.problems, []);
+  assert.deepEqual(r.warnings, []);
+  assert.deepEqual(r.exempted, [["/share/[token]", "opened by a stranger who is not a member of the pantry"]]);
   assert.deepEqual(checkSuggestEverywhere({ repo: fx("green") }), []);
 });
 
@@ -108,7 +112,7 @@ test("the command: exit 0 clean, 1 problems, 2 usage, with --json and --help", (
 
 test("init on a fixture app makes the check green", () => {
   const d = temp("init-app");
-  assert.notEqual(run("check.mjs", ["--repo", d]).status, 0, "the unwired fixture starts red");
+  assert.equal(run("check.mjs", ["--repo", d]).status, 1, "the unwired fixture starts red");
   const r = run("init.mjs", ["--repo", d, "--owner", "Sam"]);
   assert.equal(r.status, 0, r.stderr);
   const after = run("check.mjs", ["--repo", d]);
@@ -125,7 +129,6 @@ test("init on a fixture app makes the check green", () => {
 
 test("init is idempotent and never overwrites an adapters file", () => {
   const d = temp("init-app");
-  writeFileSync(join(d, "tailor.keep"), "");
   run("init.mjs", ["--repo", d]);
   const files = ["package.json", "tailor/suggest-a-change.ts", "src/app/layout.tsx", "src/components/suggest-a-change.tsx"];
   const first = files.map((f) => readFileSync(join(d, f), "utf8"));
@@ -151,6 +154,108 @@ test("init refuses what it does not understand (exit 2) and prefers the living:c
   const out = JSON.parse(readFileSync(pkgPath, "utf8"));
   assert.equal(out["scripts"]["living:check"], "node living/a.mjs && suggest-a-change-check");
   assert.equal(out.scripts.check, "tsc --noEmit");
+  rmSync(d, { recursive: true });
+});
+
+test("a layout that imports a shell and never renders it does not cover its pages", () => {
+  const p = checkSuggestEverywhere({ repo: fx("unused-shell") });
+  assert.equal(p.length, 1, p.join("\n"));
+  assert.match(p[0], /the screen \/shelf has no Suggest a change entry/);
+});
+
+test("an entry after an apostrophe in JSX text is found", () => {
+  assert.deepEqual(checkSuggestEverywhere({ repo: fx("apostrophe") }), []);
+});
+
+test("naming the entry only inside a string literal does not count", () => {
+  const p = checkSuggestEverywhere({ repo: fx("entry-in-string") });
+  assert.equal(p.length, 1, p.join("\n"));
+  assert.match(p[0], /\/shelf/);
+});
+
+test("the scanner knows strings from JSX text", () => {
+  const s = scan(`const a = "<Fake />"; const b = <p>It's {/* it's */}<Real data-x="<Nope />" y={'<Str />'} />, don't</p>;`);
+  assert.deepEqual([...s.elements].sort(), ["Real", "p"]);
+  assert.deepEqual([...s.attrs].sort(), ["data-x", "y"]);
+  assert.ok(!s.code.includes("Fake") && !s.code.includes("Str"));
+  assert.deepEqual([...scan("const x: Array<string> = []; if (a < b) { return <A.B/> }").elements], ["A.B"]);
+});
+
+test("an app directory with no pages is a usage error: nothing was checked", () => {
+  assert.throws(() => checkSuggestEverywhere({ repo: fx("empty-app") }), (e) => e instanceof UsageError && /nothing was checked/.test(e.message));
+  const r = run("check.mjs", ["--repo", fx("empty-app")]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /nothing was checked/);
+});
+
+test("an app directory outside the repo is refused", () => {
+  assert.throws(() => checkSuggestEverywhere({ repo: fx("green"), appDir: "../no-entry/src/app" }), UsageError);
+  assert.equal(run("check.mjs", ["--repo", fx("green"), "--app-dir", "/tmp"]).status, 2);
+});
+
+// DRIFT GUARD. The module copies the screen-list rules of a template's living/home-screen-contract.mjs
+// (README: "The screen list"). This pins them on a fixture: if either side changes, the list changes. The
+// expected list below is what the template's routeOf produced for the same tree when it was written.
+test("the screen list follows the rules the home-screen check follows", () => {
+  const r = inspectSuggestEverywhere({ repo: fx("routes") });
+  assert.deepEqual(r.problems, []);
+  assert.deepEqual([...r.checked].sort(), [
+    "/about", // route group (marketing) dropped
+    "/docs", // page.mdx
+    "/docs/[...slug]", // catch-all
+    "/feed/(..)photos/[id]", // intercepting folders are NOT dropped: only (name) folders that end in ")" are groups
+    "/guide", // page.jsx
+    "/legacy", // page.js
+    "/photos",
+    "/photos/(.)view/[id]", // intercepting, kept as a segment
+    "/posts/[id]", // dynamic segment
+    "/shop/[[...path]]", // optional catch-all
+    "/stats", // @sidebar slot dropped
+    "/team", // nested groups (marketing)/(deep) dropped
+    "/typed", // page.ts
+  ]);
+  // not screens: "/" (home), _private and blog/_drafts (underscore folders), page.test.tsx, page.dev.tsx, route.ts
+});
+
+test("a stub from init is a warning, and a problem under --strict", () => {
+  const d = temp("init-app");
+  const r = run("init.mjs", ["--repo", d]);
+  assert.match(r.stdout, /note: the adapters in tailor\/suggest-a-change.ts are stubs/);
+  const plain = run("check.mjs", ["--repo", d]);
+  assert.equal(plain.status, 0, plain.stdout);
+  assert.match(plain.stdout, /warning: tailor\/suggest-a-change.ts: still the stub/);
+  assert.equal(JSON.parse(run("check.mjs", ["--repo", d, "--json"]).stdout).warnings.length, 1);
+  const strict = run("check.mjs", ["--repo", d, "--strict"]);
+  assert.equal(strict.status, 1);
+  assert.match(strict.stdout, /still the stub/);
+  const f = join(d, "tailor/suggest-a-change.ts");
+  writeFileSync(f, readFileSync(f, "utf8").split("\n").filter((l) => !l.includes("suggest-a-change: STUB")).join("\n"));
+  assert.equal(run("check.mjs", ["--repo", d, "--strict"]).status, 0);
+  rmSync(d, { recursive: true });
+});
+
+test("init keeps the package's indent and key order, and finds the JSX children", () => {
+  const d = temp("init-app");
+  const pkgPath = join(d, "package.json");
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+  pkg.dependencies = { react: "^19.0.0", next: "^16.0.0" }; // deliberately not sorted
+  writeFileSync(pkgPath, JSON.stringify(pkg, null, 4) + "\n");
+  writeFileSync(join(d, "src/app/layout.tsx"), "import type { ReactNode } from 'react'\nexport default function L({children}: {children: ReactNode}) {\n  return <html><body>{children}</body></html>\n}\n");
+  run("init.mjs", ["--repo", d]);
+  const raw = readFileSync(pkgPath, "utf8");
+  assert.match(raw, /^\{\n    "name"/);
+  assert.deepEqual(Object.keys(JSON.parse(raw).dependencies), ["react", "next", "@supersuit/suggest-a-change"]);
+  const layout = readFileSync(join(d, "src/app/layout.tsx"), "utf8");
+  assert.match(layout, /function L\(\{children\}: /);
+  assert.match(layout, /<body><SuggestChange \/>\{children\}<\/body>/);
+  assert.equal(run("check.mjs", ["--repo", d]).status, 0);
+  rmSync(d, { recursive: true });
+});
+
+test("init refuses an app directory outside the repo", () => {
+  const d = temp("init-app");
+  writeFileSync(join(d, "home-screen.json"), JSON.stringify({ home: ["/"], appDir: "../elsewhere" }));
+  assert.equal(run("init.mjs", ["--repo", d]).status, 2);
   rmSync(d, { recursive: true });
 });
 

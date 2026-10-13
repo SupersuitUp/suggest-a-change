@@ -22,7 +22,7 @@ describe('drafts', () => {
     const store = await fresh()
     const alex = draftKey({ app: 'notes', account: 'alex' })
     const sam = draftKey({ app: 'notes', account: 'sam' })
-    const other = draftKey({ app: 'cofounders', account: 'alex' })
+    const other = draftKey({ app: 'pantry', account: 'alex' })
     await saveDraft(store, alex, { words: 'the photos are small' })
     expect(await loadDraft(store, sam)).toBeUndefined()
     expect(await loadDraft(store, other)).toBeUndefined()

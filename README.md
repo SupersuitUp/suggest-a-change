@@ -82,12 +82,14 @@ npx suggest-a-change-check
 npx suggest-a-change-check --help
 ```
 
-Exit 0 is clean, 1 is problems (each printed with the file and the fix), 2 is a usage error or nothing to check. `--json` prints `{ ok, problems, checked, exempted }`. The flags are `--repo`, `--config`, `--app-dir` and `--adapters`.
+Exit 0 is clean, 1 is problems (each printed with the file and the fix), 2 is a usage error or nothing to check. `--json` prints `{ ok, problems, checked, exempted }`. The flags are `--repo`, `--config`, `--app-dir`, `--adapters` and `--strict`. An app directory with no pages is a usage error (exit 2: nothing was checked), as is an app directory outside the repo.
+
+**Put `suggest-a-change-check --strict` in the app's check script** once the adapters are real. `init` writes stubs that sign nobody in and refuse every report, and marks the file with a `suggest-a-change: STUB` line. Without `--strict` that line is a `warning:` (also in the `--json` `warnings`) and the exit stays 0; with `--strict` it is a problem and the exit is 1. Delete the line when the four adapters are real.
 
 For a Next.js app (app router) it reads source, not a running app:
 
-- It takes the same screen list the home-screen check takes: every `page` file under the app directory (`appDir` in `home-screen.json`, else `src/app`, else `app`), route groups and `@slots` removed, minus the routes listed under `home` (default `/`).
-- A screen passes when its page, or any layout or template from the app directory down to the page's own folder (nested layouts and route groups included), renders `<SuggestEntry` or carries `data-suggest-entry`. That can be done through a component the file imports: relative imports and `@/` and `~/` imports are followed three levels deep.
+- It takes the same screen list the home-screen check takes (see "The screen list" below): every page under the app directory (`appDir` in `home-screen.json`, else `src/app`, else `app`), minus the routes listed under `home` (default `/`).
+- A screen passes when its page, or any layout or template from the app directory down to the page's own folder (nested layouts and route groups included), renders `<SuggestEntry` or carries `data-suggest-entry` as a JSX element or attribute. The entry may come through a component the file imports, but only if the file actually renders that import (`<Shell>` must appear as an element in the importing file; importing it is not enough). Relative, `@/` and `~/` imports and re-exports are followed three levels deep. A match inside a string literal, a comment or a template string does not count; JSX text is text, so an apostrophe in it starts nothing.
 - A screen that should not have the button is listed in the same config file, with a reason:
 
   ```json
@@ -97,7 +99,19 @@ For a Next.js app (app router) it reads source, not a running app:
   An exemption with an empty reason, or for a route that no longer exists, is a problem.
 - The adapters file (`tailor/suggest-a-change.ts`, or the path under `"suggest-a-change": { "adapters": "..." }`) must export all four of `identity`, `store`, `words` and `limits`, directly or through `export *` and `export { x as y }` from a local file.
 
-What it cannot see: an entry rendered only under a condition, a component reached through more than three levels of imports, an import through a path alias other than `@/` and `~/`, and an entry that code builds from a string. It reads text, so it will say a screen is covered when the entry exists in the source and never shows at runtime. Keep the entry unconditional (a signed-out visitor is told why by the entry itself).
+What it cannot see: an entry rendered only under a condition, which component inside an imported file renders the entry (it checks the file), a component reached through more than three levels of imports, an import through a path alias other than `@/` and `~/`, an entry that code builds from a string, and a regular expression literal containing a quote, which can confuse its reading of the rest of that file. It reads text, so it will say a screen is covered when the entry exists in the source and never shows at runtime. Keep the entry unconditional (a signed-out visitor is told why by the entry itself).
+
+### The screen list
+
+The check copies the route rules of a template's `living/home-screen-contract.mjs`, so both sides name the same screens. These are the rules, pinned by the `routes` fixture in `test/fixtures/` and the test `the screen list follows the rules the home-screen check follows`; change one side and the other must change with it:
+
+- A screen is a file named `page.tsx`, `page.ts`, `page.jsx`, `page.js` or `page.mdx`. `page.test.tsx`, `page.dev.tsx` and `route.ts` are not screens.
+- Any file under a folder whose name starts with `_` is skipped.
+- Route groups, folders named `(name)`, are dropped from the route: `(marketing)/about/page.tsx` is `/about`.
+- Parallel-route slots, folders named `@name`, are dropped: `@sidebar/stats/page.tsx` is `/stats`.
+- Dynamic segments stay as written: `[id]`, `[...slug]`, `[[...path]]`.
+- Intercepting folders `(.)x`, `(..)x` and `(...)x` are NOT dropped (only a folder name that both starts with `(` and ends with `)` is a group), so `photos/(.)view/[id]/page.tsx` is `/photos/(.)view/[id]`.
+- A route is exempt from the check if it is a `home` route, or listed under `suggest-a-change.exempt` with a reason.
 
 An app with one shell and no per-screen pages (a single-page app) checks its route list instead:
 
@@ -119,7 +133,7 @@ const problems = checkEntryOnRoutes({
 npx suggest-a-change init
 ```
 
-Run it in the app's folder. It adds the dependency to `package.json`, writes `tailor/suggest-a-change.ts` with the four adapters stubbed (kept as it is if it exists), adds `suggest-a-change-check` to the app's check script (`living:check` if the app has one, else `check`), writes `src/components/suggest-a-change.tsx`, and renders it in the root layout. Running it again changes nothing. Then install your dependencies and fill in the four adapters. `--repo`, `--app` (the id in `words.app`) and `--owner` (the first name the receipt says) are optional; `suggest-a-change check` is the same command as `suggest-a-change-check`.
+Run it in the app's folder. It adds the dependency to `package.json`, writes `tailor/suggest-a-change.ts` with the four adapters stubbed (kept as it is if it exists), adds `suggest-a-change-check` to the app's check script (`living:check` if the app has one, else `check`), writes `src/components/suggest-a-change.tsx`, and renders it in the root layout (before the last JSX `{children}`, never a destructured parameter). It keeps `package.json`'s indent and the order of the other dependencies, and refuses an app directory outside the repo. The adapters it writes are stubs and `init` says so. Running it again changes nothing. Then install your dependencies and fill in the four adapters. `--repo`, `--app` (the id in `words.app`) and `--owner` (the first name the receipt says) are optional; `suggest-a-change check` is the same command as `suggest-a-change-check`.
 
 Check this package (typecheck, client tests, build, node tests, the commands):
 
