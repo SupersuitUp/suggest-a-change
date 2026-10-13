@@ -1,3 +1,4 @@
+'use client'
 // TOASTS: the one place the module says what is happening without moving anything on the page. At most
 // two at once, each goes by itself after a few seconds or on a tap. `<Toasts />` is an aria-live region.
 import { useEffect, useState } from 'react'
@@ -38,9 +39,29 @@ export function toast(input: ToastInput | string): string {
 
 export function clearToasts() { for (const t of timers.values()) clearTimeout(t); timers.clear(); shown = []; tell() }
 
+// Several screens may mount a host at once (the sheet over the list); only the first mounted draws, so a
+// toast is announced once.
+const hosts: number[] = []
+const hostListeners = new Set<() => void>()
+let hostSeq = 0
+
 export function Toasts() {
   const [list, setList] = useState<Toast[]>(shown)
-  useEffect(() => { listeners.add(setList); setList(shown); return () => { listeners.delete(setList) } }, [])
+  const [id] = useState(() => ++hostSeq)
+  const [primary, setPrimary] = useState(false)
+  useEffect(() => {
+    hosts.push(id)
+    const sync = () => setPrimary(hosts[0] === id)
+    hostListeners.add(sync)
+    for (const l of hostListeners) l()
+    listeners.add(setList); setList(shown)
+    return () => {
+      listeners.delete(setList); hostListeners.delete(sync)
+      hosts.splice(hosts.indexOf(id), 1)
+      for (const l of hostListeners) l()
+    }
+  }, [id])
+  if (!primary) return null
   return (
     <div className="sac-toasts" data-sac-toasts="" role="status" aria-live="polite" aria-atomic="false">
       {list.map((t) => (

@@ -12,7 +12,7 @@ const C = await import(join(ROOT, "src/contract.mjs"));
 
 const good = (o = {}) => ({
   id: "r-20261012174500-abc123",
-  app: { name: "Us", template: "example/us", templateVersion: "1.2.0", copy: "alex" },
+  app: { name: "Notes", template: "example/notes", templateVersion: "1.2.0", copy: "alex" },
   who: { member: "alex", role: "operator" },
   kind: "change",
   words: "the photos are small",

@@ -10,18 +10,18 @@ const fresh = () => openStore(`d-${++n}`)
 
 describe('drafts', () => {
   it('the key is sac:<app>:<account>, exactly', () => {
-    expect(draftKey({ app: 'us', account: 'alex' })).toBe('sac:us:alex')
+    expect(draftKey({ app: 'notes', account: 'alex' })).toBe('sac:notes:alex')
   })
 
   it('an app name with a colon is refused, so two pairs can never share a key; an account may have one', () => {
     expect(() => draftKey({ app: 'us:beta', account: 'alex' })).toThrow(/cannot contain/)
-    expect(draftKey({ app: 'us', account: 'alex:2' })).toBe('sac:us:alex:2')
+    expect(draftKey({ app: 'notes', account: 'alex:2' })).toBe('sac:notes:alex:2')
   })
 
   it('a draft belongs to one app and one account: switching people never shows the other\'s draft', async () => {
     const store = await fresh()
-    const alex = draftKey({ app: 'us', account: 'alex' })
-    const sam = draftKey({ app: 'us', account: 'sam' })
+    const alex = draftKey({ app: 'notes', account: 'alex' })
+    const sam = draftKey({ app: 'notes', account: 'sam' })
     const other = draftKey({ app: 'cofounders', account: 'alex' })
     await saveDraft(store, alex, { words: 'the photos are small' })
     expect(await loadDraft(store, sam)).toBeUndefined()
@@ -33,7 +33,7 @@ describe('drafts', () => {
 
   it('the report id is made when the draft starts and stays through every later save', async () => {
     const store = await fresh()
-    const key = draftKey({ app: 'us', account: 'alex' })
+    const key = draftKey({ app: 'notes', account: 'alex' })
     const first = await saveDraft(store, key, { words: 'a' })
     expect(isReportId(first.reportId)).toBe(true)
     const second = await saveDraft(store, key, { words: 'ab', kind: 'broken' }, { makeId: () => { throw new Error('no new id') } })
@@ -44,7 +44,7 @@ describe('drafts', () => {
 
   it('a cleared draft is gone, and the next one starts a new report', async () => {
     const store = await fresh()
-    const key = draftKey({ app: 'us', account: 'alex' })
+    const key = draftKey({ app: 'notes', account: 'alex' })
     const a = await saveDraft(store, key, { words: 'x' })
     await clearDraft(store, key)
     expect(await loadDraft(store, key)).toBeUndefined()

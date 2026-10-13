@@ -55,3 +55,26 @@ test("the README documents every --sac- custom property the stylesheet reads", (
   assert.ok(used.size >= 10);
   for (const v of used) assert.ok(readme.includes(`\`${v}\``), `${v} is used by styles.css but not documented in the README`);
 });
+
+// Next.js hosts fail when a server file imports a module that uses React hooks without the directive. The
+// build must keep "use client" as the first statement of every emitted file that imports react.
+import { readdirSync } from "node:fs";
+test('every built client file that imports react starts with "use client"', () => {
+  const dir = join(ROOT, "dist", "client");
+  let checked = 0;
+  for (const f of readdirSync(dir).filter((x) => x.endsWith(".js"))) {
+    const src = readFileSync(join(dir, f), "utf8");
+    if (!/from ["']react(\/jsx-runtime)?["']/.test(src)) continue;
+    checked++;
+    assert.match(src, /^(\/\/[^\n]*\n|\s)*["']use client["'];?/, `${f} imports react but does not start with "use client"`);
+  }
+  assert.ok(checked >= 8, `only ${checked} react files found in dist/client`);
+});
+
+test("no real person's first name appears in the published files", () => {
+  const names = new RegExp(`\\b(${["gar" + "y", "wil" + "son", "des" + "iet"].join("|")})`, "i"); // built from pieces so this file does not match itself
+  const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => e.name === "node_modules" || e.name === ".git" || e.name === "dist" ? [] : e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]);
+  for (const f of walk(ROOT).filter((p) => /\.(ts|tsx|mjs|md|json|css|yml)$/.test(p) && !p.endsWith("package-lock.json"))) {
+    assert.doesNotMatch(readFileSync(f, "utf8"), names, `${f} names a real person`);
+  }
+});

@@ -1,5 +1,7 @@
-// A labelled dialog's behaviour: focus goes in when it opens, Tab stays inside it, Escape closes it,
-// and focus goes back to what had it when it closes.
+'use client'
+// A labelled dialog's behaviour: focus goes in when it opens, Tab stays inside it (listened for on the
+// document, so it holds even after the focused button has gone), Escape closes it, and focus goes back
+// to what had it when it closes.
 import { useEffect, type RefObject } from 'react'
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
@@ -12,6 +14,7 @@ export function useDialog(ref: RefObject<HTMLElement | null>, onClose?: () => vo
     const items = () => [...box.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => !el.hasAttribute('hidden'))
     ;(items()[0] ?? box).focus()
     function onKey(e: KeyboardEvent) {
+      if (!box!.isConnected) return
       if (e.key === 'Escape' && onClose) { e.stopPropagation(); onClose(); return }
       if (e.key !== 'Tab') return
       const list = items()
@@ -19,11 +22,12 @@ export function useDialog(ref: RefObject<HTMLElement | null>, onClose?: () => vo
       const first = list[0]
       const last = list[list.length - 1]
       const active = document.activeElement
-      if (e.shiftKey && (active === first || !box!.contains(active))) { e.preventDefault(); last.focus() }
-      else if (!e.shiftKey && (active === last || !box!.contains(active))) { e.preventDefault(); first.focus() }
+      if (!box!.contains(active)) { e.preventDefault(); (e.shiftKey ? last : first).focus() }
+      else if (e.shiftKey && active === first) { e.preventDefault(); last.focus() }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus() }
     }
-    box.addEventListener('keydown', onKey)
-    return () => { box.removeEventListener('keydown', onKey); if (before && document.contains(before)) before.focus() }
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('keydown', onKey); if (before && document.contains(before)) before.focus() }
     // The dialog opens once per mount; onClose is read through the closure it was given.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

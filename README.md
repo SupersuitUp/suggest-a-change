@@ -36,11 +36,11 @@ import "@supersuit/suggest-a-change/styles.css"; // optional
 const adapters: Adapters = {
   identity: async () => (user ? { account: user.memberKey, role: "member" } : null),
   store,                                  // a StoreAdapter: submit, uploadPart, mine, one, append (dedupe by id)
-  words: { app: "us", owner: "Gary" },    // the owner's name is passed in, never written in the module
+  words: { app: "notes", owner: "Alex" },    // the owner's name is passed in, never written in the module
   limits: { images: 3 },                  // may lower the ceilings, never raise them
   Field: GoldenVoiceField,                // optional: a host's own voice field; the module ships DefaultField
   snapshot: async () => screenshotBlob(), // optional: one tap to attach a picture of this screen
-  about: { app: "us", version: "1.2.3" }, // stamped into every report
+  about: { app: "notes", version: "1.2.3" }, // stamped into every report
   lands: "app",                           // "mac" on a Helm that posts straight to the owner's Mac
 };
 // On every screen below home:  <SuggestEntry adapters={adapters} onOpen={() => setOpen(true)} />

@@ -36,8 +36,10 @@ export interface FieldProps {
   disabled?: boolean
   persist?: boolean
   startTake?: typeof startTake
-  /** A take stops by itself here (the module's default field only). */
+  /** A take stops by itself here and is kept at this length (the module's default field only). */
   maxMs?: number
+  /** The default field's own words, from the app's `words.text`. */
+  labels?: { holdToTalk: string; stopTalking: string; micDenied: string; voiceUnavailable: string }
 }
 
 export interface Adapters {
@@ -56,7 +58,19 @@ export interface Adapters {
   /** Where a received report lands: `'mac'` on a Helm that posts straight to the owner's Mac. */
   lands?: 'app' | 'mac'
   /** The phone's own database and reachability, for hosts that already hold them (and for tests). */
-  phone?: { store?: Store; reach?: { check(force?: boolean): Promise<boolean>; mark(up: boolean): void }; now?: () => number }
-  /** Phone type for the device diagnostic. Defaults to the browser's own platform line. */
+  phone?: {
+    store?: Store
+    reach?: { check(force?: boolean): Promise<boolean>; mark(up: boolean): void }
+    now?: () => number
+    /** Reads a video's length in ms; undefined when it cannot be read. Defaults to the browser's own player. */
+    videoLength?(file: Blob): Promise<number | undefined>
+    /** How long the default reader waits for the video's length before giving up. Default 3000. */
+    probeMs?: number
+  }
+  /** Phone type for the device diagnostic. Defaults to a short name ("iPhone", "Android phone"). */
   device?(): string
+  /** The recorder the default field uses. Defaults to the module's own. */
+  startTake?: typeof startTake
+  /** False when the receiving side cannot take a voice note added to a report afterwards (the detail view then says so). */
+  appendVoice?: boolean
 }

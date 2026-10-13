@@ -1,3 +1,4 @@
+'use client'
 // THE ENTRY: one control, `data-suggest-entry`, which is the contract the screen checker looks for.
 // Signed out, it opens nothing and says why. Signed in, it hands over to the host (`onOpen`), which
 // shows the sheet. `<ReportProblem>` is the same control for an error screen, already filled in.

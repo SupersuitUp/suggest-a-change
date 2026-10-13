@@ -2,12 +2,12 @@
 // live in contract.mjs (`wordsFor`, `meaningFor`); the receipt lines, the sheet's labels and the
 // button come from design section 2. The owner's name and the app's name are passed in by the host,
 // never written here. An app may replace any string through `words.text`.
-import { CEILINGS } from '../contract.mjs'
+import { CEILINGS, meaningFor, wordsFor } from '../contract.mjs'
 
 export interface Words {
   /** A short id for the app. It names the draft on the phone, so it may not contain ":". */
   app: string
-  /** The owner's first name, as the receipt says it ("Gary"). */
+  /** The owner's first name, as the receipt says it ("Alex"). */
   owner: string
   /** Replaces any string below. */
   text?: Partial<Strings>
@@ -17,6 +17,7 @@ export interface Strings {
   entry: string
   reportProblem: string
   signedOut: string
+  signedOutMine: string
   sheetTitle: string
   close: string
   kindLegend: string
@@ -39,6 +40,14 @@ export interface Strings {
   goesTo: (owner: string) => string
   includes: (parts: string[]) => string
   includesNothing: string
+  /** The part of the line that is always sent: where the person was. */
+  screenName: string
+  alwaysSent: (screen: string, route: string) => string
+  diagAppVersion: string
+  diagAt: string
+  diagScreen: string
+  diagDevice: string
+  include: (what: string) => string
   send: string
   sendHint: string
   sending: string
@@ -51,26 +60,54 @@ export interface Strings {
   mineTitle: string
   mineEmpty: string
   back: string
-  stripLegend: string
   holdToTalk: string
   stopTalking: string
   micDenied: string
+  voiceUnavailable: string
   loading: string
+  voiceNotesLabel: string
+  attachmentsLabel: string
+  voiceNote: (n: number, length: string) => string
+  voiceNoteKept: (n: number) => string
+  voiceNoteRemoved: string
+  attachmentRemoved: (name: string) => string
+  waitingToSend: string
+  sentWord: string
+  didNotSend: (reason: string) => string
+  attachmentsSending: (sent: number, total: number) => string
+  attachmentsAllSent: string
+  attachmentFailed: string
+  upToImages: (n: number) => string
+  oneVideoOnly: string
+  notPicture: (name: string) => string
+  notVideo: (name: string) => string
+  overSize: (name: string, mb: number) => string
+  videoTooLong: (name: string, seconds: number) => string
+  videoUnreadable: (name: string) => string
+  voiceTooLong: string
+  voiceTotalLimit: string
+  screenshotFailed: string
+  couldNotOpen: string
+  couldNotLoadMine: string
+  addFailed: string
+  overLimit: string
+  stepLabel: string
 }
 
 export const DEFAULT_STRINGS: Strings = {
   entry: 'Suggest a change',
   reportProblem: 'Report a problem',
   signedOut: 'Sign in to suggest a change.',
+  signedOutMine: 'Sign in to see your suggestions.',
   sheetTitle: 'Suggest a change',
   close: 'Close',
   kindLegend: 'What kind?',
   kindChange: 'Change something',
   kindBroken: 'Something is broken',
   kindFeedback: 'Just feedback',
-  brokenHappened: 'What happened?',
-  brokenExpected: 'What did you expect?',
-  brokenSteps: 'How can it be made to happen again?',
+  brokenHappened: 'What happened',
+  brokenExpected: 'What you expected',
+  brokenSteps: 'How to make it happen again',
   optional: 'optional',
   sayItLegend: 'Say it',
   sayItLabel: 'Your suggestion',
@@ -84,6 +121,13 @@ export const DEFAULT_STRINGS: Strings = {
   goesTo: (owner) => `Goes to ${owner} and Freeda.`,
   includes: (parts) => `Includes ${list(parts)}.`,
   includesNothing: 'Includes nothing extra.',
+  screenName: "this screen's name",
+  alwaysSent: (screen, route) => `Always sent: the screen you are on (${screen}) and its address (${route}).`,
+  diagAppVersion: "the app's version",
+  diagAt: 'the time',
+  diagScreen: 'your screen size',
+  diagDevice: 'your phone type',
+  include: (what) => `Include ${what}`,
   send: 'Send',
   sendHint: 'Type, say or show something first.',
   sending: 'Sending',
@@ -96,11 +140,38 @@ export const DEFAULT_STRINGS: Strings = {
   mineTitle: 'My suggestions',
   mineEmpty: 'You have not sent a suggestion yet.',
   back: 'Back',
-  stripLegend: 'Where it is',
   holdToTalk: 'Hold to talk',
   stopTalking: 'Stop and keep the recording',
   micDenied: 'The microphone could not be used. You can type it instead.',
+  voiceUnavailable: 'Voice notes cannot be added here',
   loading: 'Loading',
+  voiceNotesLabel: 'Voice notes',
+  attachmentsLabel: 'Attachments',
+  voiceNote: (n, length) => `Voice note ${n}, ${length}`,
+  voiceNoteKept: (n) => `Voice note ${n} kept.`,
+  voiceNoteRemoved: 'Voice note removed.',
+  attachmentRemoved: (name) => `${name} removed.`,
+  waitingToSend: 'Waiting to send',
+  sentWord: 'Sent',
+  didNotSend: (reason) => `Did not send: ${reason}`,
+  attachmentsSending: (sent, total) => `Sending attachments: ${sent} of ${total} sent.`,
+  attachmentsAllSent: 'All attachments sent.',
+  attachmentFailed: 'An attachment did not send.',
+  upToImages: (n) => `Up to ${n} pictures.`,
+  oneVideoOnly: 'One video at most.',
+  notPicture: (name) => `${name} is not a picture.`,
+  notVideo: (name) => `${name} is not a video.`,
+  overSize: (name, mb) => `${name} is over ${mb} MB.`,
+  videoTooLong: (name, s) => `${name} is longer than ${s} seconds.`,
+  videoUnreadable: (name) => `We could not check how long ${name} is. Try a shorter video.`,
+  voiceTooLong: 'That recording is longer than the limit.',
+  voiceTotalLimit: 'Voice notes are at their limit; type the rest.',
+  screenshotFailed: 'The screenshot could not be taken.',
+  couldNotOpen: 'This suggestion could not be opened.',
+  couldNotLoadMine: 'Your suggestions could not be loaded.',
+  addFailed: 'That could not be added. Try again.',
+  overLimit: 'Something in this suggestion is over a limit. Remove an attachment and try again.',
+  stepLabel: 'Where it is',
 }
 
 export function stringsFor(words: Words): Strings {
@@ -110,6 +181,14 @@ export function stringsFor(words: Words): Strings {
 function list(parts: string[]): string {
   if (parts.length <= 1) return parts.join('')
   return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+}
+
+/** The design's status word for a status; a status the contract does not know shows as itself instead of taking the list down. */
+export function statusWords(status: string, owner: string): string {
+  try { return wordsFor(status, { owner }) } catch { return String(status) }
+}
+export function statusMeaning(status: string, owner: string): string {
+  try { return meaningFor(status, { owner }) } catch { return '' }
 }
 
 export type ReceiptState = 'on-phone' | 'received' | 'on-mac'
@@ -140,4 +219,16 @@ export function sizeWords(bytes: number): string {
 export function lengthWords(ms: number): string {
   const s = Math.round(ms / 1000)
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+/** A short phone type for the device diagnostic, never the whole user agent string. */
+export function phoneType(): string {
+  if (typeof navigator === 'undefined') return 'Unknown device'
+  const ua = navigator.userAgent
+  const known: [RegExp, string][] = [[/iPhone/i, 'iPhone'], [/iPad/i, 'iPad'], [/Android/i, 'Android phone'], [/Macintosh|Mac OS/i, 'Mac'], [/Windows/i, 'Windows PC'], [/Linux/i, 'Linux computer']]
+  return known.find(([re]) => re.test(ua))?.[1] ?? 'Unknown device'
+}
+
+export function screenSize(): string | undefined {
+  return typeof window === 'undefined' ? undefined : `${window.innerWidth}x${window.innerHeight}`
 }

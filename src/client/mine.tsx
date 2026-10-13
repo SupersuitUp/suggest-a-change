@@ -1,33 +1,40 @@
+'use client'
 // MY SUGGESTIONS: everything this person has sent, newest first, each with its status in plain words.
-// A report still on the phone is listed too (as "On this phone"), so a suggestion never disappears
-// between the Send button and the app's first answer.
+// A report still on the phone is listed too (as "On this phone"), with the app's refusal and a Try again
+// when it gave one. Only this signed-in account's reports are shown; another person's waiting reports
+// on the same phone are not.
 import { useCallback, useEffect, useState } from 'react'
-import { meaningFor, wordsFor } from '../contract.mjs'
 import type { Adapters } from './adapters.ts'
 import { SuggestionDetail } from './detail.tsx'
 import type { Summary } from './reports.ts'
 import { useRuntime, useTick } from './runtime.ts'
-import { stringsFor } from './words.ts'
+import { Toasts } from './toast.tsx'
+import { statusMeaning, statusWords, stringsFor } from './words.ts'
+
+type Row = Summary & { error?: string }
 
 export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen?(id: string): void }) {
   const S = stringsFor(adapters.words)
   const owner = adapters.words.owner
-  const rt = useRuntime(adapters)
+  const { rt, who } = useRuntime(adapters)
   const tick = useTick(rt)
-  const [rows, setRows] = useState<Summary[] | null>(null)
+  const [rows, setRows] = useState<Row[] | null>(null)
   const [open, setOpen] = useState<string | null>(null)
   const [bad, setBad] = useState('')
 
   const load = useCallback(async () => {
+    if (!rt) return
     let theirs: Summary[] = []
-    try { theirs = await adapters.store.mine(); setBad('') } catch { setBad('Your suggestions could not be loaded.') }
-    const local = rt ? await rt.waiting() : []
-    const have = new Set(theirs.map((s) => s.id))
-    const phone: Summary[] = local.filter((l) => !have.has(l.id)).map((l) => ({ id: l.id, status: 'on-phone', at: l.at }))
-    setRows([...theirs, ...phone].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)))
-  }, [adapters, rt])
+    try { theirs = await adapters.store.mine(); setBad('') } catch { setBad(S.couldNotLoadMine) }
+    const local = await rt.waiting()
+    const waiting = new Map(local.map((l) => [l.id, l]))
+    // A report the app already lists keeps its own status; one still on the phone is listed as on the phone.
+    const phone: Row[] = local.filter((l) => !theirs.some((t) => t.id === l.id)).map((l) => ({ id: l.id, status: 'on-phone', at: l.at, ...(l.words ? { words: l.words } : {}), ...(l.error ? { error: l.error } : {}) }))
+    setRows([...theirs.map((t) => ({ ...t, ...(waiting.get(t.id)?.error ? { error: waiting.get(t.id)!.error } : {}) })), ...phone].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)))
+  }, [adapters, rt, S.couldNotLoadMine])
   useEffect(() => { void load() }, [load, tick])
 
+  if (who === null) return <p role="alert">{S.signedOutMine}</p>
   if (open && !onOpen) {
     return (
       <section className="sac-mine">
@@ -48,14 +55,21 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
               <li key={r.id} className="sac-row" data-status={r.status}>
                 <button type="button" className="sac-row-button" onClick={() => (onOpen ? onOpen(r.id) : setOpen(r.id))}>
                   {preview ? <span className="sac-row-words">{preview}</span> : null}
-                  <span className="sac-row-status">{wordsFor(r.status, { owner })}</span>
-                  <span className="sac-muted">{meaningFor(r.status, { owner })}</span>
+                  <span className="sac-row-status">{statusWords(r.status, owner)}</span>
+                  <span className="sac-muted">{statusMeaning(r.status, owner)}</span>
                 </button>
+                {r.error ? (
+                  <>
+                    <p role="alert" className="sac-error">{r.error}</p>
+                    {rt ? <button type="button" className="sac-button" onClick={() => void rt.retry(r.id)}>{S.retry}</button> : null}
+                  </>
+                ) : null}
               </li>
             )
           })}
         </ul>
       )}
+      <Toasts />
     </section>
   )
 }

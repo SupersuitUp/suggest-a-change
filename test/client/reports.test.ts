@@ -35,7 +35,7 @@ async function setup() {
   const store = await fresh()
   const fake = fakeAdapter()
   const outbox = makeOutbox({ store, reach: { check: async () => true, mark() {} }, send: makeReportSender({ store, adapter: fake.adapter }) })
-  const key = draftKey({ app: 'us', account: 'alex' })
+  const key = draftKey({ app: 'notes', account: 'alex' })
   const draft = await saveDraft(store, key, { words: 'the photos are small', attachments: ['img-1'] })
   const report: Report = { id: draft.reportId, kind: 'change', words: draft.words }
   return { store, fake, outbox, key, report }

@@ -1,3 +1,4 @@
+'use client'
 // THE MODULE'S OWN VOICE FIELD, for hosted apps that have no golden one. A text area with a hold-to-talk
 // button beside it, in one [data-voice-field] container with nothing else typeable in it. A take is
 // recorded with the module's recorder (written to the phone's database as it is made). Transcription is
@@ -12,10 +13,14 @@ import { startTake as defaultStartTake } from './recorder.ts'
 import { toast } from './toast.tsx'
 import { DEFAULT_STRINGS } from './words.ts'
 
+
 type Take = Awaited<ReturnType<typeof defaultStartTake>>
 
 export function DefaultField(props: FieldProps) {
-  const { rt, id, label, value, onChange, placeholder, multiline = false, type = 'text', upload, onHeard, onKept, onHearing, disabled, startTake = defaultStartTake, maxMs } = props
+  const { rt, id, label, value, onChange, placeholder, multiline = false, type = 'text', upload, onHeard, onKept, onHearing, disabled, startTake = defaultStartTake, maxMs, labels } = props
+  const L = labels ?? DEFAULT_STRINGS
+  // With nowhere to send a take, recording would lose it silently: the control stays, switched off, and says why.
+  const canRecord = Boolean(upload || onKept)
   const [recording, setRecording] = useState(false)
   const take = useRef<Take | null>(null)
   const wanted = useRef(false)
@@ -36,7 +41,7 @@ export function DefaultField(props: FieldProps) {
       if (maxMs) timer.current = setTimeout(() => void end(), maxMs)
     } catch {
       wanted.current = false
-      toast({ id: 'sac-mic', text: DEFAULT_STRINGS.micDenied, tone: 'warn' })
+      toast({ id: 'sac-mic', text: L.micDenied, tone: 'warn' })
     }
   }
   async function end() {
@@ -46,7 +51,9 @@ export function DefaultField(props: FieldProps) {
     if (!t) return
     take.current = null
     setRecording(false)
-    const r = await t.stop()
+    const r0 = await t.stop()
+    // A take the timer ended is kept at the limit: the recorder reports a little longer than the timer ran.
+    const r = maxMs ? { ...r0, ms: Math.min(r0.ms, maxMs) } : r0
     cb.current.onHearing?.(true)
     try {
       if (!cb.current.upload) { cb.current.onKept?.({ key: r.key, ms: r.ms }); return }
@@ -64,8 +71,8 @@ export function DefaultField(props: FieldProps) {
       data-voice-control=""
       className="sac-record"
       aria-pressed={recording}
-      aria-label={`${recording ? DEFAULT_STRINGS.stopTalking : DEFAULT_STRINGS.holdToTalk}: ${label}`}
-      disabled={disabled}
+      aria-label={canRecord ? `${recording ? L.stopTalking : L.holdToTalk}: ${label}` : `${L.voiceUnavailable}: ${label}`}
+      disabled={disabled || !canRecord}
       onPointerDown={(e) => { e.preventDefault(); void begin() }}
       onPointerUp={() => void end()}
       onPointerLeave={() => { if (wanted.current) void end() }}
