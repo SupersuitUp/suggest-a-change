@@ -14,7 +14,8 @@ import { makeReportSender, type Report } from './reports.ts'
 
 export type PartState = { state: 'waiting' | 'sending' | 'sent' | 'failed'; reason?: string }
 export type Outbox = ReturnType<typeof makeOutbox>
-export interface Waiting { id: string; at: number; error?: string; words?: string }
+export interface Waiting { id: string; at: number; error?: string; words?: string; /** Nothing of the report itself is waiting, only a follow-up to it. */ onlyFollowUp?: boolean }
+export interface FollowUp { followId: string; words: string; error?: string }
 
 export interface Runtime {
   /** The phone's database, for blobs and drafts. */
@@ -30,6 +31,8 @@ export interface Runtime {
   retry(reportId: string): Promise<void>
   /** Reports of this account that are on this phone and not yet fully landed. */
   waiting(): Promise<Waiting[]>
+  /** Follow-ups to a report that have not landed yet. */
+  followUps(reportId: string): Promise<FollowUp[]>
   /** The copy of a report that is still on this phone, with the app's refusal if there is one. */
   local(reportId: string): Promise<{ report: Report; error?: string } | undefined>
   /** Keeps the outbox moving (on reconnect and every 15 s) while something is mounted. */
@@ -75,6 +78,14 @@ async function build(first: Adapters, who: Identity): Promise<Runtime> {
   const reach = first.phone?.reach ?? { check: async () => typeof navigator === 'undefined' || navigator.onLine !== false, mark() {} }
 
   async function send(op: Op): Promise<Sent> {
+    // Confirm the account before every write: a report queued by one person is never sent under another's session.
+    let now: Identity | null = null
+    try { now = await rt.adapters.identity() } catch { now = null }
+    if (!now || now.account !== who.account) throw new Error('the signed-in account is not the one that queued this')
+    if (op.kind === 'followUp') {
+      const b = op.body
+      return rt.adapters.store.append(String(b.reportId), { words: b.words, at: b.at, voice: b.voice, followId: b.followId })
+    }
     const k = op.kind === 'reportPart' ? `${op.body.reportId}\u0000${op.body.file}` : undefined
     if (k) { parts.set(k, { state: 'sending' }); note() }
     let r: Sent
@@ -105,15 +116,25 @@ async function build(first: Adapters, who: Identity): Promise<Runtime> {
       const seen = new Map<string, Waiting>()
       for (const o of await outbox.pending()) {
         const rep = o.kind === 'report' ? (o.body.report as Report) : undefined
-        const id = rep ? rep.id : o.kind === 'reportPart' ? String(o.body.reportId) : undefined
+        const id = rep ? rep.id : o.kind === 'reportPart' || o.kind === 'followUp' ? String(o.body.reportId) : undefined
         if (!id) continue
+        const follow = o.kind === 'followUp' || o.body.followId !== undefined
         const had = seen.get(id)
-        seen.set(id, { id, at: had ? Math.min(had.at, o.at) : o.at, error: had?.error ?? o.error, words: had?.words ?? (rep && typeof rep.words === 'string' ? rep.words : undefined) })
+        seen.set(id, { id, at: had ? Math.min(had.at, o.at) : o.at, error: had?.error ?? o.error, words: had?.words ?? (rep && typeof rep.words === 'string' ? rep.words : undefined), onlyFollowUp: (had ? had.onlyFollowUp : true) && follow })
       }
       return [...seen.values()]
     },
+    async followUps(id: string) {
+      const by = new Map<string, FollowUp>()
+      for (const o of (await outbox.pending()).filter((x) => belongsTo(x, id) && x.body.followId !== undefined)) {
+        const f = String(o.body.followId)
+        const had = by.get(f)
+        by.set(f, { followId: f, words: had?.words || (o.kind === 'followUp' ? String(o.body.words ?? '') : ''), ...(had?.error || o.error ? { error: had?.error ?? o.error } : {}) })
+      }
+      return [...by.values()]
+    },
     async local(id: string) {
-      const mine = (await outbox.pending()).filter((o) => belongsTo(o, id))
+      const mine = (await outbox.pending()).filter((o) => belongsTo(o, id) && o.body.followId === undefined)
       const rep = mine.find((o) => o.kind === 'report')
       if (!rep) return undefined
       return { report: rep.body.report as Report, error: mine.find((o) => o.error)?.error }
@@ -132,30 +153,47 @@ async function build(first: Adapters, who: Identity): Promise<Runtime> {
   return rt
 }
 
-/** Who is signed in (undefined while asking, null when no one is) and, once known, their runtime.
- *  Adapters should be stable, but a parent that rebuilds them every render is safe: the runtime is shared
- *  and always sends through the newest adapters. */
+const identityListeners = new Set<() => void>()
+/** Tell every mounted screen to ask `identity()` again: call it after a sign-in, sign-out or account switch.
+ *  (Changing the `adapters` object a screen is given does the same.) */
+export function refreshIdentity(): void { for (const l of identityListeners) l() }
+
+/** Who is signed in (undefined while asking, null when no one is) and, once known, their runtime. The
+ *  question is asked again whenever the adapters change and whenever `refreshIdentity()` is called; when the
+ *  account differs, the old account's runtime is let go and nothing of it stays on screen. Adapters should be
+ *  stable, but a parent that rebuilds them every render is safe: the runtime is shared and always sends
+ *  through the newest adapters. */
 export function useRuntime(adapters: Adapters): { rt: Runtime | null; who: Identity | null | undefined } {
   const [state, setState] = useState<{ rt: Runtime | null; who: Identity | null | undefined }>({ rt: null, who: undefined })
-  const latest = useRef(adapters)
-  latest.current = adapters
+  const [signal, setSignal] = useState(0)
+  const current = useRef<{ account: string | null; release: () => void }>({ account: null, release: () => {} })
+  const alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false; current.current.release(); current.current = { account: null, release: () => {} } } }, [])
+  useEffect(() => { const l = () => setSignal((n) => n + 1); identityListeners.add(l); return () => { identityListeners.delete(l) } }, [])
   useEffect(() => { if (state.rt) state.rt.adapters = adapters })
   useEffect(() => {
     let live = true
-    let release = () => {}
     void (async () => {
       let who: Identity | null = null
-      try { who = await latest.current.identity() } catch { who = null }
-      if (!live) return
-      if (!who) { setState({ rt: null, who: null }); return }
-      const rt = await getRuntime(latest.current, who)
-      if (!live) return
-      rt.adapters = latest.current
-      release = rt.retain()
+      try { who = await adapters.identity() } catch { who = null }
+      if (!live || !alive.current) return
+      const had = current.current
+      if ((who?.account ?? null) === had.account && had.account !== null) {
+        if (state.rt) state.rt.adapters = adapters
+        return
+      }
+      had.release()
+      current.current = { account: null, release: () => {} }
+      if (!who) { setState((prev) => (prev.who === null ? prev : { rt: null, who: null })); return }
+      const rt = await getRuntime(adapters, who)
+      if (!live || !alive.current) return
+      rt.adapters = adapters
+      current.current = { account: who.account, release: rt.retain() }
       setState({ rt, who })
     })()
-    return () => { live = false; release() }
-  }, [adapters.words.app])
+    return () => { live = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adapters, signal])
   return state
 }
 

@@ -38,8 +38,10 @@ export interface FieldProps {
   startTake?: typeof startTake
   /** A take stops by itself here and is kept at this length (the module's default field only). */
   maxMs?: number
+  /** Scopes this field's recorded takes (the sheet passes the draft key: app and account), so an interrupted take can only rejoin its own account. */
+  scope?: string
   /** The default field's own words, from the app's `words.text`. */
-  labels?: { holdToTalk: string; stopTalking: string; micDenied: string; voiceUnavailable: string }
+  labels?: { holdToTalk: string; stopTalking: string; micDenied: string; voiceUnavailable: string; voiceTotalLimit: string }
 }
 
 export interface Adapters {

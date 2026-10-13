@@ -22,6 +22,9 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
   const [open, setOpen] = useState<string | null>(null)
   const [bad, setBad] = useState('')
 
+  // Another account (or none) shows nothing of the last one's rows.
+  useEffect(() => { setRows(null); setOpen(null) }, [rt])
+
   const load = useCallback(async () => {
     if (!rt) return
     let theirs: Summary[] = []
@@ -29,7 +32,7 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
     const local = await rt.waiting()
     const waiting = new Map(local.map((l) => [l.id, l]))
     // A report the app already lists keeps its own status; one still on the phone is listed as on the phone.
-    const phone: Row[] = local.filter((l) => !theirs.some((t) => t.id === l.id)).map((l) => ({ id: l.id, status: 'on-phone', at: l.at, ...(l.words ? { words: l.words } : {}), ...(l.error ? { error: l.error } : {}) }))
+    const phone: Row[] = local.filter((l) => !l.onlyFollowUp && !theirs.some((t) => t.id === l.id)).map((l) => ({ id: l.id, status: 'on-phone', at: l.at, ...(l.words ? { words: l.words } : {}), ...(l.error ? { error: l.error } : {}) }))
     setRows([...theirs.map((t) => ({ ...t, ...(waiting.get(t.id)?.error ? { error: waiting.get(t.id)!.error } : {}) })), ...phone].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)))
   }, [adapters, rt, S.couldNotLoadMine])
   useEffect(() => { void load() }, [load, tick])

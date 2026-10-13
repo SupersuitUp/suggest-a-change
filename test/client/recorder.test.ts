@@ -53,6 +53,18 @@ describe('the recorder', () => {
     expect(await recoverTakes(next)).toEqual([])
   })
 
+  it('recovery can be limited to the takes the caller owns; the rest stay exactly as they were', async () => {
+    const store = await fresh()
+    await store.put('kv', 'rec:mine-1', { questionId: 'a|q', mime: 'audio/webm', startedAt: 1 })
+    await store.put('blobs', 'mine-1#00000', new Blob(['x']))
+    await store.put('kv', 'rec:theirs-1', { questionId: 'b|q', mime: 'audio/webm', startedAt: 1 })
+    await store.put('blobs', 'theirs-1#00000', new Blob(['y']))
+    expect((await recoverTakes(store, (q) => q.startsWith('a|'))).map((t) => t.key)).toEqual(['mine-1'])
+    expect(await store.get('kv', 'rec:theirs-1')).toBeDefined()
+    expect(await store.get('blobs', 'theirs-1#00000')).toBeDefined()
+    expect((await recoverTakes(store, (q) => q.startsWith('b|'))).map((t) => t.key)).toEqual(['theirs-1'])
+  })
+
   it('a take stopped normally is one blob, and leaves no chunks or marker behind', async () => {
     const store = await fresh()
     const take = await startTake(store, 'take-2', 'q-2')

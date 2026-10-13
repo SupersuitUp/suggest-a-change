@@ -17,7 +17,7 @@ import { DEFAULT_STRINGS } from './words.ts'
 type Take = Awaited<ReturnType<typeof defaultStartTake>>
 
 export function DefaultField(props: FieldProps) {
-  const { rt, id, label, value, onChange, placeholder, multiline = false, type = 'text', upload, onHeard, onKept, onHearing, disabled, startTake = defaultStartTake, maxMs, labels } = props
+  const { rt, id, label, value, onChange, placeholder, multiline = false, type = 'text', upload, onHeard, onKept, onHearing, disabled, startTake = defaultStartTake, maxMs, labels, scope } = props
   const L = labels ?? DEFAULT_STRINGS
   // With nowhere to send a take, recording would lose it silently: the control stays, switched off, and says why.
   const canRecord = Boolean(upload || onKept)
@@ -32,9 +32,11 @@ export function DefaultField(props: FieldProps) {
 
   async function begin() {
     if (take.current || wanted.current || disabled) return
+    // No time left: say so before recording instead of recording a note that will be refused.
+    if (maxMs !== undefined && maxMs <= 0) { toast({ id: 'sac-limit', text: L.voiceTotalLimit, tone: 'warn' }); return }
     wanted.current = true
     try {
-      const t = await startTake(rt.store, `take:${id}:${Date.now()}`, `field:${id}`)
+      const t = await startTake(rt.store, `take:${id}:${Date.now()}`, scope ? `${scope}|field:${id}` : `field:${id}`)
       if (!wanted.current) { await t.cancel(); return }
       take.current = t
       setRecording(true)

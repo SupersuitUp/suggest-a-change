@@ -21,8 +21,9 @@ export interface Media { key: string; file: string; name: string; type: string; 
 type Answers = { happened: string; expected: string; steps: string }
 const NO_ANSWERS: Answers = { happened: '', expected: '', steps: '' }
 type Diag = 'appVersion' | 'at' | 'screen' | 'device'
-// The takes this sheet's own fields make (a take cut off by a closed app is routed back by this id).
-const OUR_QUESTIONS = new Set(['field:words', 'field:happened', 'field:expected', 'field:steps'])
+// The fields of this sheet. A take cut off by a closed app is routed back by its question id, which names
+// the draft (app and account), so only the same account's interrupted take rejoins its draft.
+const OUR_FIELDS = ['words', 'happened', 'expected', 'steps']
 
 const metaKey = (key: string) => `sac-meta:${key}`
 const answersKey = (draft: string) => `${draft}#answers`
@@ -118,7 +119,8 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
       voiceN.current = highest(takes.map((t) => t.key))
       mediaN.current = highest(metas.map((m) => m.key))
       // A take cut off by a closed app is made whole by the recorder; the ones from this sheet's fields rejoin the draft.
-      const rescued = (await recoverTakes(rt.store)).filter((t) => OUR_QUESTIONS.has(t.questionId))
+      const prefix = `${key}|field:`
+      const rescued = await recoverTakes(rt.store, (q) => q.startsWith(prefix) && OUR_FIELDS.includes(q.slice(prefix.length)))
       if (rescued.length) {
         const id = (await saveDraft(rt.store, key, {})).reportId
         for (const t of rescued) {
@@ -128,7 +130,7 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
           const k = `voice:${id}:${n}`
           await rt.store.put('blobs', k, blob)
           await rt.store.del('blobs', t.key)
-          const v: Voice = { key: k, file: `voice-${n}.${extOf(blob.type, '')}`, ms: t.ms, field: t.questionId.slice(6) }
+          const v: Voice = { key: k, file: `voice-${n}.${extOf(blob.type, '')}`, ms: t.ms, field: t.questionId.slice(prefix.length) }
           await rt.store.put('kv', metaKey(k), v)
           takes = [...takes, v]
         }
@@ -188,7 +190,8 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
         multiline={opts.multiline ?? true}
         persist={false}
         startTake={adapters.startTake}
-        labels={{ holdToTalk: S.holdToTalk, stopTalking: S.stopTalking, micDenied: S.micDenied, voiceUnavailable: S.voiceUnavailable }}
+        labels={{ holdToTalk: S.holdToTalk, stopTalking: S.stopTalking, micDenied: S.micDenied, voiceUnavailable: S.voiceUnavailable, voiceTotalLimit: S.voiceTotalLimit }}
+        scope={key ?? undefined}
         maxMs={Math.min(ceilings.voiceMs, Math.max(0, ceilings.voiceTotalMs - used))}
         upload={(k, blob, ms) => keepTake(id, k, blob, ms)}
       />

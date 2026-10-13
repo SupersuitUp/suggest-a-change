@@ -14,6 +14,9 @@ import { draftKey, loadDraft } from '../../src/client/drafts.ts'
 import { openStore } from '../../src/client/idb.ts'
 import type { Report, StoreAdapter, Summary } from '../../src/client/reports.ts'
 import { effectiveCeilings, receiptWords } from '../../src/client/words.ts'
+import { Receipt } from '../../src/client/receipt.tsx'
+import { getRuntime, refreshIdentity } from '../../src/client/runtime.ts'
+import { Toasts } from '../../src/client/toast.tsx'
 import { clearToasts } from '../../src/client/toast.tsx'
 import { textFieldsWithoutVoice } from './voice-rule.ts'
 
@@ -348,11 +351,10 @@ describe('the sheet', () => {
 
   it('a take cut off by a closed app rejoins the draft', async () => {
     const { adapters, db } = await setup()
-    await db.put('kv', 'rec:take:words:1', { questionId: 'field:words', mime: 'audio/webm', startedAt: 1 })
+    const scope = draftKey({ app: adapters.words.app, account: 'sam' })
+    await db.put('kv', 'rec:take:words:1', { questionId: `${scope}|field:words`, mime: 'audio/webm', startedAt: 1 })
     await db.put('blobs', 'take:words:1#00000', new Blob(['a'], { type: 'audio/webm' }))
     await db.put('blobs', 'take:words:1#00001', new Blob(['b'], { type: 'audio/webm' }))
-    const { submitted } = { submitted: [] as Report[] }
-    void submitted
     await sheet(adapters)
     await screen.findByText('Voice note 1, 0:02')
     expect((sendButton() as HTMLButtonElement).disabled).toBe(false)
@@ -575,33 +577,79 @@ describe('My suggestions and the detail view', () => {
     fireEvent.change(screen.getByLabelText('Add to it'), { target: { value: 'also the button is too small' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add' }))
     await screen.findByText('Added.')
+    await waitFor(() => expect(appended).toHaveLength(1))
     expect(appended[0].words).toBe('also the button is too small')
+    expect(appended[0].followId).toMatch(/^f-/)
   })
 
-  it('a thrown append shows a message', async () => {
-    const { adapters } = await setup({}, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }), append: async () => { throw new TypeError('offline') } })
-    render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
-    fireEvent.change(await screen.findByLabelText('Add to it'), { target: { value: 'more' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
-    expect((await screen.findByRole('alert')).textContent).toBe('That could not be added. Try again.')
-  })
-
-  it('a voice note recorded under "Add to it" is kept, uploaded as a part and sent with the append', async () => {
-    const blob = new Blob(['audio'], { type: 'audio/mp4' })
-    const startTake = vi.fn(async (_s: unknown, key: string) => ({ started: 0, level: () => null, stop: async () => ({ key, blob, ms: 2000 }), cancel: async () => {} }))
+  it('a follow-up the app refuses shows its reason and a Try again, and lands when retried; a thrown one just waits', async () => {
+    let mode: 'refuse' | 'throw' | 'ok' = 'refuse'
     const appended: Record<string, unknown>[] = []
-    const { adapters, parts } = await setup({ Field: undefined, startTake: startTake as unknown as Adapters['startTake'] }, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }), append: async (_i, more) => { appended.push(more); return 'done' } })
+    const { adapters } = await setup({}, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }), append: async (_i, more) => {
+      if (mode === 'throw') throw new TypeError('offline')
+      if (mode === 'refuse') return { refused: 'that report is closed to changes' }
+      appended.push(more); return 'done'
+    } })
     render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
-    const hold = await screen.findByRole('button', { name: 'Hold to talk: Add to it' })
-    fireEvent.pointerDown(hold)
+    fireEvent.change(await screen.findByLabelText('Add to it'), { target: { value: 'more words' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    const row = await waitFor(() => { const r = document.querySelector('[data-followup]'); expect(r?.querySelector('[role="alert"]')?.textContent).toBe('that report is closed to changes'); return r! })
+    mode = 'throw'
+    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(document.querySelector('[data-followup]')?.textContent).toContain('Waiting to send'))
+    mode = 'ok'
+    refreshIdentity()
+    await act(async () => { const rt = await getRuntime(adapters, SAM); await rt.drain() })
+    await waitFor(() => expect(appended).toHaveLength(1))
+    await waitFor(() => expect(document.querySelector('[data-followup]')).toBeNull())
+  })
+
+  it('a voice note under "Add to it" is as durable as a report: nothing is sent before Add, it queues through the outbox, keeps its refusal and retries, and only then does its blob go', async () => {
+    const blob = new Blob(['audio'], { type: 'audio/mp4' })
+    const db0 = await openStore(`fu-${++n}`)
+    const startTake = vi.fn(async (_s: unknown, key: string) => { await db0.put('blobs', key, blob); return { started: 0, level: () => null, stop: async () => ({ key, blob, ms: 2000 }), cancel: async () => {} } })
+    let fail = true
+    const appended: Record<string, unknown>[] = []
+    const order: string[] = []
+    const { adapters, parts } = await setup({ Field: undefined, phone: { store: db0 }, startTake: startTake as unknown as Adapters['startTake'] }, SAM, {
+      one: async (id) => ({ id, status: 'received', words: 'w' }),
+      uploadPart: async (id, file) => { order.push('part'); if (fail) return { refused: 'storage is full' }; parts.push({ id, file }); return 'done' },
+      append: async (_i, more) => { order.push('append'); appended.push(more); return 'done' },
+    })
+    render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Hold to talk: Add to it' }))
     await screen.findByRole('button', { name: /Stop and keep/ })
     fireEvent.pointerUp(screen.getByRole('button', { name: /Stop and keep/ }))
     await screen.findByText('Voice note 1, 0:02')
-    expect(parts).toHaveLength(1)
-    expect(parts[0].file).toMatch(/^added-\d+\.mp4$/)
+    expect(order).toEqual([])
+    expect((await db0.all('blobs')).map((b) => b.key).filter((k) => k.startsWith('take:'))).toEqual([])
     fireEvent.click(screen.getByRole('button', { name: 'Add' }))
-    await screen.findByText('Added.')
+    const row = await waitFor(() => { const r = document.querySelector('[data-followup]'); expect(r?.querySelector('[role="alert"]')?.textContent).toBe('storage is full'); return r! })
+    expect((await db0.all('blobs')).filter((b) => b.key.startsWith('fu:')).length).toBe(1)
+    expect(order[0]).toBe('append')
+    fail = false
+    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(parts).toHaveLength(1))
+    expect(appended).toHaveLength(1)
     expect((appended[0].voice as { ms: number }[])[0].ms).toBe(2000)
+    expect(parts[0].file).toMatch(/^added-f-.*\.mp4$/)
+    await waitFor(async () => expect((await db0.all('blobs')).filter((b) => b.key.startsWith('fu:'))).toHaveLength(0))
+    expect((await db0.all('kv')).filter((k) => k.key.includes('#fu:'))).toHaveLength(0)
+  })
+
+  it('a follow-up being written survives closing the detail, and a take cut off under "Add to it" rejoins it', async () => {
+    const { adapters, db } = await setup({ Field: undefined }, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }) })
+    const key = draftKey({ app: adapters.words.app, account: 'sam' })
+    await db.put('kv', 'rec:take:append:1', { questionId: `${key}|field:append-r-20261012120000-abcdef`, mime: 'audio/webm', startedAt: 1 })
+    await db.put('blobs', 'take:append:1#00000', new Blob(['a'], { type: 'audio/webm' }))
+    const first = render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
+    await screen.findByText('Voice note 1, 0:01')
+    fireEvent.change(screen.getByLabelText('Add to it'), { target: { value: 'half typed' } })
+    await waitFor(async () => expect((await db.get<{ words: string }>('kv', `${key}#fu:r-20261012120000-abcdef`))?.words).toBe('half typed'))
+    first.unmount()
+    render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
+    await screen.findByText('Voice note 1, 0:01')
+    await waitFor(() => expect((screen.getByLabelText('Add to it') as HTMLTextAreaElement).value).toBe('half typed'))
   })
 
   it('where the app cannot take a voice note afterwards, the record control says so instead of recording', async () => {
@@ -699,5 +747,94 @@ describe('the default field', () => {
     const store = await openStore(`field-${++n}`)
     render(<DefaultField rt={{ store }} id="x" label="Say" value="" onChange={() => {}} />)
     expect((screen.getByRole('button', { name: 'Voice notes cannot be added here: Say' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+describe('accounts on one phone', () => {
+  async function waitingAsSam() {
+    let online = false
+    const t = await setup({}, SAM)
+    t.adapters.phone = { store: t.db, reach: { check: async () => online, mark() {} } }
+    const first = await sheet(t.adapters)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'sam only' } })
+    fireEvent.click(sendButton())
+    await screen.findAllByText('On this phone, waiting to send.')
+    first.unmount()
+    return { ...t, goOnline: () => { online = true } }
+  }
+
+  it('an account switch while My suggestions stays mounted removes the old rows and drains nothing of the old account', async () => {
+    const t = await waitingAsSam()
+    let current: Identity | null = SAM
+    const adapters: Adapters = { ...t.adapters, identity: async () => current }
+    render(<MySuggestions adapters={adapters} />)
+    await screen.findByText('sam only')
+    t.goOnline()
+    current = JO
+    await act(async () => { refreshIdentity(); await new Promise((r) => setTimeout(r, 30)) })
+    await screen.findByText('You have not sent a suggestion yet.')
+    expect(screen.queryByText('sam only')).toBeNull()
+    expect(t.submitted).toHaveLength(0)
+    current = null
+    await act(async () => { refreshIdentity() })
+    expect((await screen.findByRole('alert')).textContent).toBe('Sign in to see your suggestions.')
+  })
+
+  it('a rebuilt adapters object asks who is signed in again', async () => {
+    const t = await waitingAsSam()
+    const { rerender } = render(<MySuggestions adapters={t.adapters} />)
+    await screen.findByText('sam only')
+    rerender(<MySuggestions adapters={{ ...t.adapters, identity: async () => JO }} />)
+    await screen.findByText('You have not sent a suggestion yet.')
+  })
+
+  it('every send confirms the account first: a stale runtime does not drain under another session', async () => {
+    const t = await waitingAsSam()
+    t.goOnline()
+    const stale = await getRuntime({ ...t.adapters, identity: async () => SAM }, SAM)
+    stale.adapters = { ...t.adapters, identity: async () => JO }
+    await stale.drain()
+    expect(t.submitted).toHaveLength(0)
+    stale.adapters = { ...t.adapters, identity: async () => SAM }
+    await stale.drain()
+    expect(t.submitted).toHaveLength(1)
+  })
+
+  it('a take cut off under one account does not rejoin another account\'s draft, and still rejoins its own', async () => {
+    const { adapters, db } = await setup()
+    const joKey = draftKey({ app: adapters.words.app, account: 'jo' })
+    await db.put('kv', 'rec:take:jo:1', { questionId: `${joKey}|field:words`, mime: 'audio/webm', startedAt: 1 })
+    await db.put('blobs', 'take:jo:1#00000', new Blob(['a'], { type: 'audio/webm' }))
+    const first = await sheet(adapters)
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+    expect(screen.queryByText(/Voice note 1/)).toBeNull()
+    expect(await db.get('kv', 'rec:take:jo:1')).toBeDefined()
+    first.unmount()
+    await sheet({ ...adapters, identity: async () => JO })
+    await screen.findByText('Voice note 1, 0:01')
+  })
+})
+
+describe('smaller promises', () => {
+  it('with no voice time left, the field refuses before recording', async () => {
+    const store = await openStore(`field-${++n}`)
+    const startTake = vi.fn()
+    render(<><DefaultField rt={{ store }} id="w" label="Say" value="" onChange={() => {}} upload={async () => ({ audio: 'k', text: '' })} startTake={startTake as never} maxMs={0} labels={{ holdToTalk: 'Hold', stopTalking: 'Stop', micDenied: 'no mic', voiceUnavailable: 'off', voiceTotalLimit: 'No voice time left; type the rest.' }} /><Toasts /></>)
+    fireEvent.pointerDown(screen.getByRole('button'))
+    expect(await screen.findByText('No voice time left; type the rest.')).toBeTruthy()
+    expect(startTake).not.toHaveBeenCalled()
+  })
+
+  it('the receipt says nothing for an id this phone never queued', async () => {
+    const { adapters } = await setup()
+    const { container } = render(<Receipt adapters={adapters} reportId="r-20261012120000-zzzzzz" />)
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+    expect(container.textContent).toBe('')
+  })
+
+  it('the strip\'s accessible name honors the app\'s own words', async () => {
+    const { adapters } = await setup({ words: { app: `app${++n}`, owner: 'Alex', text: { stepLabel: 'Progress' } } }, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }) })
+    render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
+    expect(await screen.findByRole('list', { name: 'Progress' })).toBeTruthy()
   })
 })

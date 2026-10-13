@@ -87,13 +87,15 @@ function makeMeter(stream: MediaStream): { level(): number; close(): void } | nu
 }
 
 /** Takes the app was closed in the middle of, made whole again. */
-export async function recoverTakes(store: Store): Promise<{ questionId: string; key: string; ms: number }[]> {
+/** `claim` limits the recovery to takes the caller owns (by question id); the rest are left exactly as they are for their owner. */
+export async function recoverTakes(store: Store, claim?: (questionId: string) => boolean): Promise<{ questionId: string; key: string; ms: number }[]> {
   const out: { questionId: string; key: string; ms: number }[] = []
   // By prefix: this runs before the first paint, and `kv` also holds every saved view.
   const metas = (await store.all<Meta>('kv', 'rec:')).filter((r) => r.key.startsWith('rec:'))
   if (!metas.length) return out
   const blobs = await store.all<Blob>('blobs')
   for (const { key: metaKey, value: m } of metas) {
+    if (claim && !claim(m.questionId)) continue
     const key = metaKey.slice(4)
     const parts = blobs.filter((b) => b.key.startsWith(`${key}#`)).sort((a, b) => a.key.localeCompare(b.key))
     if (parts.length) {

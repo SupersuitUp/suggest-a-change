@@ -71,10 +71,22 @@ test('every built client file that imports react starts with "use client"', () =
   assert.ok(checked >= 8, `only ${checked} react files found in dist/client`);
 });
 
-test("no real person's first name appears in the published files", () => {
-  const names = new RegExp(`\\b(${["gar" + "y", "wil" + "son", "des" + "iet"].join("|")})`, "i"); // built from pieces so this file does not match itself
+test("no real person's first name appears in the repo's text files", async () => {
+  // SHA-256 digests of lowercase names that must never appear in this public repo. The names themselves are
+  // deliberately not written down here; every lowercase word in every text file is hashed and compared.
+  const { createHash } = await import("node:crypto");
+  const NEVER = new Set([
+    "21dfc18dd04cd6a356e2f1e36e8285bc060a5d589d3ac707e56ac9654903b589",
+    "919e680ee460849a74a82614de062bfbbac76bc98a2f692952b5fcb6364e598b",
+    "43a0f8aad9d45805f56400d137abe21f19861e5d0523ecfdfcff41a8203986b2",
+  ]);
   const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => e.name === "node_modules" || e.name === ".git" || e.name === "dist" ? [] : e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]);
+  const seen = new Map();
   for (const f of walk(ROOT).filter((p) => /\.(ts|tsx|mjs|md|json|css|yml)$/.test(p) && !p.endsWith("package-lock.json"))) {
-    assert.doesNotMatch(readFileSync(f, "utf8"), names, `${f} names a real person`);
+    for (const w of new Set(readFileSync(f, "utf8").toLowerCase().match(/[a-z]+/g) ?? [])) {
+      if (!seen.has(w)) seen.set(w, createHash("sha256").update(w).digest("hex"));
+      assert.ok(!NEVER.has(seen.get(w)), `${f} contains a name that must not appear in this repo`);
+    }
   }
+  assert.ok(seen.size > 500);
 });

@@ -39,7 +39,6 @@ export interface Strings {
   withLegend: string
   goesTo: (owner: string) => string
   includes: (parts: string[]) => string
-  includesNothing: string
   /** The part of the line that is always sent: where the person was. */
   screenName: string
   alwaysSent: (screen: string, route: string) => string
@@ -120,7 +119,6 @@ export const DEFAULT_STRINGS: Strings = {
   withLegend: 'What goes with it',
   goesTo: (owner) => `Goes to ${owner} and Freeda.`,
   includes: (parts) => `Includes ${list(parts)}.`,
-  includesNothing: 'Includes nothing extra.',
   screenName: "this screen's name",
   alwaysSent: (screen, route) => `Always sent: the screen you are on (${screen}) and its address (${route}).`,
   diagAppVersion: "the app's version",

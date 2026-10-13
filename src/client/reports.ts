@@ -23,8 +23,11 @@ export interface StoreAdapter {
   uploadPart(reportId: string, file: string, part: number, bytes: Blob): Promise<'done' | { refused: string }>
   mine(): Promise<Summary[]>
   one(id: string): Promise<Report>
+  /** Adds to a report. Also at-least-once: it must dedupe by (id, `more.followId`). */
   append(id: string, more: Record<string, unknown>): Promise<'done' | { refused: string }>
 }
+
+export const queuedKey = (reportId: string) => `sac-queued:${reportId}`
 
 export interface PartRef { file: string; part?: number; blob: string }
 
@@ -53,6 +56,8 @@ export async function queueReport(
     const d = await loadDraft(store, draft)
     if (d && d.reportId === report.id && !d.queued) await store.put('kv', draft, { ...d, queued: true })
   }
+  // Remembered on the phone, so a receipt can tell a report it queued (now landed) from an id it never saw.
+  await store.put('kv', queuedKey(report.id), true)
   let n = 0
   for (const p of parts) {
     n++
@@ -91,5 +96,33 @@ export function makeReportSender({ store, adapter }: { store: Store; adapter: St
       if (!others.length) await clearDraft(store, op.body.draft, reportId)
     }
     return r
+  }
+}
+
+/** Puts a follow-up (words, voice notes) to a report in the outbox: the follow-up first, then each take as a part, so it is as durable as the report was. The ids come from the report id and a follow-up id made when
+ *  the person started it, so queuing it again replaces it. Nothing is sent here. */
+export async function queueFollowUp(
+  { outbox, reportId, followId, words, voice, draft, now = () => Date.now() }: {
+    outbox: { enqueue(op: Op): Promise<void> }
+    reportId: string
+    followId: string
+    words: string
+    /** Each take: its file name, length and the key of its blob in the `blobs` store. */
+    voice: { file: string; ms: number; blob: string }[]
+    draft?: string
+    now?: () => number
+  },
+): Promise<void> {
+  const at = now()
+  // The follow-up first, its takes after it: the same order a report travels in, so the app knows what is coming.
+  await outbox.enqueue({
+    id: opId('followUp', reportId, followId), kind: 'followUp',
+    body: { reportId, followId, words, at: new Date(at).toISOString(), voice: voice.map(({ file, ms }) => ({ file, ms })), draft },
+    at,
+  })
+  let n = 0
+  for (const v of voice) {
+    n++
+    await outbox.enqueue({ id: opId('part', reportId, v.file, '0'), kind: 'reportPart', body: { reportId, file: v.file, part: 0, followId, draft }, blob: v.blob, at: at + n })
   }
 }
