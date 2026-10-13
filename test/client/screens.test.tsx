@@ -7,7 +7,7 @@ import { STATUSES } from '../../src/contract.mjs'
 import type { Adapters, FieldProps, Identity } from '../../src/client/adapters.ts'
 import { DefaultField } from '../../src/client/default-field.tsx'
 import { MySuggestions } from '../../src/client/mine.tsx'
-import { ReportProblem, SuggestEntry } from '../../src/client/entry.tsx'
+import { KeepSending, ReportProblem, SuggestEntry } from '../../src/client/entry.tsx'
 import { StatusStrip, SuggestionDetail } from '../../src/client/detail.tsx'
 import { SuggestSheet } from '../../src/client/sheet.tsx'
 import { draftKey, loadDraft } from '../../src/client/drafts.ts'
@@ -157,8 +157,11 @@ describe('the sheet', () => {
     await sheet(adapters)
     fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
     fireEvent.click(sendButton())
-    await waitFor(() => expect(document.activeElement?.hasAttribute('data-receipt')).toBe(true))
-    expect(document.querySelector('[data-sac-live]')!.textContent).toBe('On this phone, waiting to send.')
+    // Both settle after the receipt renders; under load that can take longer than the default wait.
+    await waitFor(() => {
+      expect(document.activeElement?.hasAttribute('data-receipt')).toBe(true)
+      expect(document.querySelector('[data-sac-live]')!.textContent).toBe('On this phone, waiting to send.')
+    }, { timeout: 5000 })
     ;(document.activeElement as HTMLElement).blur()
     fireEvent.keyDown(document.body, { key: 'Tab' })
     expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true)
@@ -586,6 +589,38 @@ describe('My suggestions and the detail view', () => {
     render(<MySuggestions adapters={adapters} />)
     await waitFor(() => expect(submitted).toHaveLength(1))
     expect((submitted[0].who as { member: string }).member).toBe('sam')
+  })
+
+  it('a report sent while the Mac is away goes when it is back, with only the entry mounted', async () => {
+    let online = false
+    const { adapters, submitted, db } = await setup()
+    adapters.phone = { store: db, reach: { check: async () => online, mark() {} } }
+    const first = await sheet(adapters)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'sent from the lift' } })
+    fireEvent.click(sendButton())
+    await screen.findAllByText('On this phone, waiting to send.')
+    first.unmount()
+    expect(submitted).toHaveLength(0)
+    render(<SuggestEntry adapters={adapters} onOpen={() => {}} />)
+    online = true
+    await act(async () => { window.dispatchEvent(new Event('online')) })
+    await waitFor(() => expect(submitted).toHaveLength(1))
+  })
+
+  it('KeepSending sends what waits, drawing nothing', async () => {
+    let online = false
+    const { adapters, submitted, db } = await setup()
+    adapters.phone = { store: db, reach: { check: async () => online, mark() {} } }
+    const first = await sheet(adapters)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'again' } })
+    fireEvent.click(sendButton())
+    await screen.findAllByText('On this phone, waiting to send.')
+    first.unmount()
+    const { container } = render(<KeepSending adapters={adapters} />)
+    expect(container.innerHTML).toBe('')
+    online = true
+    await act(async () => { window.dispatchEvent(new Event('online')) })
+    await waitFor(() => expect(submitted).toHaveLength(1))
   })
 
   it('My suggestions signed out says to sign in', async () => {

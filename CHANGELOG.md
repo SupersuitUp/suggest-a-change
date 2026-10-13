@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 (2026-10-13)
+
+- **A report sent with the Mac away is sent when it is back, even with the sheet closed.** The outbox used to move only while the sheet, My suggestions or a detail screen was mounted, so a report waited until the person opened one again. `<SuggestEntry>` now keeps the outbox moving while it is mounted, and `KeepSending` is exported from `./client` for a host with no always-mounted entry (it draws nothing).
+- A voice file's upload link now allows 200,000 bytes per second of declared length, so an uncompressed WAV is not refused.
+- When finalize refuses a file, the pending entry is removed first and the stored object is deleted only if that removal happened.
+- The client test "after Send, focus moves to the receipt" waits for both of its conditions, for longer.
+
 ## 0.1.0 (2026-10-12)
 
 First release. The report contract and flow map: kinds, roles, ceilings, statuses, who acts at each step, and report validation.

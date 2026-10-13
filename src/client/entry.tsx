@@ -4,8 +4,16 @@
 // shows the sheet. `<ReportProblem>` is the same control for an error screen, already filled in.
 import { useEffect, useState } from 'react'
 import type { Adapters } from './adapters.ts'
+import { useRuntime } from './runtime.ts'
 import { SuggestSheet } from './sheet.tsx'
 import { stringsFor } from './words.ts'
+
+/** Keeps the phone's outbox moving (on reconnect and every 15 seconds) for as long as it is mounted, with nothing drawn.
+ *  <SuggestEntry> already does this; a host with no always-mounted entry mounts this once, high in the app. */
+export function KeepSending({ adapters }: { adapters: Adapters }) {
+  useRuntime(adapters)
+  return null
+}
 
 export function SuggestEntry({ adapters, onOpen, className }: { adapters: Adapters; onOpen(): void; className?: string }) {
   const S = stringsFor(adapters.words)
@@ -23,6 +31,7 @@ export function SuggestEntry({ adapters, onOpen, className }: { adapters: Adapte
   }
   return (
     <span className="sac-entry-wrap">
+      <KeepSending adapters={adapters} />
       <button type="button" data-suggest-entry="" className={`sac-entry${className ? ` ${className}` : ''}`} aria-busy={busy || undefined} onClick={() => void press()}>{S.entry}</button>
       {why ? <span role="status" className="sac-entry-why">{why}</span> : null}
     </span>

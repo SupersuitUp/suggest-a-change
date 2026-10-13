@@ -108,7 +108,7 @@ export const APPROVAL_LEASE_MS = 7 * 24 * 3600_000
 export const READ_TTL_MS = 5 * 60_000
 export const VOICE_FILE_BYTES = 25 * 2 ** 20
 /** A voice file may be this many bytes per declared second (768 kbit/s, generous for any recorder) plus a little slack: ten seconds cannot claim 25 MB. */
-export const VOICE_BYTES_PER_SECOND = 96_000
+export const VOICE_BYTES_PER_SECOND = 200_000
 /** How long a report with missing attachments waits before it is offered to a Mac anyway. */
 export const INCOMPLETE_GRACE_MS = 60 * 60_000
 const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
@@ -362,8 +362,8 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     if (!real) return json(409, { error: 'that file has not arrived yet' })
     const declared = declaredFile(r, file)
     const refuse = async (error: string) => {
-      await store.discard({ reportId: id, file }) // nothing unverified stays in storage
-      await store.setFile(id, file, null)
+      // Drop the pending entry first and delete the object only if that really removed it: a verified entry that won a race is never orphaned.
+      if (await store.setFile(id, file, null)) await store.discard({ reportId: id, file }) // nothing unverified stays in storage
       return json(422, { error })
     }
     if (!sameType(state.pending.type, real.type) || !sameType(declared?.type ?? state.pending.type, real.type)) return refuse('the file\'s contents are not the type it was declared as')
