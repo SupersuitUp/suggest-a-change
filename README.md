@@ -144,6 +144,48 @@ npm run check
 
 Development needs Node 22 or newer (vitest and jsdom); the built package runs on Node 20 and up.
 
+## The server half (`./server`)
+
+Web-standard only (`Request`, `Response`, `crypto.subtle`), no runtime dependency, nothing from react or the client. A hosted app mounts the handlers and supplies a storage adapter.
+
+```ts
+import { createReportHandlers } from "@supersuit/suggest-a-change/server";
+
+const h = createReportHandlers({
+  store,                                  // your HostedStore (see runStoreConformance)
+  identity: async (req) => member,        // { account } or null
+  maintainers: ["mo"],                    // member keys with maintainer permission; ordinary membership never is
+  agent: async (req) => maintainerKey,    // which maintainer's Mac is calling, or null
+  limits: { perPersonPerDay: 10 },        // may lower a ceiling, never raise it
+  tell: (e) => notify(e),                 // ids only, never words; a failure never fails the request
+});
+```
+
+| Route | Handler | Answers |
+| --- | --- | --- |
+| `POST /api/reports` | `submit` | 200 (a repeat of the same id is 200 too), 400, 401, 413, 422, 429 |
+| `POST /api/reports/upload-url` | `uploadUrl` | 200 `{ url, headers }` (or `{ done }`), 400, 401, 404, 413 |
+| `POST /api/reports/:id/finalize` | `finalize` | 200, 401, 404, 409 (not arrived yet), 422 (contents are not the declared type) |
+| `GET /api/reports/mine` | `mine` | 200, 401 |
+| `GET /api/reports/:id` | `one(req, id)` | 200, 401, 404 (missing and not yours look the same) |
+| `POST /api/reports/:id/append` | `append(req, id)` | 200, 400, 401, 404 |
+| `GET /api/agent/reports` | `agentList` | 200 `{ reports }`, claims each for ten minutes |
+| `GET /api/agent/reports/:id/files/:file` | `agentFile(req, id, file)` | 200 `{ url, type, bytes, sha256 }`, 404 |
+| `POST /api/agent/reports/:id/settle` | `agentSettle` | 200, 409 |
+| `POST /api/agent/reports/:id/claim-approval` | `agentClaimApproval` | 200, or 409 `{ claimedBy }` |
+| `POST /api/agent/reports/:id/status` | `agentStatus` | 200, 400, 409 |
+
+A client adapter's `uploadPart` asks `upload-url`, PUTs the bytes straight to storage, then calls `finalize`. Nothing is uploaded through the app's server and no handler reads a body over 256 KB (the module refuses anything over 4 MB first).
+
+The role stored on a report comes from the signed-in member and the `maintainers` list. A `who` sent by the phone is ignored; a report carrying `timeline`, `status`, `plan` or `decision` is refused. `sniffType(firstBytes)` names a file by its bytes (jpeg, png, webp, heic/heif, gif, mp4/mov, webm, m4a/aac, mp3, wav, ogg/opus; anything else is `null`) and `finalize` refuses a file whose bytes are not the type it was declared as.
+
+**Every adapter must pass the conformance suite**, against the adapter and its real storage:
+
+```ts
+import { runStoreConformance } from "@supersuit/suggest-a-change/server";
+await runStoreConformance(() => ({ store, upload, advance, now, collectedKeys }), { test }); // the runner's own `test`
+```
+
 ## What is here, and what is coming
 
 | Export | State |
@@ -153,7 +195,7 @@ Development needs Node 22 or newer (vitest and jsdom); the built package runs on
 | `"./client"` the toast, entry, sheet, receipt, My suggestions and detail (React 19, optional peer) | here |
 | `"./styles.css"` optional defaults | here |
 | `"./check"` and the `suggest-a-change-check` and `suggest-a-change init` commands | here |
-| `"./server"` the receiving side | coming |
+| `"./server"` the receiving side: handlers, store conformance suite, byte sniffing | here |
 
 Each export is added to `package.json` in the same change as its code, so nothing here points at a file that does not exist.
 

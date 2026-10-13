@@ -95,5 +95,26 @@ test('"./check" and the suggest-a-change-check command are exported, and a scope
   assert.equal(pkg.exports["./check"], "./src/check/index.mjs");
   assert.equal(pkg.bin["suggest-a-change-check"], "bin/check.mjs");
   assert.equal(pkg.publishConfig.access, "public");
-  assert.ok(!("./server" in pkg.exports), '"./server" is added with its code, not before');
+});
+
+test('"./server" ships types and ESM, and imports nothing from react, the client or any package', () => {
+  assert.deepEqual(Object.keys(pkg.exports["./server"]).sort(), ["import", "types"]);
+  const dir = join(ROOT, "dist", "server");
+  let checked = 0;
+  for (const f of readdirSync(dir).filter((x) => x.endsWith(".js"))) {
+    checked++;
+    const src = readFileSync(join(dir, f), "utf8");
+    // Every import specifier must be relative (the contract and sibling server files), except the one
+    // dynamic node:test the conformance suite falls back to when its runner passes no `test`.
+    for (const m of src.matchAll(/(?:from|import\()\s*["']([^"']+)["']/g)) {
+      assert.ok(m[1].startsWith("./") || m[1].startsWith("../"), `dist/server/${f} imports ${m[1]}`);
+      assert.ok(!/client|react/.test(m[1]), `dist/server/${f} reaches the client or react through ${m[1]}`);
+    }
+  }
+  assert.ok(checked >= 5, `only ${checked} files in dist/server`);
+});
+
+test("importing the server entry needs no react", async () => {
+  const mod = await import(join(ROOT, "dist", "server", "index.js"));
+  for (const name of ["createReportHandlers", "runStoreConformance", "sniffType"]) assert.equal(typeof mod[name], "function", name);
 });
