@@ -2,7 +2,7 @@
 // THE ENTRY: one control, `data-suggest-entry`, which is the contract the screen checker looks for.
 // Signed out, it opens nothing and says why. Signed in, it hands over to the host (`onOpen`), which
 // shows the sheet. `<ReportProblem>` is the same control for an error screen, already filled in.
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type AriaRole } from 'react'
 import type { Adapters } from './adapters.ts'
 import { useRuntime } from './runtime.ts'
 import { SuggestSheet } from './sheet.tsx'
@@ -15,7 +15,7 @@ export function KeepSending({ adapters }: { adapters: Adapters }) {
   return null
 }
 
-export function SuggestEntry({ adapters, onOpen, className }: { adapters: Adapters; onOpen(): void; className?: string }) {
+export function SuggestEntry({ adapters, onOpen, className, role }: { adapters: Adapters; onOpen(): void; className?: string; /** An ARIA role for the button (for example `menuitem` when the host shows it as a menu row). Unset by default. */ role?: AriaRole }) {
   const S = stringsFor(adapters.words)
   const [why, setWhy] = useState('')
   const [busy, setBusy] = useState(false)
@@ -32,7 +32,7 @@ export function SuggestEntry({ adapters, onOpen, className }: { adapters: Adapte
   return (
     <span className="sac-entry-wrap">
       <KeepSending adapters={adapters} />
-      <button type="button" data-suggest-entry="" className={`sac-entry${className ? ` ${className}` : ''}`} aria-busy={busy || undefined} onClick={() => void press()}>{S.entry}</button>
+      <button type="button" role={role} data-suggest-entry="" className={`sac-entry${className ? ` ${className}` : ''}`} aria-busy={busy || undefined} onClick={() => void press()}>{S.entry}</button>
       {why ? <span role="status" className="sac-entry-why">{why}</span> : null}
     </span>
   )

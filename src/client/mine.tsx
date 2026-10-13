@@ -8,6 +8,7 @@ import type { Adapters } from './adapters.ts'
 import { SuggestionDetail } from './detail.tsx'
 import type { Summary } from './reports.ts'
 import { useRuntime, useTick } from './runtime.ts'
+import { mineCacheKey, readCache, writeCache } from './view-cache.ts'
 import { Toasts } from './toast.tsx'
 import { statusMeaning, statusWords, stringsFor } from './words.ts'
 
@@ -21,26 +22,55 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
   const [rows, setRows] = useState<Row[] | null>(null)
   const [open, setOpen] = useState<string | null>(null)
   const [bad, setBad] = useState('')
+  const [updating, setUpdating] = useState(false)
 
   // Another account (or none) shows nothing of the last one's rows.
   const loads = useRef(0)
-  useEffect(() => { loads.current++; setRows(null); setOpen(null) }, [rt])
+  // What the app last said (or the phone kept of it) for this account; null until either is known.
+  const known = useRef<Summary[] | null>(null)
+  useEffect(() => { loads.current++; known.current = null; setRows(null); setOpen(null); setBad(''); setUpdating(false) }, [rt])
 
   const load = useCallback(async () => {
     if (!rt) return
     // Only the newest load may paint: one still running for the account just replaced must not draw its rows.
     const mine_ = ++loads.current
-    let theirs: Summary[] = []
-    let failed = false
-    try { theirs = await adapters.store.mine() } catch { failed = true }
+    const key = mineCacheKey({ app: adapters.words.app, account: rt.who.account })
+    const paint = (theirs: Summary[], local: Awaited<ReturnType<typeof rt.waiting>>) => {
+      const waiting = new Map(local.map((l) => [l.id, l]))
+      // A report the app already lists keeps its own status; one still on the phone is listed as on the phone.
+      const phone: Row[] = local.filter((l) => !l.onlyFollowUp && !theirs.some((t) => t.id === l.id)).map((l) => ({ id: l.id, status: 'on-phone', at: l.at, ...(l.words ? { words: l.words } : {}), ...(l.error ? { error: l.error } : {}) }))
+      setRows([...theirs.map((t) => ({ ...t, ...(waiting.get(t.id)?.error ? { error: waiting.get(t.id)!.error } : {}) })), ...phone].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)))
+    }
+    // Draw at once from what the phone already holds, then ask the app.
+    if (known.current === null) {
+      const saved = await readCache<Summary[]>(rt.store, key)
+      if (mine_ !== loads.current) return
+      if (Array.isArray(saved)) known.current = saved
+    }
+    if (known.current !== null) {
+      const local = await rt.waiting()
+      if (mine_ !== loads.current) return
+      paint(known.current, local)
+      setUpdating(true)
+    }
+    let theirs: Summary[] | null = null
+    try { theirs = await adapters.store.mine() } catch { theirs = null }
     const local = await rt.waiting()
     if (mine_ !== loads.current) return
-    setBad(failed ? S.couldNotLoadMine : '')
-    const waiting = new Map(local.map((l) => [l.id, l]))
-    // A report the app already lists keeps its own status; one still on the phone is listed as on the phone.
-    const phone: Row[] = local.filter((l) => !l.onlyFollowUp && !theirs.some((t) => t.id === l.id)).map((l) => ({ id: l.id, status: 'on-phone', at: l.at, ...(l.words ? { words: l.words } : {}), ...(l.error ? { error: l.error } : {}) }))
-    setRows([...theirs.map((t) => ({ ...t, ...(waiting.get(t.id)?.error ? { error: waiting.get(t.id)!.error } : {}) })), ...phone].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)))
-  }, [adapters, rt, S.couldNotLoadMine])
+    setUpdating(false)
+    if (theirs) {
+      known.current = theirs
+      void writeCache(rt.store, key, theirs)
+      setBad('')
+      paint(theirs, local)
+    } else if (known.current !== null) {
+      setBad(S.offlineShowingSaved)
+      paint(known.current, local)
+    } else {
+      setBad(S.couldNotLoadMine)
+      paint([], local)
+    }
+  }, [adapters, rt, S.couldNotLoadMine, S.offlineShowingSaved])
   useEffect(() => { void load() }, [load, tick])
 
   if (who === null) return <p role="alert">{S.signedOutMine}</p>
@@ -56,6 +86,7 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
     <section className="sac-mine" aria-labelledby="sac-mine-title">
       <h2 id="sac-mine-title" className="sac-title">{S.mineTitle}</h2>
       {bad ? <p role="alert" className="sac-error">{bad}</p> : null}
+      {updating ? <p role="status" className="sac-muted" data-updating="">{S.updating}</p> : null}
       {rows === null ? <p>{S.loading}</p> : rows.length === 0 ? <p>{S.mineEmpty}</p> : (
         <ul className="sac-list">
           {rows.map((r) => {

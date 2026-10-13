@@ -91,6 +91,8 @@ export interface Strings {
   screenshotFailed: string
   couldNotOpen: string
   couldNotLoadMine: string
+  updating: string
+  offlineShowingSaved: string
   addFailed: string
   overLimit: string
   stepLabel: string
@@ -172,6 +174,8 @@ export const DEFAULT_STRINGS: Strings = {
   screenshotFailed: 'The screenshot could not be taken.',
   couldNotOpen: 'This suggestion could not be opened.',
   couldNotLoadMine: 'Your suggestions could not be loaded.',
+  updating: 'Updating',
+  offlineShowingSaved: 'Could not reach the app. Showing what this phone last saw.',
   addFailed: 'That could not be added. Try again.',
   overLimit: 'Something in this suggestion is over a limit. Remove an attachment and try again.',
   stepLabel: 'Where it is',

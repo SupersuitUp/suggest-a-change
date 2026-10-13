@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 (2026-10-13)
+
+- **My suggestions and the detail view draw at once.** Each keeps its last successful answer (`mine()` and each `one(id)`) in the module's own IndexedDB store, keyed by app and account like a draft, and draws it as soon as the phone has read it, with a quiet "Updating" line until the app answers. The app's answer replaces it (a report that vanished on the app disappears). If the app cannot be reached, the saved rows stay and the screen says so: "Could not reach the app. Showing what this phone last saw." A first open with nothing saved shows the loading state, as before. Reports waiting in the outbox show as they did. Another account never reads this account's saved answer. New strings `updating` and `offlineShowingSaved` (replaceable through `words.text`).
+- **`<SuggestEntry role>`.** The entry button takes an ARIA `role` (for a host that shows it as a menu row with `role="menuitem"`), beside `className`. Unset by default.
+
 ## 0.1.1 (2026-10-13)
 
 - **A report sent with the Mac away is sent when it is back, even with the sheet closed.** The outbox used to move only while the sheet, My suggestions or a detail screen was mounted, so a report waited until the person opened one again. `<SuggestEntry>` now keeps the outbox moving while it is mounted, and `KeepSending` is exported from `./client` for a host with no always-mounted entry (it draws nothing).

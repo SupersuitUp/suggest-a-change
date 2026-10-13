@@ -11,6 +11,7 @@ import { recoverTakes } from './recorder.ts'
 import { queueFollowUp, type Report } from './reports.ts'
 import { useRuntime, useTick, type FollowUp } from './runtime.ts'
 import { Toasts } from './toast.tsx'
+import { oneCacheKey, readCache, writeCache } from './view-cache.ts'
 import { effectiveCeilings, lengthWords, sizeWords, statusMeaning, statusWords, stringsFor } from './words.ts'
 
 export function statusOf(r: Record<string, unknown>): string {
@@ -84,6 +85,8 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
   const [note, setNote] = useState('')
   const [bad, setBad] = useState('')
   const [ready, setReady] = useState(false)
+  const [updating, setUpdating] = useState(false)
+  const [offline, setOffline] = useState(false)
   // The follow-up being written: its id is made when the person starts it, so queuing it twice is one follow-up.
   const followId = useRef<string | null>(null)
   const n = useRef(0)
@@ -94,11 +97,13 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
   // Each load takes a number; only the newest may paint, so a load still running for the account that
   // was just replaced never draws its rows under the new one.
   const loads = useRef(0)
+  // True once a report from the phone's copy or the app is on screen for this id and account.
+  const shown = useRef(false)
   // Anything that writes the follow-up waits until its draft has been read, so the counter is right.
   const restored = useRef(makeDeferred())
 
   // A different account (or none) shows nothing of the last one.
-  useEffect(() => { loads.current++; setReport(undefined); setPending([]); setReady(false); setMore(''); setHeard([]); followId.current = null; n.current = 0; restored.current = makeDeferred() }, [rt])
+  useEffect(() => { loads.current++; shown.current = false; setUpdating(false); setOffline(false); setReport(undefined); setPending([]); setReady(false); setMore(''); setHeard([]); followId.current = null; n.current = 0; restored.current = makeDeferred() }, [rt])
 
   const load = useCallback(async () => {
     if (!rt) return
@@ -111,8 +116,20 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
       setPending(waiting)
       if (mine) { setReport({ ...(mine.report as Report & Record<string, unknown>), status: 'on-phone' }); setRefusal(mine.error); return }
       setRefusal(undefined)
-      const r = (await adapters.store.one(id)) as Report & Record<string, unknown>
-      if (fresh()) setReport(r)
+      const ckey = oneCacheKey({ app: adapters.words.app, account: rt.who.account }, id)
+      // Draw at once from the phone's copy, then ask the app.
+      if (!shown.current) {
+        const saved = await readCache<Report & Record<string, unknown>>(rt.store, ckey)
+        if (!fresh()) return
+        if (saved && typeof saved === 'object') { shown.current = true; setReport(saved); setUpdating(true) }
+      }
+      let r: (Report & Record<string, unknown>) | undefined
+      try { r = (await adapters.store.one(id)) as Report & Record<string, unknown> } catch { r = undefined }
+      if (!fresh()) return
+      setUpdating(false)
+      if (r) { shown.current = true; setOffline(false); setReport(r); void writeCache(rt.store, ckey, r) }
+      else if (shown.current) setOffline(true)
+      else setReport(null)
     } catch { if (fresh()) setReport(null) }
   }, [adapters, id, rt])
   useEffect(() => { void load() }, [load, tick])
@@ -203,6 +220,8 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
           {rt ? <button type="button" className="sac-button" onClick={() => void rt.retry(id)}>{S.retry}</button> : null}
         </>
       ) : null}
+      {updating ? <p role="status" className="sac-muted" data-updating="">{S.updating}</p> : null}
+      {offline ? <p role="alert" className="sac-error">{S.offlineShowingSaved}</p> : null}
       <StatusStrip status={status} owner={owner} label={S.stepLabel} step={stepOf(report)} timeline={timelineOf(report)} />
       {typeof report.words === 'string' && report.words ? <p className="sac-words">{report.words}</p> : null}
       {Object.entries(answers).filter(([, v]) => v).map(([k, v]) => <p key={k} className="sac-words" data-answer={k}>{v}</p>)}
