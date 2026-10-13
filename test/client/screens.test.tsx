@@ -828,7 +828,7 @@ describe('smaller promises', () => {
   it('the receipt says nothing for an id this phone never queued', async () => {
     const { adapters } = await setup()
     const { container } = render(<Receipt adapters={adapters} reportId="r-20261012120000-zzzzzz" />)
-    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+    await waitFor(() => expect(container.querySelector('[data-receipt]')).toBeNull())
     expect(container.textContent).toBe('')
   })
 
