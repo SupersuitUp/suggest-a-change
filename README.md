@@ -156,7 +156,9 @@ const h = createReportHandlers({
   identity: async (req) => member,        // { account } or null
   maintainers: ["mo"],                    // member keys with maintainer permission; ordinary membership never is
   agent: async (req) => maintainerKey,    // which maintainer's Mac is calling, or null
-  limits: { perPersonPerDay: 10 },        // may lower a ceiling, never raise it
+  limits: { perPersonPerDay: 10 },        // may lower a limit, never raise it (also voiceNotes, followUpVoiceNotes, followUps, agentPage)
+  app: { name: "Notes" },                 // stamped into every report from here; an app in the body is ignored
+  maintainersSince: { mo: "2026-10-01" }, // optional: reports from before this are not offered to that maintainer's Mac
   tell: (e) => notify(e),                 // ids only, never words; a failure never fails the request
 });
 ```
@@ -169,21 +171,28 @@ const h = createReportHandlers({
 | `GET /api/reports/mine` | `mine` | 200, 401 |
 | `GET /api/reports/:id` | `one(req, id)` | 200, 401, 404 (missing and not yours look the same) |
 | `POST /api/reports/:id/append` | `append(req, id)` | 200, 400, 401, 404 |
-| `GET /api/agent/reports` | `agentList` | 200 `{ reports }`, claims each for ten minutes |
-| `GET /api/agent/reports/:id/files/:file` | `agentFile(req, id, file)` | 200 `{ url, type, bytes, sha256 }`, 404 |
+| `GET /api/agent/reports` | `agentList` | 200 `{ reports }`: one page (20, oldest first) of what is open for this Mac, each claimed for ten minutes; a report whose files are still arriving waits up to an hour |
+| `GET /api/agent/reports/:id/files/:file` | `agentFile(req, id, file)` | 200 `{ url, expiresAt, type, bytes, sha256 }` (the link lives five minutes), 404 |
 | `POST /api/agent/reports/:id/settle` | `agentSettle` | 200, 409 |
 | `POST /api/agent/reports/:id/claim-approval` | `agentClaimApproval` | 200, or 409 `{ claimedBy }` |
 | `POST /api/agent/reports/:id/status` | `agentStatus` | 200, 400, 409 |
 
-A client adapter's `uploadPart` asks `upload-url`, PUTs the bytes straight to storage, then calls `finalize`. Nothing is uploaded through the app's server and no handler reads a body over 256 KB (the module refuses anything over 4 MB first).
+A client adapter's `uploadPart` asks `upload-url`, PUTs the bytes straight to storage, then calls `finalize`. Nothing is uploaded through the app's server and no handler reads a body over about 400 KB (sized from the field limits at four bytes a character; far under 4 MB).
 
 The role stored on a report comes from the signed-in member and the `maintainers` list. A `who` sent by the phone is ignored; a report carrying `timeline`, `status`, `plan` or `decision` is refused. `sniffType(firstBytes)` names a file by its bytes (jpeg, png, webp, heic/heif, gif, mp4/mov, webm, m4a/aac, mp3, wav, ogg/opus; anything else is `null`) and `finalize` refuses a file whose bytes are not the type it was declared as.
+
+**The collector MUST verify.** `agentFile` answers the verified `bytes` and `sha256`; a Mac that downloads the link must check both before it trusts the file.
+
+**The approval.** Moves before the owner is asked (`with-freeda`, `planned`, `waiting-on-owner`) need no claim. Leaving `waiting-on-owner`, starting `being-made` and any end status need the Mac that holds the approval (taken atomically if nobody holds it, otherwise 409 with who does). The holder can release it, and it lapses after seven days.
+
+**What a storage adapter implements** (`HostedStore`). Every method that changes a report is narrow and atomic: `put` is create-only (`created`, `exists`, or `limit` when the member's day is full, counted in the same transaction), and `setFile`, `addFollowUp`, `setStatus(expectFrom)`, `claimApproval`, `claim`, `settle` and `reopen` each change one thing. A real adapter implements these with a transaction or a precondition, never "read the report, change a copy, write it back": that rolls back a status or a claim written in between. Upload links must be create-only and one-time with the size and type fixed in their conditions (a Firebase or S3 signed PUT with `if-generation-match: 0` or `If-None-Match: *`), `discard` must delete a refused object, and `readUrl` links must expire after `ttlMs`.
 
 **Every adapter must pass the conformance suite**, against the adapter and its real storage:
 
 ```ts
 import { runStoreConformance } from "@supersuit/suggest-a-change/server";
-await runStoreConformance(() => ({ store, upload, advance, now, collectedKeys }), { test }); // the runner's own `test`
+await runStoreConformance(() => ({ store, now, advance, putViaLink, getViaLink, objectKeys }), { test }); // the runner's own `test`
+// putViaLink / getViaLink do what your storage service does with a PUT on an upload link and a GET on a read link.
 ```
 
 ## What is here, and what is coming

@@ -104,8 +104,7 @@ test('"./server" ships types and ESM, and imports nothing from react, the client
   for (const f of readdirSync(dir).filter((x) => x.endsWith(".js"))) {
     checked++;
     const src = readFileSync(join(dir, f), "utf8");
-    // Every import specifier must be relative (the contract and sibling server files), except the one
-    // dynamic node:test the conformance suite falls back to when its runner passes no `test`.
+    // Every import specifier must be relative (the contract and sibling server files): no package, no node: module.
     for (const m of src.matchAll(/(?:from|import\()\s*["']([^"']+)["']/g)) {
       assert.ok(m[1].startsWith("./") || m[1].startsWith("../"), `dist/server/${f} imports ${m[1]}`);
       assert.ok(!/client|react/.test(m[1]), `dist/server/${f} reaches the client or react through ${m[1]}`);

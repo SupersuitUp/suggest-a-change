@@ -113,3 +113,34 @@ export function validateReport(raw, { ceilings = CEILINGS } = {}) {
   if (total > c.voiceTotalMs) errs.push(`voice notes total ${total} ms; the ceiling is ${c.voiceTotalMs}`);
   return errs;
 }
+
+// WHAT AN ATTACHMENT MAY BE: one list, here, for the phone (which refuses the rest in words before anything
+// is queued) and the hosted side (which refuses the rest again). Images and videos are `media`; audio is
+// only ever a `voice` note.
+export const ACCEPTED_TYPES = [
+  "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "image/gif",
+  "video/mp4", "video/quicktime", "video/webm",
+  "audio/mp4", "audio/aac", "audio/mpeg", "audio/wav", "audio/ogg", "audio/webm",
+];
+const ALIASES = {
+  "image/jpg": "image/jpeg", "audio/x-m4a": "audio/mp4", "audio/m4a": "audio/mp4", "audio/mp3": "audio/mpeg",
+  "audio/x-wav": "audio/wav", "audio/wave": "audio/wav", "audio/opus": "audio/ogg", "audio/x-aac": "audio/aac",
+};
+/** A declared type without its parameters (`audio/webm;codecs=opus`), lowercased, with common aliases folded. */
+export const canonicalType = (t) => {
+  const base = String(t ?? "").split(";")[0].trim().toLowerCase();
+  return ALIASES[base] ?? base;
+};
+const BY_EXTENSION = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", heic: "image/heic", heif: "image/heif", gif: "image/gif",
+  mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime", webm: "video/webm",
+};
+/** The type to declare for a picked file: the browser's own when it gave one, else (iOS sometimes gives an empty
+ *  type for a HEIC) the one its extension names. The result may still be outside ACCEPTED_TYPES: the caller refuses it. */
+export const typeForFile = (type, name) => {
+  const t = canonicalType(type);
+  if (t) return t;
+  const ext = String(name ?? "").split(".").pop().toLowerCase();
+  return BY_EXTENSION[ext] ?? "";
+};
+export const isAcceptedMedia = (t) => ACCEPTED_TYPES.includes(canonicalType(t)) && /^(image|video)\//.test(canonicalType(t));

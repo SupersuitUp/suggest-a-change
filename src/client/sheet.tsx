@@ -3,7 +3,7 @@
 // typed is saved as it is typed, every recording as it is made, and nothing leaves the phone except
 // through the outbox, so a closed app loses nothing. A voice note alone is a whole report.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { sanitizeRoute, validateReport } from '../contract.mjs'
+import { isAcceptedMedia, sanitizeRoute, typeForFile, validateReport } from '../contract.mjs'
 import type { Adapters, FieldProps, Kind } from './adapters.ts'
 import { useDialog } from './dialog.ts'
 import { DefaultField } from './default-field.tsx'
@@ -208,8 +208,10 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     const id = await ensureId()
     const limit = what === 'image' ? ceilings.images : ceilings.videos
     for (const f of files) {
-      const type = f.type || ''
       const name = f.name || what
+      // The browser's type, or (a HEIC from an iPhone can come with none) the one the extension names.
+      const type = typeForFile(f.type, f.name)
+      if (type.startsWith(`${what}/`) && !isAcceptedMedia(type)) { setError(S.notAccepted(name)); continue }
       if (!type.startsWith(`${what}/`)) { setError(what === 'image' ? S.notPicture(name) : S.notVideo(name)); continue }
       if (mediaRef.current.filter((m) => m.type.startsWith(`${what}/`)).length >= limit) { setError(what === 'image' ? S.upToImages(ceilings.images) : S.oneVideoOnly); break }
       const ceiling = what === 'image' ? ceilings.imageBytes : ceilings.videoBytes

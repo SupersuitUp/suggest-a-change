@@ -81,6 +81,8 @@ export interface Strings {
   oneVideoOnly: string
   notPicture: (name: string) => string
   notVideo: (name: string) => string
+  /** A file of a kind the app cannot take (a picture or video format outside the accepted list). */
+  notAccepted: (name: string) => string
   overSize: (name: string, mb: number) => string
   videoTooLong: (name: string, seconds: number) => string
   videoUnreadable: (name: string) => string
@@ -161,6 +163,7 @@ export const DEFAULT_STRINGS: Strings = {
   oneVideoOnly: 'One video at most.',
   notPicture: (name) => `${name} is not a picture.`,
   notVideo: (name) => `${name} is not a video.`,
+  notAccepted: (name) => `${name} is a kind of file this app cannot take. Pictures can be JPEG, PNG, WebP, HEIC or GIF; videos can be MP4, MOV or WebM.`,
   overSize: (name, mb) => `${name} is over ${mb} MB.`,
   videoTooLong: (name, s) => `${name} is longer than ${s} seconds.`,
   videoUnreadable: (name) => `We could not check how long ${name} is. Try a shorter video.`,

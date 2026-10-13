@@ -20,6 +20,12 @@ export function statusOf(r: Record<string, unknown>): string {
   return 'received'
 }
 
+/** The step shown under "Being made". The timeline entry is the truth (that is where the receiving side puts it); a top-level `step` is read only when there is no timeline. */
+export function stepOf(r: Record<string, unknown>): string | undefined {
+  const t = r.timeline
+  if (Array.isArray(t) && t.length) { const s = (t[t.length - 1] as { step?: unknown })?.step; return typeof s === 'string' && s ? s : undefined }
+  return typeof r.step === 'string' ? r.step : undefined
+}
 const timelineOf = (r?: Record<string, unknown>): string[] | undefined =>
   Array.isArray(r?.timeline) ? (r!.timeline as { status?: unknown }[]).map((t) => String(t?.status)) : undefined
 
@@ -197,7 +203,7 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
           {rt ? <button type="button" className="sac-button" onClick={() => void rt.retry(id)}>{S.retry}</button> : null}
         </>
       ) : null}
-      <StatusStrip status={status} owner={owner} label={S.stepLabel} step={typeof report.step === 'string' ? report.step : undefined} timeline={timelineOf(report)} />
+      <StatusStrip status={status} owner={owner} label={S.stepLabel} step={stepOf(report)} timeline={timelineOf(report)} />
       {typeof report.words === 'string' && report.words ? <p className="sac-words">{report.words}</p> : null}
       {Object.entries(answers).filter(([, v]) => v).map(([k, v]) => <p key={k} className="sac-words" data-answer={k}>{v}</p>)}
       {voice.length ? <ul className="sac-list" aria-label={S.voiceNotesLabel}>{voice.map((v, i) => <li key={v.file} className="sac-item">{S.voiceNote(i + 1, lengthWords(v.ms))}</li>)}</ul> : null}

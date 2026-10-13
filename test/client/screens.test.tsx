@@ -294,6 +294,17 @@ describe('the sheet', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('huge.png is over 10 MB.'))
   })
 
+  it('a picture or video format the app cannot take is refused in words on the phone, and a HEIC with no type is taken by its extension', async () => {
+    const { adapters } = await setup()
+    await sheet(adapters)
+    fireEvent.change(images(), { target: { files: [new File([new Uint8Array(100)], 'photo.avif', { type: 'image/avif' })] } })
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/photo\.avif is a kind of file this app cannot take/))
+    expect(screen.queryByText(/photo\.avif,/)).toBeNull() // not listed as an attachment
+    fireEvent.change(images(), { target: { files: [new File([new Uint8Array(100)], 'IMG_1.HEIC', { type: '' })] } })
+    expect(await screen.findByText(/IMG_1\.HEIC/)).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('a video: one at most, within the length ceiling, and one whose length cannot be read is refused in words', async () => {
     let ms: number | undefined = 61_000
     const { adapters } = await setup({}, SAM)
@@ -581,6 +592,13 @@ describe('My suggestions and the detail view', () => {
     const { adapters } = await setup({}, null)
     render(<MySuggestions adapters={adapters} />)
     expect((await screen.findByRole('alert')).textContent).toBe('Sign in to see your suggestions.')
+  })
+
+  it('the detail shows the step the receiving side puts on the latest timeline entry', async () => {
+    const one = vi.fn(async (id: string) => ({ id, words: 'w', media: [], voice: [], timeline: [{ status: 'received', by: 'app', at: 'x' }, { status: 'being-made', by: 'freeda', at: 'y', step: 'Checking the button on a small phone' }] }))
+    const { adapters } = await setup({}, SAM, { one })
+    render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
+    expect(await screen.findByText('Checking the button on a small phone')).toBeTruthy()
   })
 
   it('the detail shows words, attachments and the strip, lets the person add to it, and stops at an end status', async () => {

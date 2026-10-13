@@ -7,12 +7,13 @@
 // a report is decided here from the signed-in member and the explicit maintainers list, never from the
 // request. Nothing is uploaded through this server: `uploadUrl` issues a direct-to-storage link with the
 // size and type fixed, and `finalize` checks what actually landed.
-import { FLOW, STATUSES, isReportId, mayMove, validateReport } from '../contract.mjs'
+import { END, FLOW, STATUSES, isAcceptedMedia, isReportId, mayMove, validateReport } from '../contract.mjs'
 import { effectiveLimits, type Limits } from './rate.ts'
 import { ACCEPTED_TYPES, canonicalType, sameType } from './sniff.ts'
 
 export interface TimelineEntry { status: string; by: string; at: string; step?: string; note?: string }
 export interface FileState { pending?: { type: string; bytes: number }; type?: string; bytes?: number; sha256?: string; at?: string }
+export interface FollowUp { followId: string; words: string; at: string; by: string; voice: { file: string; ms: number }[] }
 export interface StoredReport {
   id: string
   who: { member: string; role: string }
@@ -20,37 +21,50 @@ export interface StoredReport {
   receivedAt: string
   /** Server-side state per attachment: the upload link that was issued, and what finalize verified. */
   files?: Record<string, FileState>
-  followUps?: { followId: string; words: string; at: string; by: string; voice: { file: string; ms: number }[] }[]
+  followUps?: FollowUp[]
   [field: string]: unknown
 }
 
-/** What an app's storage adapter implements (and must pass `runStoreConformance`). */
+/** What an app's storage adapter implements, and must pass `runStoreConformance` against its real storage.
+ *  Every method that changes a report is NARROW and atomic: a real adapter implements each with a transaction
+ *  or a precondition, never "read the report, change a copy, write it back", which would roll back a status or
+ *  a claim written in between. */
 export interface HostedStore {
-  /** Creates or replaces a report. Handlers check for an existing id first (dedupe by id). */
-  put(report: StoredReport): Promise<void>
+  /** CREATE-ONLY and atomic. 'exists' when the id is taken (nothing is written); 'limit' when `dailyLimit`
+   *  reports from this member already exist today (counted in the same transaction as the create). */
+  put(report: StoredReport, opts?: { dailyLimit?: number }): Promise<'created' | 'exists' | 'limit'>
   get(id: string): Promise<StoredReport | null>
   listFor(member: string): Promise<StoredReport[]>
-  /** Reports this maintainer has not settled and does not hold a live lease on. */
-  listOpenFor(maintainer: string): Promise<StoredReport[]>
-  /** A one-time direct-to-storage upload link with the size and type fixed in its conditions. */
+  /** Reports this maintainer has not settled and holds no live lease on, oldest first, at most `limit`, none received before `since` (ms). */
+  listOpenFor(maintainer: string, opts: { limit: number; since?: number }): Promise<StoredReport[]>
+  /** A direct-to-storage upload link. REQUIRED: it can create the object once and never overwrite (create-only
+   *  precondition), the size and type are fixed in its conditions, and it dies once used or expired. */
   uploadUrl(a: { reportId: string; file: string; type: string; bytes: number }): Promise<{ url: string; headers: Record<string, string> }>
-  /** Reads the stored object and answers what it REALLY is: the type sniffed from its bytes (null if unrecognised), its size and sha256. Throws if nothing was uploaded. */
-  finalize(a: { reportId: string; file: string }): Promise<{ type: string | null; bytes: number; sha256: string }>
+  /** Reads the stored object and answers what it REALLY is: the type sniffed from its bytes (null if unrecognised), its size and sha256. Null when nothing has arrived yet; throws on a store error. */
+  finalize(a: { reportId: string; file: string }): Promise<{ type: string | null; bytes: number; sha256: string } | null>
+  /** Deletes the object (a refused one) so nothing unverified stays in storage. */
+  discard(a: { reportId: string; file: string }): Promise<void>
+  /** Sets (or with null removes) one entry of the report's `files`, touching nothing else. */
+  setFile(id: string, file: string, state: FileState | null): Promise<void>
+  /** Adds a follow-up, once per followId, touching nothing else. */
+  addFollowUp(id: string, followUp: FollowUp): Promise<'added' | 'exists' | 'missing'>
   /** Records that `by` holds this report for `leaseMs`; offered again to `by` when it passes without a settle. */
   claim(id: string, by: string, leaseMs: number): Promise<void>
   /** Records that `by` has the report. False when `by` never claimed it. */
   settle(id: string, by: string): Promise<boolean>
-  /** Appends a status entry to the report's timeline. */
-  setStatus(id: string, entry: TimelineEntry): Promise<void>
-  /** First wins and is atomic; the same maintainer asking again still holds it. */
-  claimApproval(id: string, by: string): Promise<{ ok: true } | { claimedBy: string }>
+  /** Clears every maintainer's settled mark so the report is offered again. True when any was cleared. */
+  reopen(id: string): Promise<boolean>
+  /** Appends to the timeline only when the last status is still `expectFrom` (when given); false when it is not. */
+  setStatus(id: string, entry: TimelineEntry, expectFrom?: string): Promise<boolean>
+  /** First wins and is atomic; the holder asking again keeps it (the lease renews). Another maintainer may take it once `leaseMs` has passed without renewal. */
+  claimApproval(id: string, by: string, leaseMs: number): Promise<{ ok: true } | { claimedBy: string }>
+  /** The holder gives the approval up. False when `by` does not hold it. */
+  releaseApproval(id: string, by: string): Promise<boolean>
   /** Moves the report's attachments under `collected/`. Idempotent; files stay readable. */
   moveCollected(id: string): Promise<void>
   countToday(member: string): Promise<number>
-  /** A short-lived read link for one verified attachment, wherever it now lives. */
-  readUrl(a: { reportId: string; file: string }): Promise<{ url: string }>
-  /** Optional: deletes a refused object so a clean one can be uploaded in its place. */
-  discard?(a: { reportId: string; file: string }): Promise<void>
+  /** A read link for one verified attachment (the collected copy when there is one) that stops working after `ttlMs`. */
+  readUrl(a: { reportId: string; file: string; ttlMs: number }): Promise<{ url: string; expiresAt: number }>
 }
 
 export interface TellEvent { type: 'submitted' | 'followed-up' | 'status' | 'settled'; reportId: string; member?: string }
@@ -63,19 +77,27 @@ export interface ReportHandlerOptions {
   /** Which maintainer's Mac is calling (by its agent key), or null. */
   agent(req: Request): Promise<string | null>
   limits?: Limits
+  /** Stamped into every report as `app`, from the app's own config; an `app` in the request body is ignored. */
+  app?: Record<string, string>
+  /** When a maintainer was added (ms or ISO). Reports received before that are not offered to them; with none, every open report is. */
+  maintainersSince?: Record<string, number | string>
   /** Told when something happens, with ids and never words. A failure here never fails the request. */
   tell?(event: TellEvent): void | Promise<void>
   now?: () => number
 }
 
 export const LEASE_MS = 10 * 60_000
-export const BODY_CAP = 256 * 1024 // far below the 4 MB no handler may exceed
+const WORDS_MAX = 20_000
+// Sized from the field limits: words and the three answers at 4 bytes a character (any script), plus the rest.
+// A maximal report in Chinese or emoji fits; the whole is still a small fraction of the 4 MB no handler may exceed.
+export const BODY_CAP = 4 * WORDS_MAX * 4 + 64 * 1024
+export const APPROVAL_LEASE_MS = 7 * 24 * 3600_000
+export const READ_TTL_MS = 5 * 60_000
 export const VOICE_FILE_BYTES = 25 * 2 ** 20
 /** How long a report with missing attachments waits before it is offered to a Mac anyway. */
 export const INCOMPLETE_GRACE_MS = 60 * 60_000
 const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 const FOLLOW = /^[A-Za-z0-9_-]{1,64}$/
-const WORDS_MAX = 20_000
 const FORBIDDEN = ['timeline', 'status', 'plan', 'decision', 'files', 'receivedAt', 'followUps', 'claimedBy', 'settledBy']
 
 const json = (status: number, body: unknown): Response =>
@@ -131,7 +153,9 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
   const { store, identity, agent } = opts
   const maintainers = [...opts.maintainers]
   const limits = effectiveLimits(opts.limits)
+  const contractCeilings = { images: limits.images, imageBytes: limits.imageBytes, videos: limits.videos, videoBytes: limits.videoBytes, videoMs: limits.videoMs, voiceMs: limits.voiceMs, voiceTotalMs: limits.voiceTotalMs, perPersonPerDay: limits.perPersonPerDay }
   const now = opts.now ?? (() => Date.now())
+  const since = (m: string) => { const v = opts.maintainersSince?.[m]; const t = typeof v === 'string' ? Date.parse(v) : v; return t !== undefined && Number.isFinite(t) ? t : undefined }
   const tell = async (e: TellEvent) => { try { await opts.tell?.(e) } catch { /* telling is best effort */ } }
   const isMaintainer = (m: string) => maintainers.includes(m)
   const roleOf = (m: string) => (isMaintainer(m) ? 'maintainer' : 'member')
@@ -148,7 +172,30 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     if (r.who?.member === member) return r
     return !ownerOnly && isMaintainer(member) ? r : null
   }
-  const publicView = (r: StoredReport) => { const { files: _files, ...rest } = r; return rest }
+  /** What a member is shown: a whitelist, so a field an adapter keeps on the document (claims, maintainer keys, upload state) never reaches them. */
+  const publicView = (r: StoredReport) => ({
+    id: r.id, kind: r.kind, words: r.words, who: r.who, receivedAt: r.receivedAt,
+    ...(r.answers !== undefined ? { answers: r.answers } : {}),
+    ...(r.app !== undefined ? { app: r.app } : {}),
+    where: r.where, diagnostics: r.diagnostics, media: r.media ?? [], voice: r.voice ?? [],
+    timeline: (r.timeline ?? []).map((t) => ({ status: t.status, by: t.by, at: t.at, ...(t.step ? { step: t.step } : {}), ...(t.note ? { note: t.note } : {}) })),
+    followUps: (r.followUps ?? []).map((f) => ({ followId: f.followId, words: f.words, at: f.at, by: f.by, voice: f.voice })),
+  })
+
+  /** Validates voice entries: integer ms above zero, within the per-note ceiling, a count cap, no clash of names. */
+  function voiceEntries(list: unknown, cap: number, taken: Set<string>): { voice: { file: string; ms: number; field?: string }[] } | { error: string } {
+    const arr = Array.isArray(list) ? list : []
+    if (arr.length > cap) return { error: `at most ${cap} voice notes` }
+    const voice: { file: string; ms: number; field?: string }[] = []
+    for (const x of arr) {
+      if (!isObj(x) || typeof x.file !== 'string' || !FILE.test(x.file) || !Number.isInteger(x.ms) || (x.ms as number) < 1) return { error: 'a voice note is not valid' }
+      if ((x.ms as number) > limits.voiceMs) return { error: 'a voice note is too long' }
+      if (taken.has(x.file)) return { error: 'a voice note reuses a file name' }
+      taken.add(x.file)
+      voice.push({ file: x.file, ms: x.ms as number, ...(typeof x.field === 'string' ? { field: x.field.slice(0, 64) } : {}) })
+    }
+    return { voice }
+  }
 
   async function submit(req: Request): Promise<Response> {
     const m = wrongMethod(req, 'POST'); if (m) return m
@@ -156,44 +203,63 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const got = await readBody(req); if ('res' in got) return got.res
     const raw = got.body
     for (const k of FORBIDDEN) if (k in raw) return bad(`${k} is set by the server and is not accepted in a report`)
-    // `who` from the phone is ignored: the stored identity and role come from the signed-in member.
+    // `who` and `app` from the phone are ignored: identity and role come from the signed-in member, the app from the app's config.
     const words = raw.words === undefined ? '' : str(raw.words, WORDS_MAX)
     if (words === null) return bad('words is too long or not text')
+    const taken = new Set<string>()
     const media: unknown[] = []
     for (const x of Array.isArray(raw.media) ? raw.media : []) {
-      if (!isObj(x) || typeof x.file !== 'string' || !FILE.test(x.file) || typeof x.type !== 'string' || !(ACCEPTED_TYPES as readonly string[]).includes(canonicalType(x.type)) || !Number.isInteger(x.bytes) || (x.bytes as number) < 1) return bad('an attachment is not valid')
-      media.push({ file: x.file, type: canonicalType(x.type), bytes: x.bytes, ...(typeof x.ms === 'number' ? { ms: x.ms } : {}), ...(typeof x.sha256 === 'string' && /^[0-9a-f]{64}$/.test(x.sha256) ? { sha256: x.sha256 } : {}) })
+      // Pictures and videos only: audio is a voice note, and a voice note is counted and capped as one.
+      if (!isObj(x) || typeof x.file !== 'string' || !FILE.test(x.file) || typeof x.type !== 'string' || !isAcceptedMedia(x.type) || !Number.isInteger(x.bytes) || (x.bytes as number) < 1 || taken.has(x.file)) return bad('an attachment is not valid')
+      taken.add(x.file)
+      media.push({ file: x.file, type: canonicalType(x.type), bytes: x.bytes, ...(Number.isInteger(x.ms) && (x.ms as number) >= 0 ? { ms: x.ms } : {}), ...(typeof x.sha256 === 'string' && /^[0-9a-f]{64}$/.test(x.sha256) ? { sha256: x.sha256 } : {}) })
     }
-    const voice: unknown[] = []
-    for (const x of Array.isArray(raw.voice) ? raw.voice : []) {
-      if (!isObj(x) || typeof x.file !== 'string' || !FILE.test(x.file) || typeof x.ms !== 'number') return bad('a voice note is not valid')
-      voice.push({ file: x.file, ms: x.ms, ...(typeof x.field === 'string' ? { field: x.field.slice(0, 64) } : {}) })
-    }
-    const names = [...media, ...voice].map((x) => (x as { file: string }).file)
-    if (new Set(names).size !== names.length) return bad('two attachments have the same file name')
+    const v = voiceEntries(raw.voice, limits.voiceNotes, taken); if ('error' in v) return bad(v.error)
     let answers: unknown
     if (isObj(raw.answers)) {
       const a: Record<string, string> = {}
-      for (const k of ['happened', 'expected', 'steps']) { const s = raw.answers[k] === undefined ? '' : str(raw.answers[k], WORDS_MAX); if (s === null) return bad('an answer is too long or not text'); a[k] = s }
+      for (const k of ['happened', 'expected', 'steps']) { const t = raw.answers[k] === undefined ? '' : str(raw.answers[k], WORDS_MAX); if (t === null) return bad('an answer is too long or not text'); a[k] = t }
       answers = a
     }
+    const where: Record<string, string> = {}
+    if (isObj(raw.where)) {
+      if (raw.where.screen !== undefined) { const t = str(raw.where.screen, 200); if (t === null) return bad('where.screen is short text'); where.screen = t }
+      if (raw.where.route !== undefined) { const t = str(raw.where.route, 500); if (t === null) return bad('where.route is short text'); where.route = t }
+    }
+    const diagnostics: Record<string, string | number> = {}
+    if (isObj(raw.diagnostics)) {
+      for (const [k, d] of Object.entries(raw.diagnostics)) {
+        if (typeof d === 'number' && Number.isFinite(d)) diagnostics[k] = d
+        else if (typeof d === 'string' && d.length <= 200) diagnostics[k] = d
+        else return bad('diagnostics values are short text')
+      }
+    }
     const report: Record<string, unknown> = {
-      id: raw.id, kind: raw.kind, words, media, voice,
+      id: raw.id, kind: raw.kind, words, media, voice: v.voice,
       who: { member, role: roleOf(member) },
       ...(answers ? { answers } : {}),
-      ...(isObj(raw.app) ? { app: raw.app } : {}),
-      where: isObj(raw.where) ? raw.where : {},
-      diagnostics: isObj(raw.diagnostics) ? raw.diagnostics : {},
+      app: { ...(opts.app ?? {}) },
+      where, diagnostics,
     }
-    const problems = validateReport(report, { ceilings: limits })
+    const problems = validateReport(report, { ceilings: contractCeilings })
     if (problems.length) return json(422, { error: 'the report is not valid', problems })
     const id = report.id as string
     const existing = await store.get(id)
-    // The same id again is the same report. Another member's id answers exactly like a repeat and stores nothing.
-    if (existing) return json(200, { id, status: existing.who?.member === member ? lastStatus(existing) : 'received' })
+    // The same member sending the same id again is a repeat, even at the day's limit: it was stored.
+    if (existing?.who?.member === member) return json(200, { id, status: lastStatus(existing) })
     if ((await store.countToday(member)) >= limits.perPersonPerDay) return json(429, { error: 'you have reached today\'s limit of suggestions' })
     const at = iso(now())
-    await store.put({ ...(report as { id: string; who: { member: string; role: string } }), receivedAt: at, timeline: [{ status: 'received', by: 'app', at }] })
+    const made = await store.put(
+      { ...(report as { id: string; who: { member: string; role: string } }), receivedAt: at, timeline: [{ status: 'received', by: 'app', at }] },
+      { dailyLimit: limits.perPersonPerDay },
+    )
+    if (made === 'limit') return json(429, { error: 'you have reached today\'s limit of suggestions' })
+    if (made === 'exists') {
+      // Lost a race with the same member (a repeat), or the id belongs to someone else. Someone else's id is REFUSED
+      // (not re-issued, not dropped silently): nothing is created or overwritten, and the phone is told to start again.
+      const now2 = await store.get(id)
+      return now2?.who?.member === member ? json(200, { id, status: lastStatus(now2) }) : json(409, { error: 'that suggestion cannot use this id; start it again' })
+    }
     await tell({ type: 'submitted', reportId: id, member })
     return json(200, { id, status: 'received' })
   }
@@ -223,21 +289,18 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const words = raw.words === undefined ? '' : str(raw.words, WORDS_MAX)
     if (!followId) return bad('followId is needed')
     if (words === null) return bad('words is too long or not text')
-    const voice: { file: string; ms: number }[] = []
-    for (const x of Array.isArray(raw.voice) ? raw.voice : []) {
-      if (!isObj(x) || typeof x.file !== 'string' || !FILE.test(x.file) || typeof x.ms !== 'number' || x.ms < 0) return bad('a voice note is not valid')
-      voice.push({ file: x.file, ms: x.ms })
-    }
     const r = await readable(id, member); if (!r) return notFound()
     if ((r.followUps ?? []).some((f) => f.followId === followId)) return json(200, { id, followId }) // a repeat
-    const taken = new Set(fileNames(r))
-    if (voice.some((v) => taken.has(v.file)) || new Set(voice.map((v) => v.file)).size !== voice.length) return bad('a voice note reuses a file name')
-    if (voice.some((v) => v.ms > limits.voiceMs)) return bad('a voice note is too long')
-    const had = [...((r.voice as { ms: number }[] | undefined) ?? []), ...(r.followUps ?? []).flatMap((f) => f.voice)].reduce((n, v) => n + v.ms, 0)
-    if (had + voice.reduce((n, v) => n + v.ms, 0) > limits.voiceTotalMs) return bad('the voice notes are too long in total')
-    if ((r.followUps ?? []).length >= 50) return bad('this report has all the follow-ups it can take')
-    await store.put({ ...r, followUps: [...(r.followUps ?? []), { followId, words, at: iso(now()), by: roleOf(member), voice }] })
-    await tell({ type: 'followed-up', reportId: id, member })
+    const v = voiceEntries(raw.voice, limits.followUpVoiceNotes, new Set(fileNames(r))); if ('error' in v) return bad(v.error)
+    const had = [...((r.voice as { ms: number }[] | undefined) ?? []), ...(r.followUps ?? []).flatMap((f) => f.voice)].reduce((n, x) => n + x.ms, 0)
+    if (had + v.voice.reduce((n, x) => n + x.ms, 0) > limits.voiceTotalMs) return bad('the voice notes are too long in total')
+    if ((r.followUps ?? []).length >= limits.followUps) return bad('this report has all the follow-ups it can take')
+    const added = await store.addFollowUp(id, { followId, words, at: iso(now()), by: roleOf(member), voice: v.voice.map(({ file, ms }) => ({ file, ms })) })
+    if (added === 'missing') return notFound()
+    if (added === 'added') {
+      await store.reopen(id) // a Mac that already collected this report is offered it again, with what is new
+      await tell({ type: 'followed-up', reportId: id, member })
+    }
     return json(200, { id, followId })
   }
 
@@ -252,15 +315,15 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     if (!want) return bad('that file is not part of the report')
     const t = canonicalType(type)
     if (!(ACCEPTED_TYPES as readonly string[]).includes(t)) return bad('that kind of file is not accepted')
-    if (want.kind === 'media' && !sameType(want.type, t) && canonicalType(want.type) !== t) return bad('the type is not the one the report declared')
+    // Everything below is judged against what the REPORT declared for this file, never against what was asked for.
+    if (want.kind === 'media' && !sameType(want.type, t)) return bad('the type is not the one the report declared')
     if (want.kind === 'voice' && !t.startsWith('audio/')) return bad('a voice note must be audio')
     const n = bytes as number
-    const cap = want.kind === 'voice' ? VOICE_FILE_BYTES : t.startsWith('video/') ? limits.videoBytes : limits.imageBytes
+    const cap = want.kind === 'voice' ? VOICE_FILE_BYTES : String(want.type).startsWith('video/') ? limits.videoBytes : limits.imageBytes
     if (n > cap || (want.bytes !== undefined && n > want.bytes)) return json(413, { error: 'that file is larger than this report allows' })
-    const state = r.files?.[file]
-    if (state?.sha256) return json(200, { done: true }) // already stored and verified: a retry has nothing to do
+    if (r.files?.[file]?.sha256) return json(200, { done: true }) // already stored and verified: a retry has nothing to do
     const link = await store.uploadUrl({ reportId, file, type: t, bytes: n })
-    await store.put({ ...r, files: { ...r.files, [file]: { pending: { type: t, bytes: n } } } })
+    await store.setFile(reportId, file, { pending: { type: t, bytes: n } })
     return json(200, { url: link.url, headers: link.headers, maxBytes: n })
   }
 
@@ -274,18 +337,21 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const state = r.files?.[file]
     if (state?.sha256) return json(200, { file, type: state.type, bytes: state.bytes, sha256: state.sha256 })
     if (!state?.pending) return json(409, { error: 'no upload link was issued for that file' })
-    let real: { type: string | null; bytes: number; sha256: string }
-    try { real = await store.finalize({ reportId: id, file }) } catch { return json(409, { error: 'that file has not arrived yet' }) }
+    let real: { type: string | null; bytes: number; sha256: string } | null
+    try { real = await store.finalize({ reportId: id, file }) } catch { return json(502, { error: 'the file store could not be read; try again' }) }
+    if (!real) return json(409, { error: 'that file has not arrived yet' })
     const declared = declaredFile(r, file)
     const refuse = async (error: string) => {
-      try { await store.discard?.({ reportId: id, file }) } catch { /* nothing more to do */ }
+      await store.discard({ reportId: id, file }) // nothing unverified stays in storage
+      await store.setFile(id, file, null)
       return json(422, { error })
     }
     if (!sameType(state.pending.type, real.type) || !sameType(declared?.type ?? state.pending.type, real.type)) return refuse('the file\'s contents are not the type it was declared as')
     if (real.bytes < 1 || real.bytes > state.pending.bytes) return refuse('the file is not the size it was declared as')
     if (declared?.sha256 && declared.sha256 !== real.sha256) return refuse('the file is not the one that was declared')
     const verified: FileState = { type: real.type as string, bytes: real.bytes, sha256: real.sha256, at: iso(now()) }
-    await store.put({ ...r, files: { ...r.files, [file]: verified } })
+    await store.setFile(id, file, verified)
+    await store.reopen(id) // verified after a Mac collected the report: it is offered again with this file
     return json(200, { file, type: verified.type, bytes: verified.bytes, sha256: verified.sha256 })
   }
 
@@ -295,7 +361,9 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const m = wrongMethod(req, 'GET'); if (m) return m
     const by = await maintainerFor(req); if (!by) return signIn()
     const out: StoredReport[] = []
-    for (const r of await store.listOpenFor(by)) {
+    // A page, oldest first. Reports from before this maintainer was added are skipped when `maintainersSince` says so.
+    for (const r of await store.listOpenFor(by, { limit: limits.agentPage * 3, since: since(by) })) {
+      if (out.length >= limits.agentPage) break
       // A report still waiting for its attachments is held back, so the Mac never copies half of one.
       if (!complete(r) && now() - Date.parse(r.receivedAt) < INCOMPLETE_GRACE_MS) continue
       await store.claim(r.id, by, LEASE_MS)
@@ -310,8 +378,9 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const r = isReportId(id) ? await store.get(id) : null
     const v = r?.files?.[file]
     if (!r || !FILE.test(file) || !v?.sha256) return notFound()
-    const { url } = await store.readUrl({ reportId: id, file })
-    return json(200, { url, type: v.type, bytes: v.bytes, sha256: v.sha256 })
+    const link = await store.readUrl({ reportId: id, file, ttlMs: READ_TTL_MS })
+    // The collector MUST check what it downloads against this bytes and sha256 before it trusts the file.
+    return json(200, { url: link.url, expiresAt: link.expiresAt, type: v.type, bytes: v.bytes, sha256: v.sha256 })
   }
 
   async function agentSettle(req: Request, id: string): Promise<Response> {
@@ -322,7 +391,7 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     if (!r) return notFound()
     if (!(await store.settle(id, by))) return json(409, { error: 'this report was not claimed by this Mac' })
     const moves = mayMove(lastStatus(r), 'with-freeda')
-    if (moves) await store.setStatus(id, { status: 'with-freeda', by: FLOW['with-freeda'].actor, at: iso(now()) })
+    if (moves) await store.setStatus(id, { status: 'with-freeda', by: FLOW['with-freeda'].actor, at: iso(now()) }, lastStatus(r))
     await store.moveCollected(id)
     await tell({ type: 'settled', reportId: id })
     return json(200, { id, status: moves ? 'with-freeda' : lastStatus(r) })
@@ -333,8 +402,16 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const by = await maintainerFor(req); if (!by) return signIn()
     const body = await readBody(req, BODY_CAP, true); if ('res' in body) return body.res
     if (!isReportId(id) || !(await store.get(id))) return notFound()
-    const got = await store.claimApproval(id, by)
+    const got = await store.claimApproval(id, by, APPROVAL_LEASE_MS)
     return 'ok' in got ? json(200, { ok: true, claimedBy: by }) : json(409, { claimedBy: got.claimedBy })
+  }
+
+  async function agentReleaseApproval(req: Request, id: string): Promise<Response> {
+    const m = wrongMethod(req, 'POST'); if (m) return m
+    const by = await maintainerFor(req); if (!by) return signIn()
+    const body = await readBody(req, BODY_CAP, true); if ('res' in body) return body.res
+    if (!isReportId(id) || !(await store.get(id))) return notFound()
+    return (await store.releaseApproval(id, by)) ? json(200, { released: true }) : json(409, { error: 'this Mac does not hold the approval' })
   }
 
   async function agentStatus(req: Request, id: string): Promise<Response> {
@@ -351,10 +428,17 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const from = lastStatus(r)
     if (from === status) return json(200, { id, status }) // a repeat
     if (!mayMove(from, status)) return json(409, { error: `a report cannot go from ${from} to ${status}` })
-    await store.setStatus(id, { status, by: FLOW[status as keyof typeof FLOW].actor, at: iso(now()), ...(step ? { step } : {}), ...(note ? { note } : {}) })
+    // Once the owner is being asked, the Mac that holds the approval decides what happens next. Leaving
+    // waiting-on-owner, starting the work and ending it need the claim (taken here if nobody holds it).
+    if (from === 'waiting-on-owner' || status === 'being-made' || END.includes(status)) {
+      const c = await store.claimApproval(id, by, APPROVAL_LEASE_MS)
+      if (!('ok' in c)) return json(409, { error: 'another Mac holds the approval for this report', claimedBy: c.claimedBy })
+    }
+    const moved = await store.setStatus(id, { status, by: FLOW[status as keyof typeof FLOW].actor, at: iso(now()), ...(step ? { step } : {}), ...(note ? { note } : {}) }, from)
+    if (!moved) return json(409, { error: 'the report changed while this was sent; read it again' })
     await tell({ type: 'status', reportId: id })
     return json(200, { id, status })
   }
 
-  return { submit, uploadUrl, finalize, mine, one, append, agentList, agentFile, agentSettle, agentClaimApproval, agentStatus }
+  return { submit, uploadUrl, finalize, mine, one, append, agentList, agentFile, agentSettle, agentClaimApproval, agentReleaseApproval, agentStatus }
 }

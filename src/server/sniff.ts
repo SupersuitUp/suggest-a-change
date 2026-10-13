@@ -2,6 +2,7 @@
 // `sniffType` reads them and answers one canonical type, or null for anything the module does not accept.
 // The canonical answers (and nothing else) are the types an upload may be declared as; `sameType` is the
 // one place that says which declared types a sniffed type satisfies.
+import { canonicalType } from '../contract.mjs'
 
 const at = (b: Uint8Array, i: number, s: string): boolean => {
   if (b.length < i + s.length) return false
@@ -10,11 +11,16 @@ const at = (b: Uint8Array, i: number, s: string): boolean => {
 }
 const ascii = (b: Uint8Array, from: number, to: number): string => String.fromCharCode(...b.subarray(from, to))
 
-export const ACCEPTED_TYPES = [
-  'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif',
-  'video/mp4', 'video/quicktime', 'video/webm',
-  'audio/mp4', 'audio/aac', 'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm',
-] as const
+export { ACCEPTED_TYPES, canonicalType } from '../contract.mjs'
+
+function brandType(brand: string): string | null {
+  if (['heic', 'heix', 'hevc', 'hevx'].includes(brand)) return 'image/heic'
+  if (['mif1', 'msf1', 'heim', 'heis'].includes(brand)) return 'image/heif'
+  if (brand === 'qt  ') return 'video/quicktime'
+  if (brand === 'M4A ' || brand === 'M4B ') return 'audio/mp4'
+  if (brand === 'M4V ' || /^(isom|iso[2-9]|mp4[12]|avc1|dash|MSNV|mmp4|f4v |XAVC|3gp.|3g2.)$/.test(brand)) return 'video/mp4'
+  return null
+}
 
 export function sniffType(firstBytes: Uint8Array): string | null {
   const b = firstBytes
@@ -27,15 +33,17 @@ export function sniffType(firstBytes: Uint8Array): string | null {
   if (at(b, 0, 'OggS')) return 'audio/ogg'
   if (b.length >= 4 && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return 'video/webm'
   if (at(b, 4, 'ftyp') && b.length >= 12) {
-    const brand = ascii(b, 8, 12)
-    if (['heic', 'heix', 'hevc', 'hevx'].includes(brand)) return 'image/heic'
-    if (['mif1', 'msf1', 'heim', 'heis'].includes(brand)) return 'image/heif'
-    if (brand === 'qt  ') return 'video/quicktime'
-    if (brand === 'M4A ' || brand === 'M4B ') return 'audio/mp4'
-    if (brand === 'M4V ' || /^(isom|iso[2-9]|mp4[12]|avc1|dash|3gp.|3g2.)$/.test(brand)) return 'video/mp4'
+    // The major brand decides; when it is one we do not know, a compatible brand listed after it may.
+    const size = Math.min(b.length, ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]) >>> 0 || b.length)
+    for (let at8 = 8; at8 + 4 <= size; at8 += at8 === 8 ? 8 : 4) if (['avif', 'avis'].includes(ascii(b, at8, at8 + 4))) return null // AVIF shares HEIF's brands and is not accepted
+    for (let at8 = 8; at8 + 4 <= size; at8 += at8 === 8 ? 8 : 4) {
+      const t = brandType(ascii(b, at8, at8 + 4))
+      if (t) return t
+    }
     return null
   }
-  if (at(b, 0, 'ID3')) return 'audio/mpeg'
+  // An ID3 tag is only a tag if its version, flags and syncsafe size are sane; the bare letters are not enough.
+  if (at(b, 0, 'ID3') && b.length >= 10 && b[3] >= 2 && b[3] <= 4 && b[4] !== 0xff && b[6] < 0x80 && b[7] < 0x80 && b[8] < 0x80 && b[9] < 0x80) return 'audio/mpeg'
   if (b.length >= 4 && b[0] === 0xff && (b[1] & 0xe0) === 0xe0) {
     if ((b[1] & 0xf6) === 0xf0) return 'audio/aac' // ADTS: layer bits 00
     const version = (b[1] >> 3) & 3
@@ -45,16 +53,6 @@ export function sniffType(firstBytes: Uint8Array): string | null {
     if (version !== 1 && layer !== 0 && bitrate !== 0 && bitrate !== 15 && rate !== 3) return 'audio/mpeg'
   }
   return null
-}
-
-const ALIASES: Record<string, string> = {
-  'image/jpg': 'image/jpeg', 'audio/x-m4a': 'audio/mp4', 'audio/m4a': 'audio/mp4', 'audio/mp3': 'audio/mpeg',
-  'audio/x-wav': 'audio/wav', 'audio/wave': 'audio/wav', 'audio/opus': 'audio/ogg', 'audio/x-aac': 'audio/aac',
-}
-/** A declared type without its parameters (`audio/webm;codecs=opus`), lowercased, with common aliases folded. */
-export const canonicalType = (t: unknown): string => {
-  const base = String(t ?? '').split(';')[0].trim().toLowerCase()
-  return ALIASES[base] ?? base
 }
 
 /** True when what the bytes are satisfies what was declared. A recorder's audio often lives in a video
