@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 (2026-10-13)
+
+- **The phone's saved answers belong to whoever asked.** A list or report that the app answers after the signed-in account has changed is neither saved under the earlier account's key nor drawn: the account is asked again after the answer, as the outbox does before a write.
+- **A refusal is not "could not reach the app".** `mine()` and `one(id)` signal a refusal by throwing an error with `refused: true` or a `status` of 401, 403 or 404 (`one` may also answer an object with a string `refused`). On a refusal the saved copy is deleted and the screen says the suggestion could not be opened (or the list could not be loaded); any other failure keeps the saved copy under the "Could not reach the app" line, as in 0.1.2. Documented on `StoreAdapter`.
+- **The detail view follows its `id`.** Changing the id prop resets what is shown, so one report is never drawn under another's address.
+- **The saved views are kept tidy.** After a successful list, saved reports the app no longer lists are deleted, and signing out clears the account's saved views from the phone.
+- "Updating" shows only until the first answer after the screen opens, not on every periodic reload.
+
 ## 0.1.2 (2026-10-13)
 
 - **My suggestions and the detail view draw at once.** Each keeps its last successful answer (`mine()` and each `one(id)`) in the module's own IndexedDB store, keyed by app and account like a draft, and draws it as soon as the phone has read it, with a quiet "Updating" line until the app answers. The app's answer replaces it (a report that vanished on the app disappears). If the app cannot be reached, the saved rows stay and the screen says so: "Could not reach the app. Showing what this phone last saw." A first open with nothing saved shows the loading state, as before. Reports waiting in the outbox show as they did. Another account never reads this account's saved answer. New strings `updating` and `offlineShowingSaved` (replaceable through `words.text`).

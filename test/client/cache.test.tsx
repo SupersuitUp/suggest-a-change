@@ -9,7 +9,7 @@ import { SuggestEntry } from '../../src/client/entry.tsx'
 import { openStore } from '../../src/client/idb.ts'
 import { MySuggestions } from '../../src/client/mine.tsx'
 import type { Report, StoreAdapter, Summary } from '../../src/client/reports.ts'
-import { refreshIdentity } from '../../src/client/runtime.ts'
+import { getRuntime, refreshIdentity } from '../../src/client/runtime.ts'
 
 afterEach(() => cleanup())
 
@@ -154,5 +154,135 @@ describe('the entry takes a role', () => {
     a.unmount()
     const c = render(<SuggestEntry adapters={t.adapters} onOpen={() => {}} />)
     expect(c.container.querySelector('[data-suggest-entry]')!.hasAttribute('role')).toBe(false)
+  })
+})
+
+const keysOf = async (t: { phone: Awaited<ReturnType<typeof openStore>> }) => (await t.phone.all('kv')).map((r) => r.key).filter((k) => k.includes('#view'))
+const refusal = () => Object.assign(new Error('gone'), { refused: true })
+
+describe('the cache belongs to whoever asked (fix round 1)', () => {
+  it('a list that is answered after the session switched to another account is not kept under the first, or drawn', async () => {
+    let current: Identity | null = SAM
+    const answers: ((r: Summary[]) => void)[] = []
+    const t = await setup({ mine: () => new Promise<Summary[]>((r) => { answers.push(r) }) })
+    const adapters: Adapters = { ...t.adapters, identity: async () => current }
+    render(<MySuggestions adapters={adapters} />)
+    await waitFor(() => expect(answers.length).toBeGreaterThan(0))
+    current = JO
+    await act(async () => { for (const a of answers) a([{ id: 'a', status: 'received', at: 1, words: 'asked as sam' }]); await new Promise((r) => setTimeout(r, 40)) })
+    expect(await keysOf(t)).toEqual([])
+    expect(screen.queryByText('asked as sam')).toBeNull()
+  })
+
+  it('a report answered after the session switched is not kept under the first account', async () => {
+    let current: Identity | null = SAM
+    const answers: ((r: Report) => void)[] = []
+    const t = await setup({ one: () => new Promise<Report>((r) => { answers.push(r) }) })
+    const adapters: Adapters = { ...t.adapters, identity: async () => current }
+    render(<SuggestionDetail adapters={adapters} id={RID} />)
+    await waitFor(() => expect(answers.length).toBeGreaterThan(0))
+    current = JO
+    await act(async () => { for (const a of answers) a({ id: RID, status: 'received', words: 'asked as sam' } as Report); await new Promise((r) => setTimeout(r, 40)) })
+    expect(await keysOf(t)).toEqual([])
+    expect(screen.queryByText('asked as sam')).toBeNull()
+  })
+})
+
+describe('a refusal is not an unreachable app (fix round 1)', () => {
+  const rep = { id: RID, status: 'received', words: 'cached words' } as Report
+  async function warmed(kind: 'one' | 'mine') {
+    const t = await setup({ one: async () => rep, mine: async () => [{ id: RID, status: 'received', at: 1, words: 'cached row' }] })
+    const first = kind === 'one' ? render(<SuggestionDetail adapters={t.adapters} id={RID} />) : render(<MySuggestions adapters={t.adapters} />)
+    await screen.findByText(kind === 'one' ? 'cached words' : 'cached row')
+    await waitFor(async () => expect((await keysOf(t)).length).toBeGreaterThan(0))
+    first.unmount()
+    return t
+  }
+
+  it('a report the app now refuses is dropped from the phone and shows as could not be opened, for a flagged error and for 404 and 403', async () => {
+    for (const err of [refusal(), Object.assign(new Error('x'), { status: 404 }), Object.assign(new Error('x'), { status: 403 })]) {
+      cleanup()
+      const t = await warmed('one')
+      const again = await setup({ one: async () => { throw err } }, SAM, t)
+      render(<SuggestionDetail adapters={again.adapters} id={RID} />)
+      expect((await screen.findByRole('alert')).textContent).toBe('This suggestion could not be opened.')
+      expect(screen.queryByText('cached words')).toBeNull()
+      await waitFor(async () => expect((await t.phone.all('kv', `sac:${t.app}:sam#view:one`)).length).toBe(0))
+    }
+  })
+
+  it('a plain network error is still unreachable, and the cached report stays', async () => {
+    const t = await warmed('one')
+    const again = await setup({ one: async () => { throw new TypeError('Failed to fetch') } }, SAM, t)
+    render(<SuggestionDetail adapters={again.adapters} id={RID} />)
+    await screen.findByText('cached words')
+    expect((await screen.findByRole('alert')).textContent).toContain('Could not reach the app')
+    expect((await t.phone.all('kv', `sac:${t.app}:sam#view:one`)).length).toBe(1)
+  })
+
+  it('a refused list clears the cached list', async () => {
+    const t = await warmed('mine')
+    const again = await setup({ mine: async () => { throw refusal() } }, SAM, t)
+    render(<MySuggestions adapters={again.adapters} />)
+    expect((await screen.findByRole('alert')).textContent).toBe('Your suggestions could not be loaded.')
+    expect(screen.queryByText('cached row')).toBeNull()
+    await waitFor(async () => expect((await t.phone.all('kv', `sac:${t.app}:sam#view:mine`)).length).toBe(0))
+  })
+})
+
+describe('the detail view follows its id (fix round 1)', () => {
+  it('changing the id with the app unreachable never shows the first report under the second', async () => {
+    const t = await setup({ one: async (id) => { if (id === RID) return { id, status: 'received', words: 'first report' } as Report; throw new TypeError('Failed to fetch') } })
+    const view = render(<SuggestionDetail adapters={t.adapters} id={RID} />)
+    await screen.findByText('first report')
+    view.rerender(<SuggestionDetail adapters={t.adapters} id="r-20261012120000-zzzzzz" />)
+    await act(async () => { await new Promise((r) => setTimeout(r, 60)) })
+    expect(screen.queryByText('first report')).toBeNull()
+    expect((await screen.findByRole('alert')).textContent).toBe('This suggestion could not be opened.')
+  })
+})
+
+describe('the cache is kept tidy (fix round 1)', () => {
+  it('after a list, cached reports the app no longer lists are dropped', async () => {
+    const t = await setup({ one: async (id) => ({ id, status: 'received', words: 'w' }) as Report, mine: async () => [{ id: 'keep', status: 'received', at: 1, words: 'kept' }] })
+    const rt = await getRuntime(t.adapters, SAM)
+    await rt.store.put('kv', `sac:${t.app}:sam#view:one:gone`, { id: 'gone' })
+    await rt.store.put('kv', `sac:${t.app}:sam#view:one:keep`, { id: 'keep' })
+    render(<MySuggestions adapters={t.adapters} />)
+    await screen.findByText('kept')
+    await waitFor(async () => expect((await keysOf(t)).sort()).toEqual([`sac:${t.app}:sam#view:mine`, `sac:${t.app}:sam#view:one:keep`]))
+  })
+
+  it('signing out clears the account\'s cached views', async () => {
+    const t = await setup({ mine: async () => [{ id: 'a', status: 'received', at: 1, words: 'row' }] })
+    let current: Identity | null = SAM
+    const adapters: Adapters = { ...t.adapters, identity: async () => current }
+    render(<MySuggestions adapters={adapters} />)
+    await screen.findByText('row')
+    await waitFor(async () => expect((await keysOf(t)).length).toBe(1))
+    current = null
+    await act(async () => { refreshIdentity() })
+    await waitFor(async () => expect(await keysOf(t)).toEqual([]))
+  })
+
+  it('"Updating" ends with the first answer; a later periodic reload does not bring it back', async () => {
+    let calls = 0
+    const t = await setup({ mine: () => (++calls === 1 ? Promise.resolve([{ id: 'a', status: 'received', at: 1, words: 'row' }]) : never<Summary[]>()) })
+    const first = render(<MySuggestions adapters={t.adapters} />)
+    await screen.findByText('row')
+    await waitFor(async () => expect((await keysOf(t)).length).toBe(1))
+    first.unmount()
+    calls = 1
+    // Second open: cache first, then the first answer arrives.
+    let release: (r: Summary[]) => void = () => {}
+    const again = await setup({ mine: () => (++calls === 2 ? new Promise<Summary[]>((r) => { release = r }) : never<Summary[]>()) }, SAM, t)
+    render(<MySuggestions adapters={again.adapters} />)
+    await screen.findByText('Updating')
+    await act(async () => { release([{ id: 'a', status: 'received', at: 1, words: 'row' }]) })
+    await waitFor(() => expect(screen.queryByText('Updating')).toBeNull())
+    const rt = await getRuntime(again.adapters, SAM)
+    await act(async () => { await rt.outbox.enqueue({ id: 'noise', kind: 'other', body: {}, at: 1 }); await rt.outbox.refresh(); await new Promise((r) => setTimeout(r, 60)) })
+    await waitFor(() => expect(calls).toBeGreaterThan(2))
+    expect(screen.queryByText('Updating')).toBeNull()
   })
 })

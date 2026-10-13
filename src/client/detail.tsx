@@ -11,7 +11,7 @@ import { recoverTakes } from './recorder.ts'
 import { queueFollowUp, type Report } from './reports.ts'
 import { useRuntime, useTick, type FollowUp } from './runtime.ts'
 import { Toasts } from './toast.tsx'
-import { oneCacheKey, readCache, writeCache } from './view-cache.ts'
+import { dropCache, isRefusal, oneCacheKey, readCache, useClearOnSignOut, writeCache } from './view-cache.ts'
 import { effectiveCeilings, lengthWords, sizeWords, statusMeaning, statusWords, stringsFor } from './words.ts'
 
 export function statusOf(r: Record<string, unknown>): string {
@@ -103,7 +103,8 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
   const restored = useRef(makeDeferred())
 
   // A different account (or none) shows nothing of the last one.
-  useEffect(() => { loads.current++; shown.current = false; setUpdating(false); setOffline(false); setReport(undefined); setPending([]); setReady(false); setMore(''); setHeard([]); followId.current = null; n.current = 0; restored.current = makeDeferred() }, [rt])
+  useClearOnSignOut(rt, who, adapters.words.app)
+  useEffect(() => { loads.current++; shown.current = false; setUpdating(false); setOffline(false); setReport(undefined); setPending([]); setReady(false); setMore(''); setHeard([]); followId.current = null; n.current = 0; restored.current = makeDeferred() }, [rt, id])
 
   const load = useCallback(async () => {
     if (!rt) return
@@ -124,10 +125,20 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
         if (saved && typeof saved === 'object') { shown.current = true; setReport(saved); setUpdating(true) }
       }
       let r: (Report & Record<string, unknown>) | undefined
-      try { r = (await adapters.store.one(id)) as Report & Record<string, unknown> } catch { r = undefined }
+      let refused = false
+      try {
+        const a = (await adapters.store.one(id)) as unknown
+        if (a && typeof a === 'object' && typeof (a as { refused?: unknown }).refused === 'string') refused = true
+        else r = a as Report & Record<string, unknown>
+      } catch (e) { r = undefined; refused = isRefusal(e) }
+      // The answer belongs to whoever asked: if the signed-in account is no longer that one, nothing is kept or drawn.
+      let now: { account: string } | null = null
+      try { now = await adapters.identity() } catch { now = null }
       if (!fresh()) return
+      if (!now || now.account !== rt.who.account) return
       setUpdating(false)
       if (r) { shown.current = true; setOffline(false); setReport(r); void writeCache(rt.store, ckey, r) }
+      else if (refused) { shown.current = false; setOffline(false); void dropCache(rt.store, ckey); setReport(null) }
       else if (shown.current) setOffline(true)
       else setReport(null)
     } catch { if (fresh()) setReport(null) }

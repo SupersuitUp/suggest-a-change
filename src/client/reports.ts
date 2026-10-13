@@ -21,7 +21,9 @@ export interface Summary { id: string; status: string; kind?: string; at?: numbe
 export interface StoreAdapter {
   submit(report: Report): Promise<'done' | { refused: string }>
   uploadPart(reportId: string, file: string, part: number, bytes: Blob): Promise<'done' | { refused: string }>
+  /** An unreachable app THROWS (a network error). A refusal (the list is no longer this person's) throws an error with `refused: true` or a `status` of 401, 403 or 404: the phone then drops what it kept. */
   mine(): Promise<Summary[]>
+  /** Same contract as `mine`: a report that is gone or not this person's is a refusal (`refused: true`, or status 401/403/404, or an answer object with a string `refused`), never a plain failure, so the phone stops showing its saved copy. */
   one(id: string): Promise<Report>
   /** Adds to a report. Also at-least-once: it must dedupe by (id, `more.followId`). */
   append(id: string, more: Record<string, unknown>): Promise<'done' | { refused: string }>

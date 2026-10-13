@@ -8,7 +8,7 @@ import type { Adapters } from './adapters.ts'
 import { SuggestionDetail } from './detail.tsx'
 import type { Summary } from './reports.ts'
 import { useRuntime, useTick } from './runtime.ts'
-import { mineCacheKey, readCache, writeCache } from './view-cache.ts'
+import { dropCache, isRefusal, mineCacheKey, pruneOnes, readCache, useClearOnSignOut, writeCache } from './view-cache.ts'
 import { Toasts } from './toast.tsx'
 import { statusMeaning, statusWords, stringsFor } from './words.ts'
 
@@ -28,7 +28,10 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
   const loads = useRef(0)
   // What the app last said (or the phone kept of it) for this account; null until either is known.
   const known = useRef<Summary[] | null>(null)
-  useEffect(() => { loads.current++; known.current = null; setRows(null); setOpen(null); setBad(''); setUpdating(false) }, [rt])
+  // The first answer after mount ends "Updating"; later periodic reloads refresh quietly.
+  const answered = useRef(false)
+  useClearOnSignOut(rt, who, adapters.words.app)
+  useEffect(() => { loads.current++; known.current = null; answered.current = false; setRows(null); setOpen(null); setBad(''); setUpdating(false) }, [rt])
 
   const load = useCallback(async () => {
     if (!rt) return
@@ -51,18 +54,31 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
       const local = await rt.waiting()
       if (mine_ !== loads.current) return
       paint(known.current, local)
-      setUpdating(true)
+      if (!answered.current) setUpdating(true)
     }
     let theirs: Summary[] | null = null
-    try { theirs = await adapters.store.mine() } catch { theirs = null }
+    let refused = false
+    try { theirs = await adapters.store.mine() } catch (e) { theirs = null; refused = isRefusal(e) }
+    // The answer belongs to whoever asked. If the signed-in account is no longer that one, nothing is kept or drawn.
+    let now: { account: string } | null = null
+    try { now = await adapters.identity() } catch { now = null }
     const local = await rt.waiting()
     if (mine_ !== loads.current) return
+    if (!now || now.account !== rt.who.account) return
+    answered.current = true
     setUpdating(false)
     if (theirs) {
       known.current = theirs
       void writeCache(rt.store, key, theirs)
+      void pruneOnes(rt.store, { app: adapters.words.app, account: rt.who.account }, theirs.map((t) => t.id))
       setBad('')
       paint(theirs, local)
+    } else if (refused) {
+      // The app said no: what the phone held is no longer this person's to see.
+      known.current = null
+      void dropCache(rt.store, key)
+      setBad(S.couldNotLoadMine)
+      paint([], local)
     } else if (known.current !== null) {
       setBad(S.offlineShowingSaved)
       paint(known.current, local)
