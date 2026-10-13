@@ -3,7 +3,7 @@
 // A report still on the phone is listed too (as "On this phone"), with the app's refusal and a Try again
 // when it gave one. Only this signed-in account's reports are shown; another person's waiting reports
 // on the same phone are not.
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Adapters } from './adapters.ts'
 import { SuggestionDetail } from './detail.tsx'
 import type { Summary } from './reports.ts'
@@ -23,13 +23,19 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
   const [bad, setBad] = useState('')
 
   // Another account (or none) shows nothing of the last one's rows.
-  useEffect(() => { setRows(null); setOpen(null) }, [rt])
+  const loads = useRef(0)
+  useEffect(() => { loads.current++; setRows(null); setOpen(null) }, [rt])
 
   const load = useCallback(async () => {
     if (!rt) return
+    // Only the newest load may paint: one still running for the account just replaced must not draw its rows.
+    const mine_ = ++loads.current
     let theirs: Summary[] = []
-    try { theirs = await adapters.store.mine(); setBad('') } catch { setBad(S.couldNotLoadMine) }
+    let failed = false
+    try { theirs = await adapters.store.mine() } catch { failed = true }
     const local = await rt.waiting()
+    if (mine_ !== loads.current) return
+    setBad(failed ? S.couldNotLoadMine : '')
     const waiting = new Map(local.map((l) => [l.id, l]))
     // A report the app already lists keeps its own status; one still on the phone is listed as on the phone.
     const phone: Row[] = local.filter((l) => !l.onlyFollowUp && !theirs.some((t) => t.id === l.id)).map((l) => ({ id: l.id, status: 'on-phone', at: l.at, ...(l.words ? { words: l.words } : {}), ...(l.error ? { error: l.error } : {}) }))

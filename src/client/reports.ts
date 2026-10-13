@@ -48,7 +48,8 @@ export async function queueReport(
   },
 ): Promise<void> {
   const at = now()
-  await outbox.enqueue({ id: opId('report', report.id), kind: 'report', body: { report, draft }, at })
+  const reportOp = opId('report', report.id)
+  await outbox.enqueue({ id: reportOp, kind: 'report', body: { report, draft }, at })
   // Marked only AFTER the report is safely in the outbox: if the enqueue throws, the draft is still the
   // person's live draft. A save between the two writes joins this report, and the clear is guarded by the
   // report id, so those words are never wiped.
@@ -67,6 +68,7 @@ export async function queueReport(
       kind: 'reportPart',
       body: { reportId: report.id, file: p.file, part: p.part ?? 0, draft },
       blob: p.blob,
+      parent: reportOp,
       at: at + n,
     })
   }
@@ -115,14 +117,15 @@ export async function queueFollowUp(
 ): Promise<void> {
   const at = now()
   // The follow-up first, its takes after it: the same order a report travels in, so the app knows what is coming.
+  const parent = opId('followUp', reportId, followId)
   await outbox.enqueue({
-    id: opId('followUp', reportId, followId), kind: 'followUp',
+    id: parent, kind: 'followUp',
     body: { reportId, followId, words, at: new Date(at).toISOString(), voice: voice.map(({ file, ms }) => ({ file, ms })), draft },
     at,
   })
   let n = 0
   for (const v of voice) {
     n++
-    await outbox.enqueue({ id: opId('part', reportId, v.file, '0'), kind: 'reportPart', body: { reportId, file: v.file, part: 0, followId, draft }, blob: v.blob, at: at + n })
+    await outbox.enqueue({ id: opId('part', reportId, v.file, '0'), kind: 'reportPart', body: { reportId, file: v.file, part: 0, followId, draft }, blob: v.blob, parent, at: at + n })
   }
 }

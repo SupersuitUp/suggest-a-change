@@ -51,6 +51,7 @@ export interface Strings {
   sendHint: string
   sending: string
   retry: string
+  discard: string
   done: string
   restored: string
   appendLabel: string
@@ -130,6 +131,7 @@ export const DEFAULT_STRINGS: Strings = {
   sendHint: 'Type, say or show something first.',
   sending: 'Sending',
   retry: 'Try again',
+  discard: 'Discard',
   done: 'Done',
   restored: 'Restored your unsent suggestion',
   appendLabel: 'Add to it',

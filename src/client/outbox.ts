@@ -15,6 +15,8 @@ export interface Op {
   body: Record<string, unknown>
   /** A recorded take in the `blobs` store, deleted with the op once it lands. */
   blob?: string
+  /** The id of the write this one belongs to (a part's report or follow-up). While that write is refused, this one is held, not sent. */
+  parent?: string
   at: number
   error?: string
 }
@@ -46,8 +48,11 @@ export function makeOutbox({ store, send, reach }: { store: Store; send(op: Op):
   /** One pass over the queue. False when the Mac is away, so nothing more is tried now. */
   async function pass(): Promise<boolean> {
     if (!(await reach.check())) return false
-    for (const op of await pending()) {
+    const queue = await pending()
+    const refused = new Set(queue.filter((o) => o.error).map((o) => o.id))
+    for (const op of queue) {
       if (op.error) continue
+      if (op.parent && refused.has(op.parent)) continue
       let r: Sent
       try { r = await send(op) } catch { reach.mark(false); return false }
       if (r === 'done') {
@@ -56,6 +61,7 @@ export function makeOutbox({ store, send, reach }: { store: Store; send(op: Op):
         await tell(op.id)
       } else {
         await store.put('outbox', op.id, { ...op, error: r.refused })
+        refused.add(op.id)
         await tell()
       }
     }

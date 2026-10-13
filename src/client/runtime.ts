@@ -33,6 +33,8 @@ export interface Runtime {
   waiting(): Promise<Waiting[]>
   /** Follow-ups to a report that have not landed yet. */
   followUps(reportId: string): Promise<FollowUp[]>
+  /** Drops a follow-up the person has chosen not to keep: its write, its voice parts and their local copies. */
+  discardFollowUp(reportId: string, followId: string): Promise<void>
   /** The copy of a report that is still on this phone, with the app's refusal if there is one. */
   local(reportId: string): Promise<{ report: Report; error?: string } | undefined>
   /** Keeps the outbox moving (on reconnect and every 15 s) while something is mounted. */
@@ -132,6 +134,15 @@ async function build(first: Adapters, who: Identity): Promise<Runtime> {
         by.set(f, { followId: f, words: had?.words || (o.kind === 'followUp' ? String(o.body.words ?? '') : ''), ...(had?.error || o.error ? { error: had?.error ?? o.error } : {}) })
       }
       return [...by.values()]
+    },
+    async discardFollowUp(id: string, followId: string) {
+      for (const o of await outbox.pending()) {
+        if (belongsTo(o, id) && o.body.followId === followId) {
+          await store.del('outbox', o.id)
+          if (o.blob) await store.del('blobs', o.blob)
+        }
+      }
+      await outbox.refresh()
     },
     async local(id: string) {
       const mine = (await outbox.pending()).filter((o) => belongsTo(o, id) && o.body.followId === undefined)

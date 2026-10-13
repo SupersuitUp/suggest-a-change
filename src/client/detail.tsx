@@ -60,6 +60,7 @@ export function StatusStrip({ status, owner, step, timeline, label }: { status: 
   )
 }
 
+function makeDeferred() { let done = () => {}; const ready = new Promise<void>((r) => { done = r }); return { ready, done: () => done() } }
 type Heard = { key: string; file: string; ms: number }
 const newFollowId = () => `f-${Math.random().toString(36).slice(2, 8)}`
 
@@ -84,18 +85,29 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
   const fuKey = key ? `${key}#fu:${id}` : null
   const labels = { holdToTalk: S.holdToTalk, stopTalking: S.stopTalking, micDenied: S.micDenied, voiceUnavailable: S.voiceUnavailable, voiceTotalLimit: S.voiceTotalLimit }
 
+  // Each load takes a number; only the newest may paint, so a load still running for the account that
+  // was just replaced never draws its rows under the new one.
+  const loads = useRef(0)
+  // Anything that writes the follow-up waits until its draft has been read, so the counter is right.
+  const restored = useRef(makeDeferred())
+
   // A different account (or none) shows nothing of the last one.
-  useEffect(() => { setReport(undefined); setPending([]); setReady(false); setMore(''); setHeard([]); followId.current = null }, [rt])
+  useEffect(() => { loads.current++; setReport(undefined); setPending([]); setReady(false); setMore(''); setHeard([]); followId.current = null; n.current = 0; restored.current = makeDeferred() }, [rt])
 
   const load = useCallback(async () => {
     if (!rt) return
+    const mine_ = ++loads.current
+    const fresh = () => mine_ === loads.current
     try {
-      setPending(await rt.followUps(id))
+      const waiting = await rt.followUps(id)
       const mine = await rt.local(id)
+      if (!fresh()) return
+      setPending(waiting)
       if (mine) { setReport({ ...(mine.report as Report & Record<string, unknown>), status: 'on-phone' }); setRefusal(mine.error); return }
       setRefusal(undefined)
-      setReport((await adapters.store.one(id)) as Report & Record<string, unknown>)
-    } catch { setReport(null) }
+      const r = (await adapters.store.one(id)) as Report & Record<string, unknown>
+      if (fresh()) setReport(r)
+    } catch { if (fresh()) setReport(null) }
   }, [adapters, id, rt])
   useEffect(() => { void load() }, [load, tick])
 
@@ -106,6 +118,9 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
     void (async () => {
       const d = await rt.store.get<{ followId: string; words: string; heard: Heard[] }>('kv', fuKey)
       let list = d?.heard ?? []
+      // The counter starts from the notes already kept, before a rescued take takes the next number.
+      followId.current = d?.followId ?? followId.current
+      n.current = list.reduce((m, h) => Math.max(m, Number(h.key.slice(h.key.lastIndexOf(':') + 1)) || 0), 0)
       const rescued = await recoverTakes(rt.store, (q) => q === `${key}|field:append-${id}`)
       for (const t of rescued) {
         const blob = await rt.store.get<Blob>('blobs', t.key)
@@ -117,10 +132,11 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
         list = [...list, { key: k, file: `added-${followId.current}-${n.current}.${(blob.type ?? '').split('/')[1]?.split(';')[0] || 'bin'}`, ms: t.ms }]
       }
       if (!live) return
-      if (d) { followId.current = d.followId; setMore(d.words) }
-      n.current = list.reduce((m, h) => Math.max(m, Number(h.key.slice(h.key.lastIndexOf(':') + 1)) || 0), 0)
-      setHeard(list)
+      // What was typed while this was loading wins over the saved words.
+      if (d) setMore((cur) => (cur.trim() ? cur : d.words))
+      setHeard((cur) => [...list, ...cur])
       setReady(true)
+      restored.current.done()
     })()
     return () => { live = false }
   }, [rt, fuKey, key, id])
@@ -161,6 +177,7 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
   async function keepHeard(original: string, blob: Blob, ms: number) {
     if (!rt) return { refused: S.loading }
     if (ms > ceilings.voiceMs) return { refused: S.voiceTooLong }
+    await restored.current.ready
     const fid = (followId.current ??= newFollowId())
     const k = `fu:${id}:${fid}:${++n.current}`
     await rt.store.put('blobs', k, blob)
@@ -193,6 +210,7 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
               <span className="sac-words">{f.words || S.attachmentsLabel}</span>
               {f.error ? <span role="alert" className="sac-error">{f.error}</span> : <span className="sac-muted">{S.waitingToSend}</span>}
               {f.error && rt ? <button type="button" className="sac-button" onClick={() => void rt.retry(id)}>{S.retry}</button> : null}
+              {f.error && rt ? <button type="button" className="sac-button" onClick={() => void rt.discardFollowUp(id, f.followId)}>{S.discard}</button> : null}
             </li>
           ))}
         </ul>

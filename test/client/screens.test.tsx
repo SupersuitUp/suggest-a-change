@@ -361,6 +361,25 @@ describe('the sheet', () => {
     expect(await db.get('blobs', 'take:words:1')).toBeUndefined()
   })
 
+  it('a take cut off beside a note already kept does not overwrite it', async () => {
+    const { adapters, db, submitted } = await setup()
+    const first = await sheet(adapters)
+    record()
+    await screen.findByText('Voice note 1, 0:04')
+    const key = draftKey({ app: adapters.words.app, account: 'sam' })
+    await waitFor(async () => expect((await loadDraft(db, key))?.attachments).toHaveLength(1))
+    first.unmount()
+    await db.put('kv', 'rec:take:words:7', { questionId: `${key}|field:words`, mime: 'audio/webm', startedAt: 1 })
+    await db.put('blobs', 'take:words:7#00000', new Blob(['cut'], { type: 'audio/webm' }))
+    await sheet(adapters)
+    await screen.findByText('Voice note 2, 0:01')
+    expect((await db.all('blobs')).filter((b) => b.key.startsWith('voice:'))).toHaveLength(2)
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(submitted).toHaveLength(1))
+    const files = (submitted[0].voice as { file: string }[]).map((v) => v.file)
+    expect(new Set(files).size).toBe(2)
+  })
+
   it('numbers continue from the highest take after a restore, so removing one never overwrites another', async () => {
     const { adapters, submitted, db } = await setup()
     const first = await sheet(adapters)
@@ -637,6 +656,57 @@ describe('My suggestions and the detail view', () => {
     expect((await db0.all('kv')).filter((k) => k.key.includes('#fu:'))).toHaveLength(0)
   })
 
+  it('a take cut off under "Add to it" does not overwrite a note already kept: two distinct notes, two parts sent', async () => {
+    const appended: Record<string, unknown>[] = []
+    const { adapters, db, parts } = await setup({ Field: undefined }, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }), append: async (_i, more) => { appended.push(more); return 'done' } })
+    const rid = 'r-20261012120000-abcdef'
+    const key = draftKey({ app: adapters.words.app, account: 'sam' })
+    await db.put('blobs', `fu:${rid}:f-aaaaaa:1`, new Blob(['kept'], { type: 'audio/webm' }))
+    await db.put('kv', `${key}#fu:${rid}`, { followId: 'f-aaaaaa', words: '', heard: [{ key: `fu:${rid}:f-aaaaaa:1`, file: 'added-f-aaaaaa-1.webm', ms: 3000 }] })
+    await db.put('kv', 'rec:take:append:9', { questionId: `${key}|field:append-${rid}`, mime: 'audio/webm', startedAt: 1 })
+    await db.put('blobs', 'take:append:9#00000', new Blob(['cut'], { type: 'audio/webm' }))
+    render(<SuggestionDetail adapters={adapters} id={rid} />)
+    await screen.findByText('Voice note 2, 0:01')
+    expect(screen.getByText('Voice note 1, 0:03')).toBeTruthy()
+    expect((await db.all('blobs')).map((b) => b.key).filter((k) => k.startsWith('fu:')).sort()).toEqual([`fu:${rid}:f-aaaaaa:1`, `fu:${rid}:f-aaaaaa:2`])
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    await waitFor(() => expect(parts).toHaveLength(2))
+    expect(new Set(parts.map((p) => p.file)).size).toBe(2)
+    expect((appended[0].voice as unknown[]).length).toBe(2)
+  })
+
+  it('words typed before the saved follow-up has loaded are kept, not replaced by the saved words', async () => {
+    const { adapters, db } = await setup({ Field: undefined }, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }) })
+    const rid = 'r-20261012120000-abcdef'
+    const key = draftKey({ app: adapters.words.app, account: 'sam' })
+    await db.put('kv', `${key}#fu:${rid}`, { followId: 'f-aaaaaa', words: 'old saved words', heard: [] })
+    const slow = { ...db, get: async (s: never, k: string) => { if (String(k).includes('#fu:')) await new Promise((r) => setTimeout(r, 80)); return db.get(s, k) } } as typeof db
+    adapters.phone = { store: slow }
+    render(<SuggestionDetail adapters={adapters} id={rid} />)
+    fireEvent.change(await screen.findByLabelText('Add to it'), { target: { value: 'typed first' } })
+    await act(async () => { await new Promise((r) => setTimeout(r, 200)) })
+    expect((screen.getByLabelText('Add to it') as HTMLTextAreaElement).value).toBe('typed first')
+  })
+
+  it('a refused follow-up holds its voice part (nothing uploads), and Discard drops both without deleting anything else', async () => {
+    const { adapters, db, parts } = await setup({ Field: undefined }, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }), append: async () => ({ refused: 'closed' }) })
+    const rid = 'r-20261012120000-abcdef'
+    const key = draftKey({ app: adapters.words.app, account: 'sam' })
+    await db.put('blobs', `fu:${rid}:f-bbbbbb:1`, new Blob(['kept'], { type: 'audio/webm' }))
+    await db.put('kv', `${key}#fu:${rid}`, { followId: 'f-bbbbbb', words: 'with a note', heard: [{ key: `fu:${rid}:f-bbbbbb:1`, file: 'added-f-bbbbbb-1.webm', ms: 3000 }] })
+    render(<SuggestionDetail adapters={adapters} id={rid} />)
+    await screen.findByText('Voice note 1, 0:03')
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    const row = await waitFor(() => { const r = document.querySelector('[data-followup]'); expect(r?.querySelector('[role="alert"]')?.textContent).toBe('closed'); return r! })
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+    expect(parts).toHaveLength(0)
+    expect((await db.all('blobs')).filter((b) => b.key.startsWith('fu:'))).toHaveLength(1)
+    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'Discard' }))
+    await waitFor(() => expect(document.querySelector('[data-followup]')).toBeNull())
+    expect((await db.all('blobs')).filter((b) => b.key.startsWith('fu:'))).toHaveLength(0)
+    expect((await db.all('outbox'))).toHaveLength(0)
+  })
+
   it('a follow-up being written survives closing the detail, and a take cut off under "Add to it" rejoins it', async () => {
     const { adapters, db } = await setup({ Field: undefined }, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }) })
     const key = draftKey({ app: adapters.words.app, account: 'sam' })
@@ -816,6 +886,22 @@ describe('accounts on one phone', () => {
 })
 
 describe('smaller promises', () => {
+  it('a load still running for the account just replaced never paints its rows under the next one', async () => {
+    let release: (v: Summary[]) => void = () => {}
+    let slow = true
+    const t = await setup({}, SAM, { mine: () => (slow ? new Promise<Summary[]>((r) => { release = r }) : Promise.resolve([])) })
+    let current: Identity | null = SAM
+    const adapters: Adapters = { ...t.adapters, identity: async () => current }
+    render(<MySuggestions adapters={adapters} />)
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+    slow = false
+    current = JO
+    await act(async () => { refreshIdentity(); await new Promise((r) => setTimeout(r, 30)) })
+    await screen.findByText('You have not sent a suggestion yet.')
+    await act(async () => { release([{ id: 'r-sam', status: 'received', at: 1, words: 'sam row' }]); await new Promise((r) => setTimeout(r, 30)) })
+    expect(screen.queryByText('sam row')).toBeNull()
+  })
+
   it('with no voice time left, the field refuses before recording', async () => {
     const store = await openStore(`field-${++n}`)
     const startTake = vi.fn()
