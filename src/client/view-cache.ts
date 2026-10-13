@@ -1,3 +1,4 @@
+'use client'
 // THE LAST ANSWER, KEPT ON THE PHONE. My suggestions and the detail view draw from this at once and then
 // refresh from the app, so opening them never waits on the app being reachable. The key names the app and
 // the account exactly as a draft's does, so one person's cache is never read for another.
