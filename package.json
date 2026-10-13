@@ -1,0 +1,52 @@
+{
+  "name": "@supersuit/suggest-a-change",
+  "version": "0.1.0",
+  "description": "The report format and flow behind a Suggest a change button: what a report is, who acts at each step, and the checks every app runs. Zero dependencies.",
+  "type": "module",
+  "bin": {
+    "suggest-a-change": "bin/suggest-a-change.mjs"
+  },
+  "exports": {
+    ".": "./src/contract.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "npm test && node bin/suggest-a-change.mjs --help"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SupersuitUp/suggest-a-change.git"
+  },
+  "dependencies": {},
+  "keywords": [
+    "feedback",
+    "suggest-a-change",
+    "report",
+    "contract",
+    "supersuit"
+  ],
+  "peerDependencies": {
+    "react": "^19",
+    "react-dom": "^19"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  }
+}
