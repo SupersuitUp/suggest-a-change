@@ -51,6 +51,16 @@ test("each status names who performs that step, as the design's section 7 does",
   assert.deepEqual(actors, { "on-phone": "person", "received": "app", "with-freeda": "mac", "planned": "freeda", "waiting-on-owner": "owner", "being-made": "freeda", "live": "freeda", "sent-to-template": "freeda", "filed": "freeda", "not-now": "owner" });
 });
 
+test("the owner may decline a report Freeda has not planned, or has planned and not yet asked about", () => {
+  // Without these a report the reading worker cannot plan has no exit: it shows "With Freeda" for ever.
+  assert.equal(C.mayMove("with-freeda", "not-now"), true);
+  assert.equal(C.mayMove("planned", "not-now"), true);
+  assert.equal(C.mayMove("with-freeda", "filed"), false); // declining is the owner's; filing still comes from the work
+  assert.equal(C.mayMove("with-freeda", "live"), false);
+  assert.deepEqual(C.FLOW["with-freeda"].next, ["planned", "not-now"]);
+  assert.deepEqual(C.FLOW["planned"].next, ["waiting-on-owner", "being-made", "not-now"]);
+});
+
 test("a move the flow forbids is refused", () => {
   assert.equal(C.mayMove("with-freeda", "being-made"), false);
   assert.equal(C.mayMove("waiting-on-owner", "being-made"), true);

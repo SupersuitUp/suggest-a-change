@@ -18,12 +18,13 @@ export const STATUSES = ["on-phone", "received", "with-freeda", "planned", "wait
 export const END = ["live", "sent-to-template", "filed", "not-now"];
 
 // actor: who PERFORMS this step (design section 7): sent by the person, received by the app, with Freeda by the Mac. A Helm on the owner's Mac posts straight into
-// the inbox, so a report may go from the phone to Freeda without the hosted app's "received".
+// the inbox, so a report may go from the phone to Freeda without the hosted app's "received". The owner may decline
+// ("not-now") before Freeda has a plan or before she asks: a report she cannot plan would otherwise have no exit.
 export const FLOW = {
   "on-phone": { actor: "person", next: ["received", "with-freeda"] },
   "received": { actor: "app", next: ["with-freeda"] },
-  "with-freeda": { actor: "mac", next: ["planned"] },
-  "planned": { actor: "freeda", next: ["waiting-on-owner", "being-made"] },
+  "with-freeda": { actor: "mac", next: ["planned", "not-now"] },
+  "planned": { actor: "freeda", next: ["waiting-on-owner", "being-made", "not-now"] },
   "waiting-on-owner": { actor: "owner", next: ["being-made", "filed", "not-now"] },
   "being-made": { actor: "freeda", next: ["live", "sent-to-template", "filed", "not-now"] },
   "live": { actor: "freeda", next: [] },
