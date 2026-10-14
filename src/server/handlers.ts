@@ -11,7 +11,9 @@ import { END, FLOW, STATUSES, isAcceptedMedia, isReportId, mayMove, validateRepo
 import { effectiveLimits, type Limits } from './rate.ts'
 import { ACCEPTED_TYPES, canonicalType, sameType } from './sniff.ts'
 
-export interface TimelineEntry { status: string; by: string; at: string; step?: string; note?: string }
+/** `by` is the actor (contract FLOW). `holder` is the maintainer whose Mac started or ended the work, written on a being-made
+ *  or end entry: the approval on such a report never lapses, and it is how the list and the claim name who has it. */
+export interface TimelineEntry { status: string; by: string; at: string; step?: string; note?: string; holder?: string }
 export interface FileState { pending?: { type: string; bytes: number; issuedAt?: number }; type?: string; bytes?: number; sha256?: string; at?: string }
 export interface FollowUp { followId: string; words: string; at: string; by: string; voice: { file: string; ms: number }[] }
 export interface StoredReport {
@@ -105,6 +107,8 @@ const WORDS_MAX = 20_000
 // A maximal report in Chinese or emoji fits; the whole is still a small fraction of the 4 MB no handler may exceed.
 export const BODY_CAP = 4 * WORDS_MAX * 4 + 64 * 1024
 export const APPROVAL_LEASE_MS = 7 * 24 * 3600_000
+/** The approval's lease once the work has started or ended: in effect it never lapses (finite, so every store can keep it). */
+export const HELD_MS = 100 * 365 * 24 * 3600_000
 export const READ_TTL_MS = 5 * 60_000
 export const VOICE_FILE_BYTES = 25 * 2 ** 20
 /** A voice file may be this many bytes per declared second (768 kbit/s, generous for any recorder) plus a little slack: ten seconds cannot claim 25 MB. */
@@ -149,6 +153,13 @@ async function readBody(req: Request, cap = BODY_CAP, optional = false): Promise
 
 const iso = (ms: number) => new Date(ms).toISOString()
 const lastStatus = (r: StoredReport) => r.timeline[r.timeline.length - 1]?.status ?? 'received'
+/** Past asking the owner: the work has started or ended, and whoever holds the approval keeps it. */
+const PAST_ASKING = ['being-made', ...END]
+/** The maintainer named on the latest move that started or ended the work; none on a report from before 0.1.4. */
+const holderOf = (r: StoredReport): string | undefined => {
+  for (let i = r.timeline.length - 1; i >= 0; i--) if (r.timeline[i].holder) return r.timeline[i].holder
+  return undefined
+}
 const str = (v: unknown, max: number): string | null => (typeof v === 'string' && v.length <= max ? v : null)
 const fileNames = (r: StoredReport): string[] => [
   ...((r.media as { file: string }[] | undefined) ?? []).map((m) => m.file),
@@ -382,15 +393,32 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const by = await maintainerFor(req); if (!by) return signIn()
     const out: StoredReport[] = []
     // A page, oldest first. Reports from before this maintainer was added are skipped when `maintainersSince` says so.
-    for (const r of await store.listOpenFor(by, { limit: limits.agentPage * 3, since: since(by) })) {
-      if (out.length >= limits.agentPage) break
-      // A report still waiting for its attachments is held back, so the Mac never copies half of one.
-      if (!complete(r) && now() - Date.parse(r.receivedAt) < INCOMPLETE_GRACE_MS) continue
-      await store.claim(r.id, by, LEASE_MS)
-      out.push(r)
+    // A report another maintainer already closed is never offered: it is settled for this maintainer here, unseen, so
+    // it neither raises a notice on this Mac nor sits at the head of every page. Settling one frees a slot, so the
+    // store is asked again (a few times at most) until the page fills or nothing more was settled.
+    for (let round = 0; round < 4 && out.length < limits.agentPage; round++) {
+      const batch = await store.listOpenFor(by, { limit: limits.agentPage * 3, since: since(by) })
+      let settled = 0
+      for (const r of batch) {
+        if (out.length >= limits.agentPage) break
+        if (END.includes(lastStatus(r)) && holderOf(r) !== by) {
+          await store.claim(r.id, by, LEASE_MS)
+          if ((await store.settle(r.id, by, reportRevision(r))) === 'settled') settled++
+          continue
+        }
+        // A report still waiting for its attachments is held back, so the Mac never copies half of one.
+        if (!complete(r) && now() - Date.parse(r.receivedAt) < INCOMPLETE_GRACE_MS) continue
+        await store.claim(r.id, by, LEASE_MS)
+        out.push(r)
+      }
+      if (!settled || batch.length < limits.agentPage * 3) break
     }
     // `revision` is what this Mac is being shown; it goes back with the settle so a report that grew in between is not settled.
-    return json(200, { reports: out.map((r) => ({ ...r, revision: reportRevision(r) })) })
+    // `heldBy` names another maintainer whose Mac is making the report, so this Mac files it as taken.
+    return json(200, { reports: out.map((r) => {
+      const holder = lastStatus(r) === 'being-made' ? holderOf(r) : undefined
+      return { ...r, revision: reportRevision(r), ...(holder && holder !== by ? { heldBy: holder } : {}) }
+    }) })
   }
 
   async function agentFile(req: Request, id: string, file: string): Promise<Response> {
@@ -422,12 +450,26 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     return json(200, { id, status: moves ? 'with-freeda' : lastStatus(r) })
   }
 
+  /** Takes (or renews) the approval for `by`. A closed report is never taken, by anyone: it answers who closed it. A
+   *  report being made stays with the Mac that started it. Taken for a move that starts or ends the work, or on a
+   *  report already being made, the lease is HELD_MS, so it does not lapse; before that, a week. Writes nothing when refused. */
+  async function takeApproval(r: StoredReport, by: string, to?: string): Promise<{ ok: true } | { closed: string; claimedBy?: string } | { claimedBy: string }> {
+    const from = lastStatus(r)
+    const holder = holderOf(r)
+    if (END.includes(from)) return { closed: from, ...(holder ? { claimedBy: holder } : {}) }
+    if (from === 'being-made' && holder && holder !== by) return { claimedBy: holder }
+    const lasting = from === 'being-made' || (to !== undefined && PAST_ASKING.includes(to))
+    return store.claimApproval(r.id, by, lasting ? HELD_MS : APPROVAL_LEASE_MS)
+  }
+
   async function agentClaimApproval(req: Request, id: string): Promise<Response> {
     const m = wrongMethod(req, 'POST'); if (m) return m
     const by = await maintainerFor(req); if (!by) return signIn()
     const body = await readBody(req, BODY_CAP, true); if ('res' in body) return body.res
-    if (!isReportId(id) || !(await store.get(id))) return notFound()
-    const got = await store.claimApproval(id, by, APPROVAL_LEASE_MS)
+    const r = isReportId(id) ? await store.get(id) : null
+    if (!r) return notFound()
+    const got = await takeApproval(r, by)
+    if ('closed' in got) return json(409, { error: 'this suggestion is closed', closed: true, status: got.closed, ...(got.claimedBy ? { claimedBy: got.claimedBy } : {}) })
     return 'ok' in got ? json(200, { ok: true, claimedBy: by }) : json(409, { claimedBy: got.claimedBy })
   }
 
@@ -455,12 +497,19 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     if (!mayMove(from, status)) return json(409, { error: `a report cannot go from ${from} to ${status}` })
     // Once the owner is being asked, the Mac that holds the approval decides what happens next. Leaving
     // waiting-on-owner, starting the work and ending it need the claim (taken here if nobody holds it).
-    if (from === 'waiting-on-owner' || status === 'being-made' || END.includes(status)) {
-      const c = await store.claimApproval(id, by, APPROVAL_LEASE_MS)
-      if (!('ok' in c)) return json(409, { error: 'another Mac holds the approval for this report', claimedBy: c.claimedBy })
+    const needsApproval = from === 'waiting-on-owner' || PAST_ASKING.includes(status)
+    if (needsApproval) {
+      const c = await takeApproval(r, by, status)
+      if (!('ok' in c)) return json(409, { error: 'another Mac holds the approval for this report', ...(c.claimedBy ? { claimedBy: c.claimedBy } : {}) })
     }
-    const moved = await store.setStatus(id, { status, by: FLOW[status as keyof typeof FLOW].actor, at: iso(now()), ...(step ? { step } : {}), ...(note ? { note } : {}) }, from)
-    if (!moved) return json(409, { error: 'the report changed while this was sent; read it again' })
+    // The maintainer is named on a move that starts or ends the work, so the hold is known from the report itself.
+    const holder = PAST_ASKING.includes(status) ? { holder: by } : {}
+    const moved = await store.setStatus(id, { status, by: FLOW[status as keyof typeof FLOW].actor, at: iso(now()), ...(step ? { step } : {}), ...(note ? { note } : {}), ...holder }, from)
+    if (!moved) {
+      // The lasting lease was taken for a move that did not happen: bring it back to a week.
+      if (needsApproval && from !== 'being-made' && PAST_ASKING.includes(status)) await store.claimApproval(id, by, APPROVAL_LEASE_MS)
+      return json(409, { error: 'the report changed while this was sent; read it again' })
+    }
     await tell({ type: 'status', reportId: id })
     return json(200, { id, status })
   }

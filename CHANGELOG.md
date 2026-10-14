@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4 (2026-10-14)
+
+- **The owner may decline a report Freeda has not planned.** `FLOW["with-freeda"].next` and `FLOW["planned"].next` now include `"not-now"`, so a report the reading worker cannot plan has an exit instead of showing "With Freeda" for ever. `agentStatus` accepts both moves (they take the approval, as any end does). A copy of the contract vendored elsewhere must be taken again: these are new bytes.
+- **A claim on a closed report answers 409 and never lapses.** `claim-approval` on a report at an end status answers 409 `{ closed: true, status, claimedBy }` to everyone and writes nothing; before, the seven-day approval lapsed and an eight-day-old card could take a shipped or declined report. A report being made stays with the Mac that started it: the move to `being-made` or an end now names the maintainer on its timeline entry (`holder`, not in the member's view) and takes the approval for `HELD_MS` (exported), and another Mac is answered 409 with that holder however long after. Before the work starts the approval still lapses after a week.
+- **The list never offers a report another maintainer closed.** `agentList` settles such a report for the asking maintainer without showing it, so it neither raises a notice on a second Mac nor fills the head of every page; it asks the store again when that freed slots. A report another maintainer is making carries `heldBy`. A report closed before 0.1.4 names no holder and is treated as closed by someone else.
+
 ## 0.1.3 (2026-10-13)
 
 - **The phone's saved answers belong to whoever asked.** A list or report that the app answers after the signed-in account has changed is neither saved under the earlier account's key nor drawn: the account is asked again after the answer, as the outbox does before a write.

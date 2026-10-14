@@ -540,6 +540,115 @@ describe('who holds the approval', () => {
   })
 })
 
+describe('a closed or held report', () => {
+  const WEEK = 7 * 24 * 3600_000
+  const walk = async (h: ReturnType<typeof setup>['h'], call: ReturnType<typeof setup>['call'], id: string, agent: string, to: string[]) => {
+    for (const status of to) expect((await h.agentStatus(call('POST', 'x', { agent }, { status }), id)).status, status).toBe(200)
+  }
+
+  it('the owner may decline a report Freeda has not planned yet, or has planned', async () => {
+    const { h, call, send, mem } = setup()
+    const unplanned = await send('amy')
+    await walk(h, call, unplanned.id, 'mo', ['with-freeda', 'not-now'])
+    expect(mem.reports.get(unplanned.id)!.timeline.map((t) => [t.status, t.by])).toEqual([['received', 'app'], ['with-freeda', 'mac'], ['not-now', 'owner']])
+    const planned = await send('amy')
+    await walk(h, call, planned.id, 'mo', ['with-freeda', 'planned', 'not-now'])
+    const mine = (await (await h.mine(call('GET', 'x', { user: 'amy' }))).json()) as { id: string; status: string }[]
+    expect(mine.map((r) => r.status).sort()).toEqual(['not-now', 'not-now'])
+  })
+
+  it('a claim on a shipped or declined report answers 409 with the holder, however long after', async () => {
+    const { h, call, send } = setup()
+    const claim = (agent: string, id: string) => h.agentClaimApproval(call('POST', 'x', { agent }, {}), id)
+    const shipped = await send('amy')
+    await walk(h, call, shipped.id, 'mo', ['with-freeda', 'planned', 'waiting-on-owner', 'being-made', 'live'])
+    const declined = await send('amy')
+    await walk(h, call, declined.id, 'mo', ['with-freeda', 'planned', 'waiting-on-owner', 'not-now'])
+    for (const id of [shipped.id, declined.id]) {
+      const now = await claim('lee', id)
+      expect(now.status).toBe(409)
+      expect(await now.json()).toMatchObject({ claimedBy: 'mo', closed: true })
+    }
+    lastSetup.mem.advance(WEEK + 24 * 3600_000) // eight days: the old seven-day lease would have lapsed
+    for (const id of [shipped.id, declined.id]) {
+      const later = await claim('lee', id)
+      expect(later.status).toBe(409)
+      expect(await later.json()).toMatchObject({ claimedBy: 'mo', closed: true })
+      expect((await claim('mo', id)).status).toBe(409) // closed for the holder too: there is nothing left to approve
+    }
+  })
+
+  it('a closed report nobody is named on still answers 409, and the claim writes nothing', async () => {
+    const { h, call, send, mem } = setup()
+    const { id } = await send('amy')
+    // A report closed before the holder was recorded on the timeline.
+    mem.reports.get(id)!.timeline.push({ status: 'with-freeda', by: 'mac', at: 'x' }, { status: 'not-now', by: 'owner', at: 'y' })
+    const res = await h.agentClaimApproval(call('POST', 'x', { agent: 'lee' }, {}), id)
+    expect(res.status).toBe(409)
+    expect(await res.json()).toMatchObject({ closed: true, status: 'not-now' })
+    // and lee did not quietly become the holder
+    expect((await h.agentReleaseApproval(call('POST', 'x', { agent: 'lee' }, {}), id)).status).toBe(409)
+  })
+
+  it('a report being made stays with the Mac that started it, past a week', async () => {
+    const { h, call, send, mem } = setup()
+    const { id } = await send('amy')
+    await walk(h, call, id, 'mo', ['with-freeda', 'planned', 'waiting-on-owner', 'being-made'])
+    mem.advance(WEEK + 24 * 3600_000)
+    const taken = await h.agentClaimApproval(call('POST', 'x', { agent: 'lee' }, {}), id)
+    expect(taken.status).toBe(409)
+    expect(await taken.json()).toMatchObject({ claimedBy: 'mo' })
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'lee' }, { status: 'live' }), id)).status).toBe(409)
+    expect((await h.agentClaimApproval(call('POST', 'x', { agent: 'mo' }, {}), id)).status).toBe(200) // the holder keeps it
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status: 'live' }), id)).status).toBe(200)
+  })
+
+  it('before the work starts, an unrenewed approval still lapses after a week', async () => {
+    const { h, call, send, mem } = setup()
+    const { id } = await send('amy')
+    await walk(h, call, id, 'mo', ['with-freeda', 'planned', 'waiting-on-owner'])
+    expect((await h.agentClaimApproval(call('POST', 'x', { agent: 'mo' }, {}), id)).status).toBe(200)
+    expect((await h.agentClaimApproval(call('POST', 'x', { agent: 'lee' }, {}), id)).status).toBe(409)
+    mem.advance(WEEK + 1)
+    expect((await h.agentClaimApproval(call('POST', 'x', { agent: 'lee' }, {}), id)).status).toBe(200)
+  })
+
+  it('the list never offers a report another maintainer closed, and settles it for this one', async () => {
+    const { h, call, send } = setup({ limits: { agentPage: 2 } })
+    const list = async (agent: string) => ((await (await h.agentList(call('GET', 'x', { agent }))).json()) as { reports: { id: string; heldBy?: string }[] }).reports
+    const closed: string[] = []
+    for (let i = 0; i < 7; i++) {
+      const { id } = await send('amy')
+      await walk(h, call, id, 'mo', ['with-freeda', i % 2 ? 'not-now' : 'planned'])
+      if (!(i % 2)) await walk(h, call, id, 'mo', ['being-made', 'live'])
+      closed.push(id)
+    }
+    const fresh = await send('amy')
+    // Seven closed reports sit ahead of the new one; a page of two (three times over) would never reach it if they were offered.
+    expect((await list('lee')).map((r) => r.id)).toEqual([fresh.id])
+    lastSetup.mem.advance(11 * 60_000)
+    expect((await list('lee')).map((r) => r.id)).toEqual([fresh.id]) // the closed ones were settled for lee, not merely skipped once
+  })
+
+  it('the list marks a report another maintainer is making', async () => {
+    const { h, call, send } = setup()
+    const { id } = await send('amy')
+    await walk(h, call, id, 'mo', ['with-freeda', 'planned', 'being-made'])
+    const got = ((await (await h.agentList(call('GET', 'x', { agent: 'lee' }))).json()) as { reports: { id: string; heldBy?: string }[] }).reports
+    expect(got.map((r) => [r.id, r.heldBy])).toEqual([[id, 'mo']])
+    const own = ((await (await h.agentList(call('GET', 'x', { agent: 'mo' }))).json()) as { reports: { id: string; heldBy?: string }[] }).reports
+    expect(own.map((r) => [r.id, r.heldBy])).toEqual([[id, undefined]])
+  })
+
+  it('a member never sees which maintainer holds a report', async () => {
+    const { h, call, send } = setup()
+    const { id } = await send('amy')
+    await walk(h, call, id, 'mo', ['with-freeda', 'planned', 'being-made', 'live'])
+    const view = await (await h.one(call('GET', 'x', { user: 'amy' }), id)).text()
+    expect(view).not.toContain('"mo"')
+  })
+})
+
 describe('the file link the Mac is given', () => {
   it('serves the verified bytes and sha256, expires, and the collected copy is the one served', async () => {
     const { h, call, mem, withPhoto } = setup()

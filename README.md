@@ -12,7 +12,7 @@ npm install @supersuit/suggest-a-change
 import { KINDS, STATUSES, FLOW, CEILINGS } from "@supersuit/suggest-a-change";
 
 console.log(KINDS);            // ["change", "broken", "feedback"]
-console.log(FLOW["with-freeda"]); // { actor: "mac", next: ["planned"] }
+console.log(FLOW["with-freeda"]); // { actor: "mac", next: ["planned", "not-now"] }
 ```
 
 The package root is the report contract: the kinds, roles, ceilings, the status list and the flow map (who performs each step and which moves are allowed), plus the functions that validate a report against them. It has no imports, so it can also be copied whole into a place that has no install step. If you copy it, keep a hash of the copy and fail a test when the bytes change; fix the contract here and copy it again.
@@ -173,10 +173,10 @@ const h = createReportHandlers({
 | `GET /api/reports/mine` | `mine` | 200, 401 |
 | `GET /api/reports/:id` | `one(req, id)` | 200, 401, 404 (missing and not yours look the same) |
 | `POST /api/reports/:id/append` | `append(req, id)` | 200, 400, 401, 404 (not the owner's: same as missing), 409 (the suggestion has ended) |
-| `GET /api/agent/reports` | `agentList` | 200 `{ reports }`: one page (20, oldest first) of what is open for this Mac, each claimed for ten minutes; a report whose files are still arriving waits up to an hour |
+| `GET /api/agent/reports` | `agentList` | 200 `{ reports }`: one page (20, oldest first) of what is open for this Mac, each claimed for ten minutes; a report whose files are still arriving waits up to an hour; a report another maintainer closed is never offered (it is settled for this Mac unseen); `heldBy` names the maintainer whose Mac is making a report |
 | `GET /api/agent/reports/:id/files/:file` | `agentFile(req, id, file)` | 200 `{ url, expiresAt, type, bytes, sha256 }` (the link lives five minutes), 404 |
 | `POST /api/agent/reports/:id/settle` | `agentSettle` | body `{ revision }` (the one the list gave this report): 200, 400 (no revision), 409 (not claimed, or `stale`: something was added since the list, so the report is offered again) |
-| `POST /api/agent/reports/:id/claim-approval` | `agentClaimApproval` | 200, or 409 `{ claimedBy }` |
+| `POST /api/agent/reports/:id/claim-approval` | `agentClaimApproval` | 200, or 409 `{ claimedBy }`, or on a closed report 409 `{ closed: true, status, claimedBy? }` |
 | `POST /api/agent/reports/:id/status` | `agentStatus` | 200, 400, 409 |
 
 A client adapter's `uploadPart` asks `upload-url`, PUTs the bytes straight to storage, then calls `finalize`. Nothing is uploaded through the app's server and no handler reads a body over about 400 KB (sized from the field limits at four bytes a character; far under 4 MB).
@@ -187,7 +187,7 @@ The role stored on a report comes from the signed-in member and the `maintainers
 
 **The collector MUST verify.** `agentFile` answers the verified `bytes` and `sha256`; a Mac that downloads the link must check both before it trusts the file.
 
-**The approval.** Moves before the owner is asked (`with-freeda`, `planned`, `waiting-on-owner`) need no claim. Leaving `waiting-on-owner`, starting `being-made` and any end status need the Mac that holds the approval (taken atomically if nobody holds it, otherwise 409 with who does). The holder can release it, and it lapses after seven days.
+**The approval.** Moves before the owner is asked (`with-freeda`, `planned`, `waiting-on-owner`) need no claim. Leaving `waiting-on-owner`, starting `being-made` and any end status need the Mac that holds the approval (taken atomically if nobody holds it, otherwise 409 with who does). Before the work starts the holder can release it, and an unrenewed approval lapses after seven days. Once the work starts or ends it does not lapse: the move to `being-made` or to an end names the maintainer on its timeline entry (`holder`, never shown to the member), the approval is taken for `HELD_MS`, and another Mac asking is answered 409 with that holder. A claim on a closed report is 409 `{ closed: true, status, claimedBy }` for everyone, the holder included, and writes nothing. The owner may decline (`not-now`) from `with-freeda` and `planned` as well as from `waiting-on-owner`.
 
 **What a storage adapter implements** (`HostedStore`). Every method that changes a report is narrow and atomic: `put` is create-only (`created`, `exists`, or `limit` when the member's day is full, counted in the same transaction), and `setFile` (never replaces a verified entry; an older pending never replaces a newer one), `addFollowUp` (the caps, a reused file name and an ended report are checked inside the write), `setStatus(expectFrom)`, `claimApproval`, `claim`, `settle` and `reopen` each change one thing. A real adapter implements these with a transaction or a precondition, never "read the report, change a copy, write it back": that rolls back a status or a claim written in between. Upload links must be create-only and one-time with the size and type fixed in their conditions (a Firebase or S3 signed PUT with `if-generation-match: 0` or `If-None-Match: *`), `discard` must delete a refused object, and `readUrl` links must expire after `ttlMs`.
 
