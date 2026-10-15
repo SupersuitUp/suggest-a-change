@@ -118,7 +118,7 @@ describe('the sheet', () => {
     await waitFor(() => expect(submitted).toHaveLength(1))
     expect(screen.queryByText(/Got it/)).toBeNull()
     await act(async () => { release('done'); await gate })
-    expect((await screen.findAllByText("Got it. Freeda picks it up next time Alex's Mac is on.")).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText("Got it. Pluma picks it up next time Alex's Mac is on.")).length).toBeGreaterThan(0)
   })
 
   it('a rebuilt adapters object (a parent re-render) does not start a second outbox, and the receipt still lands', async () => {
@@ -148,7 +148,7 @@ describe('the sheet', () => {
 
   it('the receipt words are the design\'s three lines', () => {
     expect(receiptWords('on-phone', { owner: 'Alex' })).toBe('On this phone, waiting to send.')
-    expect(receiptWords('received', { owner: 'Sam' })).toBe("Got it. Freeda picks it up next time Sam's Mac is on.")
+    expect(receiptWords('received', { owner: 'Sam' })).toBe("Got it. Pluma picks it up next time Sam's Mac is on.")
     expect(receiptWords('on-mac', { owner: 'Alex' })).toBe('On your Mac.')
   })
 
@@ -171,13 +171,13 @@ describe('the sheet', () => {
     const { adapters } = await setup()
     await sheet(adapters)
     const line = () => document.querySelector('[data-sac-summary]')!.textContent
-    expect(line()).toBe("Goes to Alex and Freeda. Includes the app's version, this screen's name and your phone type.")
+    expect(line()).toBe("Goes to Alex and Pluma. Includes the app's version, this screen's name and your phone type.")
     fireEvent.click(screen.getByRole('switch', { name: 'Include the time' }))
-    expect(line()).toBe("Goes to Alex and Freeda. Includes the app's version, this screen's name, the time and your phone type.")
+    expect(line()).toBe("Goes to Alex and Pluma. Includes the app's version, this screen's name, the time and your phone type.")
     fireEvent.click(screen.getByRole('switch', { name: 'Include your screen size' }))
     fireEvent.click(screen.getByRole('switch', { name: 'Include your phone type' }))
     fireEvent.click(screen.getByRole('switch', { name: "Include the app's version" }))
-    expect(line()).toBe("Goes to Alex and Freeda. Includes this screen's name, the time and your screen size.")
+    expect(line()).toBe("Goes to Alex and Pluma. Includes this screen's name, the time and your screen size.")
     expect(screen.getAllByRole('switch')).toHaveLength(4)
     const where_ = document.querySelector('[data-sac-where]')!.textContent!
     expect(where_).toContain('Photos')
@@ -509,8 +509,8 @@ describe('the entry', () => {
 const DESIGN_TABLE: [string, string, string][] = [
   ['on-phone', 'On this phone', 'Not sent yet; it will send when there is a connection'],
   ['received', 'Received', 'The app has it, safely stored'],
-  ['with-freeda', 'With Freeda', "Alex's Mac has picked it up"],
-  ['waiting-on-owner', 'Waiting on Alex', 'Freeda has a plan and is asking Alex'],
+  ['with-freeda', 'With Pluma', "Alex's Mac has picked it up"],
+  ['waiting-on-owner', 'Waiting on Alex', 'Pluma has a plan and is asking Alex'],
   ['being-made', 'Being made', 'A session is working on it; the current step shows underneath'],
   ['live', 'Done', 'Shipped in the app, with the date it went live'],
   ['sent-to-template', 'Sent to the template', 'It became a change to the template every copy of this app uses; it reaches this app once merged'],
@@ -531,7 +531,7 @@ describe('My suggestions and the detail view', () => {
       expect(within(row).getByText(meaning)).toBeTruthy()
     }
     const planned = document.querySelector('[data-status="planned"]') as HTMLElement
-    expect(within(planned).getByText('With Freeda')).toBeTruthy()
+    expect(within(planned).getByText('With Pluma')).toBeTruthy()
   })
 
   it('a status the contract does not know shows as itself and does not take the list down', async () => {
@@ -638,13 +638,13 @@ describe('My suggestions and the detail view', () => {
 
   it('the detail shows words, attachments and the strip, lets the person add to it, and stops at an end status', async () => {
     const appended: Record<string, unknown>[] = []
-    const one = vi.fn(async (id: string) => ({ id, status: 'being-made', step: 'Freeda is testing the change', words: 'bigger photos <b>please</b>', media: [{ file: 'image-1.png', type: 'image/png', bytes: 2048 }], voice: [{ file: 'voice-1.webm', ms: 12000 }] }))
+    const one = vi.fn(async (id: string) => ({ id, status: 'being-made', step: 'Pluma is testing the change', words: 'bigger photos <b>please</b>', media: [{ file: 'image-1.png', type: 'image/png', bytes: 2048 }], voice: [{ file: 'voice-1.webm', ms: 12000 }] }))
     const { adapters } = await setup({}, SAM, { one, append: async (_id, more) => { appended.push(more); return 'done' } })
     render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
     expect(await screen.findByText('bigger photos <b>please</b>')).toBeTruthy()
     expect(screen.getByText('image-1.png, 2.0 KB')).toBeTruthy()
     expect(screen.getByText('Voice note 1, 0:12')).toBeTruthy()
-    expect(screen.getByText('Freeda is testing the change')).toBeTruthy()
+    expect(screen.getByText('Pluma is testing the change')).toBeTruthy()
     expect(document.querySelector('[aria-current="step"]')!.textContent).toContain('Being made')
     fireEvent.change(screen.getByLabelText('Add to it'), { target: { value: 'also the button is too small' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add' }))
@@ -801,7 +801,7 @@ describe('My suggestions and the detail view', () => {
     const { container, rerender } = render(<StatusStrip status="not-now" owner="Alex" timeline={['on-phone', 'received', 'with-freeda', 'waiting-on-owner', 'not-now']} />)
     const words = () => [...container.querySelectorAll('li')].map((li) => li.querySelector('span')!.textContent)
     const states = () => [...container.querySelectorAll('li')].map((li) => li.getAttribute('data-state'))
-    expect(words()).toEqual(['On this phone', 'Received', 'With Freeda', 'Waiting on Alex', 'Being made', 'Not now'])
+    expect(words()).toEqual(['On this phone', 'Received', 'With Pluma', 'Waiting on Alex', 'Being made', 'Not now'])
     expect(states()).toEqual(['past', 'past', 'past', 'past', 'skipped', 'now'])
     rerender(<StatusStrip status="live" owner="Alex" timeline={['received', 'with-freeda', 'planned', 'being-made', 'live']} />)
     expect(states()).toEqual(['skipped', 'past', 'past', 'skipped', 'past', 'now'])

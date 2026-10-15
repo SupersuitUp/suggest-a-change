@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 (2026-10-14)
+
+- **The agent is Pluma.** Every word a person reads now names Pluma, the agent formerly called Freeda: "With Pluma", "Goes to <owner> and Pluma", "Pluma picks it up". The status key `with-freeda` is unchanged, so stored reports and older clients still read. A copy of the contract vendored elsewhere must be taken again: these are new bytes.
+
 ## 0.1.4 (2026-10-14)
 
 - **The owner may decline a report Freeda has not planned.** `FLOW["with-freeda"].next` and `FLOW["planned"].next` now include `"not-now"`, so a report the reading worker cannot plan has an exit instead of showing "With Freeda" for ever. `agentStatus` accepts both moves (they take the approval, as any end does). A copy of the contract vendored elsewhere must be taken again: these are new bytes.

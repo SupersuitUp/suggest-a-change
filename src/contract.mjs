@@ -1,7 +1,7 @@
 // src/contract.mjs (@supersuit/suggest-a-change)
 // THE REPORT CONTRACT AND THE FLOW MAP for Suggest a change (design sections 4, 5 and 7). ZERO
 // imports on purpose, so it can be vendored whole where an install step does not exist: the phone, the
-// hosted apps and Freeda's inbox all validate against this one copy. The flow lives here, with who acts
+// hosted apps and Pluma's inbox all validate against this one copy. The flow lives here, with who acts
 // at each step, so what a person sees cannot drift from what happened.
 
 export const KINDS = ["change", "broken", "feedback"];
@@ -17,9 +17,9 @@ export const CEILINGS = {
 export const STATUSES = ["on-phone", "received", "with-freeda", "planned", "waiting-on-owner", "being-made", "live", "sent-to-template", "filed", "not-now"];
 export const END = ["live", "sent-to-template", "filed", "not-now"];
 
-// actor: who PERFORMS this step (design section 7): sent by the person, received by the app, with Freeda by the Mac. A Helm on the owner's Mac posts straight into
-// the inbox, so a report may go from the phone to Freeda without the hosted app's "received". The owner may decline
-// ("not-now") before Freeda has a plan or before she asks: a report she cannot plan would otherwise have no exit.
+// actor: who PERFORMS this step (design section 7): sent by the person, received by the app, with Pluma by the Mac. A Helm on the owner's Mac posts straight into
+// the inbox, so a report may go from the phone to Pluma without the hosted app's "received". The owner may decline
+// ("not-now") before Pluma has a plan or before she asks: a report she cannot plan would otherwise have no exit.
 export const FLOW = {
   "on-phone": { actor: "person", next: ["received", "with-freeda"] },
   "received": { actor: "app", next: ["with-freeda"] },
@@ -35,14 +35,14 @@ export const FLOW = {
 
 export const mayMove = (from, to) => Boolean(FLOW[from]?.next.includes(to));
 
-// The design's status table (section 2), word for word. "planned" is a step inside Freeda's work
-// that the table does not name for a person, so it reads as "With Freeda".
+// The design's status table (section 2), word for word. "planned" is a step inside Pluma's work
+// that the table does not name for a person, so it reads as "With Pluma".
 const TABLE = {
   "on-phone": ["On this phone", () => "Not sent yet; it will send when there is a connection"],
   "received": ["Received", () => "The app has it, safely stored"],
-  "with-freeda": ["With Freeda", (o) => `${o}'s Mac has picked it up`],
-  "planned": ["With Freeda", (o) => `${o}'s Mac has picked it up`],
-  "waiting-on-owner": [null, (o) => `Freeda has a plan and is asking ${o}`],
+  "with-freeda": ["With Pluma", (o) => `${o}'s Mac has picked it up`],
+  "planned": ["With Pluma", (o) => `${o}'s Mac has picked it up`],
+  "waiting-on-owner": [null, (o) => `Pluma has a plan and is asking ${o}`],
   "being-made": ["Being made", () => "A session is working on it; the current step shows underneath"],
   "live": ["Done", () => "Shipped in the app, with the date it went live"],
   "sent-to-template": ["Sent to the template", () => "It became a change to the template every copy of this app uses; it reaches this app once merged"],

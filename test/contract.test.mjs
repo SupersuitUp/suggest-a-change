@@ -51,8 +51,8 @@ test("each status names who performs that step, as the design's section 7 does",
   assert.deepEqual(actors, { "on-phone": "person", "received": "app", "with-freeda": "mac", "planned": "freeda", "waiting-on-owner": "owner", "being-made": "freeda", "live": "freeda", "sent-to-template": "freeda", "filed": "freeda", "not-now": "owner" });
 });
 
-test("the owner may decline a report Freeda has not planned, or has planned and not yet asked about", () => {
-  // Without these a report the reading worker cannot plan has no exit: it shows "With Freeda" for ever.
+test("the owner may decline a report Pluma has not planned, or has planned and not yet asked about", () => {
+  // Without these a report the reading worker cannot plan has no exit: it shows "With Pluma" for ever.
   assert.equal(C.mayMove("with-freeda", "not-now"), true);
   assert.equal(C.mayMove("planned", "not-now"), true);
   assert.equal(C.mayMove("with-freeda", "filed"), false); // declining is the owner's; filing still comes from the work
@@ -72,7 +72,7 @@ test("wordsFor carries the design's table, with the owner's name", () => {
   const w = (s) => C.wordsFor(s, { owner: "Alex" });
   assert.equal(w("on-phone"), "On this phone");
   assert.equal(w("received"), "Received");
-  assert.equal(w("with-freeda"), "With Freeda");
+  assert.equal(w("with-freeda"), "With Pluma");
   assert.equal(w("waiting-on-owner"), "Waiting on Alex");
   assert.equal(C.wordsFor("waiting-on-owner", { owner: "Sam" }), "Waiting on Sam");
   assert.equal(w("being-made"), "Being made");
@@ -80,9 +80,9 @@ test("wordsFor carries the design's table, with the owner's name", () => {
   assert.equal(w("sent-to-template"), "Sent to the template");
   assert.equal(w("filed"), "Filed");
   assert.equal(w("not-now"), "Not now");
-  assert.equal(w("planned"), "With Freeda");
+  assert.equal(w("planned"), "With Pluma");
   assert.equal(C.meaningFor("with-freeda", { owner: "Alex" }), "Alex's Mac has picked it up");
-  assert.equal(C.meaningFor("waiting-on-owner", { owner: "Alex" }), "Freeda has a plan and is asking Alex");
+  assert.equal(C.meaningFor("waiting-on-owner", { owner: "Alex" }), "Pluma has a plan and is asking Alex");
   assert.throws(() => C.wordsFor("bogus", { owner: "Alex" }), /not a status/);
 });
 

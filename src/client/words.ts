@@ -122,7 +122,7 @@ export const DEFAULT_STRINGS: Strings = {
   takeScreenshot: 'Take a screenshot of this screen',
   remove: 'Remove',
   withLegend: 'What goes with it',
-  goesTo: (owner) => `Goes to ${owner} and Freeda.`,
+  goesTo: (owner) => `Goes to ${owner} and Pluma.`,
   includes: (parts) => `Includes ${list(parts)}.`,
   screenName: "this screen's name",
   alwaysSent: (screen, route) => `Always sent: the screen you are on (${screen}) and its address (${route}).`,
@@ -202,7 +202,7 @@ export type ReceiptState = 'on-phone' | 'received' | 'on-mac'
 
 /** The receipt's one line (design section 2). `received` is only ever asked for after the adapter said `done`. */
 export function receiptWords(state: ReceiptState, words: Pick<Words, 'owner'>): string {
-  if (state === 'received') return `Got it. Freeda picks it up next time ${words.owner}'s Mac is on.`
+  if (state === 'received') return `Got it. Pluma picks it up next time ${words.owner}'s Mac is on.`
   if (state === 'on-mac') return 'On your Mac.'
   return 'On this phone, waiting to send.'
 }

@@ -30,7 +30,7 @@ export function stepOf(r: Record<string, unknown>): string | undefined {
 const timelineOf = (r?: Record<string, unknown>): string[] | undefined =>
   Array.isArray(r?.timeline) ? (r!.timeline as { status?: unknown }[]).map((t) => String(t?.status)) : undefined
 
-/** The strip is made from the contract's own statuses, one step per distinct word ("planned" reads as "With Freeda"),
+/** The strip is made from the contract's own statuses, one step per distinct word ("planned" reads as "With Pluma"),
  *  and a step is marked from the report's timeline: reached, skipped (the report went past it), or still ahead. */
 export function StatusStrip({ status, owner, step, timeline, label }: { status: string; owner: string; step?: string; timeline?: string[]; /** The list's accessible name; the screens pass the app's own (words.text.stepLabel). */ label?: string }) {
   const nodes = useMemo(() => {

@@ -223,7 +223,7 @@ describe('hosted report handlers', () => {
     expect((await h.agentClaimApproval(call('POST', 'x', { agent: 'ben' }, {}), id)).status).toBe(401)
   })
 
-  it('settle sets With Freeda and moves attachments under collected/', async () => {
+  it('settle sets With Pluma and moves attachments under collected/', async () => {
     const { h, call, mem, withPhoto } = setup()
     const id = await withPhoto()
     expect(await mem.collectedKeys(id)).toEqual([])
@@ -546,7 +546,7 @@ describe('a closed or held report', () => {
     for (const status of to) expect((await h.agentStatus(call('POST', 'x', { agent }, { status }), id)).status, status).toBe(200)
   }
 
-  it('the owner may decline a report Freeda has not planned yet, or has planned', async () => {
+  it('the owner may decline a report Pluma has not planned yet, or has planned', async () => {
     const { h, call, send, mem } = setup()
     const unplanned = await send('amy')
     await walk(h, call, unplanned.id, 'mo', ['with-freeda', 'not-now'])
