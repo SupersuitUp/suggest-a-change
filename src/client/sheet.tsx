@@ -75,8 +75,6 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   const [answers, setAnswers] = useState<Answers>({ ...NO_ANSWERS, happened: initial?.happened ?? '' })
   const [voice, setVoice] = useState<Voice[]>([])
   const [media, setMedia] = useState<Media[]>([])
-  // The design's example line is the default: version, screen name (always) and phone type. The time and the screen size are opt-in.
-  const [on, setOn] = useState<Record<Diag, boolean>>({ appVersion: true, at: false, screen: false, device: true })
   const [error, setError] = useState('')
   const [announce, setAnnounce] = useState('')
   const [sent, setSent] = useState<{ id: string; files: { file: string; name: string; bytes: number }[] } | null>(null)
@@ -251,17 +249,16 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     setAnnounce(S.voiceNoteRemoved)
   }
 
-  // What goes with it: exactly the contract's four diagnostics, each with a switch that really removes it.
-  // Where the person was (the screen's name and address) is what the report is about, so it is always sent and shown as such.
+  // What goes with it: the contract's four diagnostics, always sent, with no switches. Whoever reads the report
+  // needs the device, the time and the screen to act on it, so leaving one out only ever cost a round trip.
+  // The sheet says so in one small FYI line rather than a section to configure.
   const avail = ([
     { name: 'appVersion', label: S.diagAppVersion, value: adapters.about?.version },
     { name: 'at', label: S.diagAt, value: new Date(adapters.phone?.now?.() ?? Date.now()).toISOString() },
     { name: 'screen', label: S.diagScreen, value: screenSize() },
     { name: 'device', label: S.diagDevice, value: adapters.device ? adapters.device() : phoneType() },
   ] as { name: Diag; label: string; value: string | undefined }[]).filter((d): d is { name: Diag; label: string; value: string } => Boolean(d.value))
-  // The design's order: the app's version, this screen's name (always), then whatever else is on, phone type last.
-  const isOn = (n: Diag) => avail.find((d) => d.name === n && on[d.name])?.label
-  const lineParts = [isOn('appVersion'), S.screenName, isOn('at'), isOn('screen'), isOn('device')].filter((x): x is string => Boolean(x))
+  const lineParts = [`this screen (${where.screen}, ${sanitizeRoute(where.route)})`, ...avail.map((d) => d.label)]
   const summary = `${S.goesTo(adapters.words.owner)} ${S.includes(lineParts)}`
 
   // Answers to the broken questions only count while the kind is broken: they are not sent otherwise.
@@ -273,7 +270,7 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     await chain.current
     const d = await saveDraft(rt.store, key, { kind, words, attachments: [...voice.map((v) => v.key), ...media.map((m) => m.key)] })
     const diagnostics: Record<string, string> = {}
-    for (const x of avail) if (on[x.name]) diagnostics[x.name] = x.value
+    for (const x of avail) diagnostics[x.name] = x.value
     const report: Record<string, unknown> & { id: string } = {
       id: d.reportId,
       kind,
@@ -411,17 +408,7 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
               ) : null}
             </fieldset>
 
-            <fieldset className="sac-group">
-              <legend>{S.withLegend}</legend>
-              <p className="sac-summary" data-sac-summary="" aria-live="polite">{summary}</p>
-              <p className="sac-muted" data-sac-where="">{S.alwaysSent(where.screen, sanitizeRoute(where.route))}</p>
-              {avail.map((d) => (
-                <label key={d.name} className="sac-switch">
-                  <input type="checkbox" role="switch" checked={on[d.name]} aria-label={S.include(d.label)} onChange={(e) => setOn((cur) => ({ ...cur, [d.name]: e.target.checked }))} />
-                  <span>{d.label}: <span className="sac-muted">{d.value}</span></span>
-                </label>
-              ))}
-            </fieldset>
+            <p className="sac-muted sac-fyi" data-sac-summary="">{summary}</p>
 
             {error ? <p role="alert" className="sac-error">{error}</p> : null}
             <div className="sac-actions">
