@@ -167,49 +167,28 @@ describe('the sheet', () => {
     expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true)
   })
 
-  it('the default line is the design\'s sentence; the time and the screen size are opt-in', async () => {
+  it('what goes with it is one small FYI line with no switches: every detail is always sent', async () => {
     const { adapters } = await setup()
     await sheet(adapters)
-    const line = () => document.querySelector('[data-sac-summary]')!.textContent
-    expect(line()).toBe("Goes to Alex and Pluma. Includes the app's version, this screen's name and your phone type.")
-    fireEvent.click(screen.getByRole('switch', { name: 'Include the time' }))
-    expect(line()).toBe("Goes to Alex and Pluma. Includes the app's version, this screen's name, the time and your phone type.")
-    fireEvent.click(screen.getByRole('switch', { name: 'Include your screen size' }))
-    fireEvent.click(screen.getByRole('switch', { name: 'Include your phone type' }))
-    fireEvent.click(screen.getByRole('switch', { name: "Include the app's version" }))
-    expect(line()).toBe("Goes to Alex and Pluma. Includes this screen's name, the time and your screen size.")
-    expect(screen.getAllByRole('switch')).toHaveLength(4)
-    const where_ = document.querySelector('[data-sac-where]')!.textContent!
-    expect(where_).toContain('Photos')
-    expect(where_).toContain('/photos')
-    expect(where_).not.toContain('x=1')
+    const line = document.querySelector('[data-sac-summary]')!.textContent
+    expect(line).toBe("Goes to Alex and Pluma. Includes this screen (Photos, /photos), the app's version, the time, your screen size and your phone type.")
+    expect(line).not.toContain('x=1')
+    expect(screen.queryAllByRole('switch')).toHaveLength(0)
   })
 
-  it.each([['appVersion', "the app's version"], ['at', 'the time'], ['screen', 'your screen size'], ['device', 'your phone type']])('switching off %s removes exactly that field from the queued report', async (name, label) => {
-    const { adapters, submitted } = await setup()
-    await sheet(adapters)
-    // the time and the screen size are opt-in; turn them on so all four are in play, then turn one off
-    for (const l of ['the time', 'your screen size']) fireEvent.click(screen.getByRole('switch', { name: `Include ${l}` }))
-    fireEvent.click(screen.getByRole('switch', { name: `Include ${label}` }))
-    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'hi' } })
-    fireEvent.click(sendButton())
-    await waitFor(() => expect(submitted).toHaveLength(1))
-    expect(Object.keys(submitted[0].diagnostics as object).sort()).toEqual(['appVersion', 'at', 'device', 'screen'].filter((k) => k !== name))
-    expect(submitted[0].where).toEqual({ screen: 'Photos', route: '/photos' })
-  })
-
-  it('diagnostics are the contract\'s four with their real meanings: the screen is its size, the phone type is short', async () => {
+  it('diagnostics are always the contract\'s four with their real meanings: the screen is its size, the phone type is short', async () => {
     const { adapters, submitted } = await setup({ device: undefined })
     await sheet(adapters)
-    for (const l of ['the time', 'your screen size']) fireEvent.click(screen.getByRole('switch', { name: `Include ${l}` }))
     fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'hi' } })
     fireEvent.click(sendButton())
     await waitFor(() => expect(submitted).toHaveLength(1))
     const d = submitted[0].diagnostics as Record<string, string>
+    expect(Object.keys(d).sort()).toEqual(['appVersion', 'at', 'device', 'screen'])
     expect(d.screen).toMatch(/^\d+x\d+$/)
     expect(d.device.length).toBeLessThan(25)
     expect(d.at).toBe('2026-10-12T12:00:00.000Z')
     expect(d.appVersion).toBe('1.2.3')
+    expect(submitted[0].where).toEqual({ screen: 'Photos', route: '/photos' })
     expect(JSON.stringify(submitted[0])).not.toMatch(/@/)
   })
 
@@ -246,7 +225,7 @@ describe('the sheet', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Suggest a change' })
     expect(dialog.getAttribute('aria-modal')).toBe('true')
     await screen.findByRole('radiogroup')
-    const focusables = dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea')
+    const focusables = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea')].filter((el) => !el.hasAttribute('hidden'))
     const last = focusables[focusables.length - 1]
     last.focus()
     fireEvent.keyDown(document, { key: 'Tab' })

@@ -46,6 +46,7 @@
 .sac-row-button { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 2px; }
 .sac-row-status { font-weight: 600; }
 .sac-muted { color: var(--sac-muted); font-size: 0.9rem; }
+.sac-fyi { font-size: 0.8rem; margin: 0; }
 .sac-error { color: var(--sac-danger); margin: 0; }
 .sac-receipt-line { font-weight: 600; margin: 0; }
 .sac-strip { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
