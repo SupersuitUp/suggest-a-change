@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.6 (2026-10-15)
 
 - **Writes made in the same millisecond leave the phone in the order they were made.** `enqueue` stamps each op with `seq`, and the queue sorts by `at`, then `seq`, then id. Before, ties fell to the id, so a screen that saved a draft and then asked for it to be prepared in one tick sent the prepare first about half the time, and the receiver prepared the draft as it had been.
 
