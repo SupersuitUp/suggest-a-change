@@ -26,6 +26,20 @@ describe('the outbox', () => {
     expect(await again.pending()).toEqual([])
   })
 
+  it('two writes made in the same millisecond go in the order they were made, whatever their ids', async () => {
+    // A screen that saves a draft and then asks for it to be prepared makes both in one tick. Sorted
+    // by id, the prepare went first about half the time and the Mac prepared the draft as it was.
+    const store = await fresh()
+    const sent: string[] = []
+    const ob = makeOutbox({ store, reach: { check: async () => true, mark() {} }, send: async (o) => { sent.push(o.id); return 'done' } })
+    const at = Date.now()
+    await ob.enqueue(op('p-z-save', { at }))
+    await ob.enqueue(op('p-a-prepare', { at }))
+    expect((await ob.pending()).map((o) => o.id)).toEqual(['p-z-save', 'p-a-prepare'])
+    await ob.drain()
+    expect(sent).toEqual(['p-z-save', 'p-a-prepare'])
+  })
+
   it('stops at the first network failure and keeps the rest for the next try', async () => {
     const store = await fresh()
     let marked: boolean | null = null

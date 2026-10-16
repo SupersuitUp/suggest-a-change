@@ -18,6 +18,8 @@ export interface Op {
   /** The id of the write this one belongs to (a part's report or follow-up). While that write is refused, this one is held, not sent. */
   parent?: string
   at: number
+  /** The order this phone made it in, among writes with the same `at`. Written by enqueue. */
+  seq?: number
   error?: string
 }
 export type Sent = 'done' | { refused: string }
@@ -30,9 +32,12 @@ export function makeOutbox({ store, send, reach }: { store: Store; send(op: Op):
   // the new write existed. Measured on the phone: without this, a second answer sat on the phone
   // until the 15 s tick.
   let again = false
+  // Two writes in one millisecond (a save, then the step that reads it) keep the order they were made
+  // in. Ordering them by id instead sent the second first about half the time.
+  let made = 0
 
   async function pending(): Promise<Op[]> {
-    return (await store.all<Op>('outbox')).map((r) => r.value).sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
+    return (await store.all<Op>('outbox')).map((r) => r.value).sort((a, b) => a.at - b.at || (a.seq ?? 0) - (b.seq ?? 0) || a.id.localeCompare(b.id))
   }
   async function tell(landed?: string) {
     const all = await pending()
@@ -69,7 +74,7 @@ export function makeOutbox({ store, send, reach }: { store: Store; send(op: Op):
   }
   return {
     pending,
-    async enqueue(op: Op) { await store.put('outbox', op.id, op); await tell() },
+    async enqueue(op: Op) { await store.put('outbox', op.id, { ...op, seq: op.seq ?? ++made }); await tell() },
     drain(): Promise<void> {
       if (running) { again = true; return running }
       return (running = run().finally(() => { running = null }))
