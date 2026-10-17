@@ -61,7 +61,8 @@ export function moved(store: Store, id: Id, rows: { id: string; status: string }
   })
 }
 
-/** One toast per app open, per account: a remounted entry in the same open does not say it again. */
+/** One toast per page load, per account, whoever asks: a remounted entry (a menu that remounts it on every open) or a
+ *  root-mounted SuggestNews beside it never says it again until the page is loaded again. */
 const toasted = new Set<string>()
 export function firstToastThisOpen(id: Id): boolean {
   const k = seenKey(id)

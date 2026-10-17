@@ -73,7 +73,31 @@ The four diagnostics are the app's version, the time, the screen size and the ph
 
 **Identity.** Every screen asks `adapters.identity()` when it mounts, whenever it is handed a different `adapters` object, and whenever the host calls `refreshIdentity()` (exported from `"./client"`; call it after a sign-in, sign-out or account switch). When the account differs, the old account's rows leave the screen and its waiting reports stay on the phone, to be sent only while that account is signed in; every send re-confirms the account first. Keep `adapters` stable where you can; a parent that rebuilds it every render is safe, only slower (one `identity()` call per render).
 
-**Telling the person in the app, with no setup.** The entry asks `mine()` once when it mounts and compares each report's status with the one this account last opened (kept on the phone beside the cached views, per app and account, and cleared on sign-out). A report that has since been started or ended (`TOLD`) shows a dot on the entry, says New on its row in My suggestions, and the newest such move gets one toast per app open in the module's words (`words.text.movedToast`, given the status's own word and, on `not-now`, the reason: "Your suggestion: Done", "Your suggestion: Not now. too big for now"). Opening the report clears it. A report this phone sees for the first time is recorded silently, so an app taking this release does not announce every old report. The list's `not-now` rows carry their one-line `note` for this. Out of the app, the server's `tellSubmitter` does the telling (below).
+**Telling the person in the app, with no setup.** The entry asks `mine()` once when it mounts and compares each report's status with the one this account last opened (kept on the phone beside the cached views, per app and account, and cleared on sign-out). A report that has since been started or ended (`TOLD`) shows a dot on the entry, says New on its row in My suggestions, and the newest such move gets one toast per page load in the module's words (`words.text.movedToast`, given the status's own word and, on `not-now`, the reason: "Your suggestion: Done", "Your suggestion: Not now. too big for now"). Opening the report clears it. A report this phone sees for the first time is recorded silently, so an app taking this release does not announce every old report. The list's `not-now` rows carry their one-line `note` for this. Out of the app, the server's `tellSubmitter` does the telling (below).
+
+**When the entry sits in a menu.** A host that shows the entry inside a menu that stays closed (a three-dot menu, often remounting its rows on every open) would never show the dot, and the toast would be drawn inside the closed menu. Mount `<SuggestNews>` once at the app's root, always mounted: it asks `mine()` when it mounts, shows the page load's one toast with no entry on screen, and keeps the outbox moving. Put the dot on the menu's own trigger with `useSuggestNews(adapters)`, which returns `{ moved }`, and `<SuggestDot>`, which draws the entry's dot (nothing when `moved` is 0). The trigger needs `position: relative`; the class `sac-dot-host` does it. The toast is once per page load and account however many times the entry mounts, whichever of these asks first. The entry in the menu keeps its own dot.
+
+```tsx
+import { SuggestDot, SuggestEntry, SuggestNews, useSuggestNews } from "@supersuit/suggest-a-change/client";
+
+// once, at the root
+<SuggestNews adapters={adapters} />
+
+// the menu's trigger
+function MoreButton({ onClick }: { onClick(): void }) {
+  const { moved } = useSuggestNews(adapters);
+  return (
+    <button type="button" className="sac-dot-host" aria-label="More" onClick={onClick}>
+      ...<SuggestDot adapters={adapters} moved={moved} />
+    </button>
+  );
+}
+
+// inside the menu, as before
+<SuggestEntry adapters={adapters} role="menuitem" onOpen={() => setOpen(true)} />
+```
+
+`<SuggestNews>` also takes `children`, a function given `{ moved }`, for a root that draws the trigger itself. A host using only the hook renders `<Toasts />` somewhere always mounted so the toast has a place to show.
 
 **Follow-ups.** Words and voice notes added to a report afterwards are queued in the outbox like the report (a `followUp` write, then one part per voice note), keep the app's refusal with a Try again, and delete their local copy only once they have landed. `StoreAdapter.append` must therefore dedupe by report id and `more.followId`.
 

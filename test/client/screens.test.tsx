@@ -7,7 +7,8 @@ import { STATUSES } from '../../src/contract.mjs'
 import type { Adapters, FieldProps, Identity } from '../../src/client/adapters.ts'
 import { DefaultField } from '../../src/client/default-field.tsx'
 import { MySuggestions } from '../../src/client/mine.tsx'
-import { KeepSending, ReportProblem, SuggestEntry } from '../../src/client/entry.tsx'
+import { KeepSending, ReportProblem, SuggestDot, SuggestEntry, SuggestNews, useSuggestNews } from '../../src/client/entry.tsx'
+import { markSeen } from '../../src/client/seen.ts'
 import { StatusStrip, SuggestionDetail } from '../../src/client/detail.tsx'
 import { SuggestSheet } from '../../src/client/sheet.tsx'
 import { draftKey, loadDraft } from '../../src/client/drafts.ts'
@@ -19,6 +20,7 @@ import { getRuntime, refreshIdentity } from '../../src/client/runtime.ts'
 import { Toasts } from '../../src/client/toast.tsx'
 import { clearToasts } from '../../src/client/toast.tsx'
 import { textFieldsWithoutVoice } from './voice-rule.ts'
+import { useState } from 'react'
 
 afterEach(() => { cleanup(); clearToasts(); vi.restoreAllMocks() })
 
@@ -1039,5 +1041,80 @@ describe('the person hears that their suggestion moved', () => {
     who = null
     await act(async () => { refreshIdentity() })
     await waitFor(async () => expect(await t.db.get('kv', seenKey(t.adapters.words.app))).toBeUndefined())
+  })
+})
+
+// Cofounders and Us show the entry inside a three-dot menu that stays closed and remounts the entry on each open
+// (`key={opens}`). The news has to be told from the app's root, and the dot has to sit on the menu's own trigger.
+describe('when the entry sits in a menu', () => {
+  const seenKey = (app: string) => `sac:${app}:sam#view:seen`
+  const prime = async (t: Awaited<ReturnType<typeof setup>>, rows: Summary[]) => {
+    t.store.mine = async () => rows
+    const r = render(<SuggestEntry adapters={t.adapters} onOpen={() => {}} />)
+    await waitFor(async () => expect(await t.db.get('kv', seenKey(t.adapters.words.app))).toBeTruthy())
+    r.unmount()
+    clearToasts()
+  }
+  function Menu({ adapters }: { adapters: Adapters }) {
+    const [opens, setOpens] = useState(0)
+    const [open, setOpen] = useState(false)
+    const news = useSuggestNews(adapters)
+    return (
+      <div>
+        <button type="button" className="sac-dot-host" aria-label="More" onClick={() => { setOpen((o) => !o); setOpens((n) => n + 1) }}>
+          ...<SuggestDot adapters={adapters} moved={news.moved} />
+        </button>
+        {open ? <div role="menu" key={opens}><SuggestEntry adapters={adapters} role="menuitem" onOpen={() => {}} /></div> : null}
+      </div>
+    )
+  }
+
+  it('SuggestNews at the root toasts with no entry mounted, and hands back the count', async () => {
+    const t = await setup()
+    await prime(t, [{ id: 'a', status: 'received', at: 1 }, { id: 'b', status: 'received', at: 2 }])
+    t.store.mine = async () => [{ id: 'a', status: 'live', at: 1 }, { id: 'b', status: 'being-made', at: 2 }]
+    render(<SuggestNews adapters={t.adapters}>{(n) => <span data-count="">{n.moved}</span>}</SuggestNews>)
+    await waitFor(() => expect(document.querySelectorAll('.sac-toast')).toHaveLength(1))
+    expect(document.querySelector('.sac-toast')!.textContent).toBe('Your suggestion: Being made')
+    await waitFor(() => expect(document.querySelector('[data-count]')!.textContent).toBe('2'))
+    expect(document.querySelector('[data-suggest-entry]')).toBeNull()
+  })
+
+  it('a menu that remounts the entry on every open toasts once per page load, however often it opens', async () => {
+    const t = await setup()
+    await prime(t, [{ id: 'a', status: 'received', at: 1 }])
+    let asked = 0
+    t.store.mine = async () => { asked++; return [{ id: 'a', status: 'live', at: 1 }] }
+    render(<><SuggestNews adapters={t.adapters} /><Menu adapters={t.adapters} /></>)
+    await waitFor(() => expect(document.querySelectorAll('.sac-toast')).toHaveLength(1))
+    clearToasts()
+    for (let i = 0; i < 3; i++) {
+      const before = asked
+      fireEvent.click(screen.getByRole('button', { name: /More/ }))
+      await waitFor(() => expect(asked).toBeGreaterThan(before))
+      await waitFor(() => expect(document.querySelector('[data-suggest-entry] [data-sac-moved]')).toBeTruthy())
+      fireEvent.click(screen.getByRole('button', { name: /More/ }))
+    }
+    await new Promise((r) => setTimeout(r, 30))
+    expect(document.querySelector('.sac-toast')).toBeNull()
+  })
+
+  it('the menu trigger carries the dot while the menu is closed, and it clears when the report is opened', async () => {
+    const t = await setup()
+    await prime(t, [{ id: 'a', status: 'received', at: 1 }])
+    t.store.mine = async () => [{ id: 'a', status: 'not-now', at: 1, note: 'later' }]
+    render(<Menu adapters={t.adapters} />)
+    const trigger = () => screen.getByRole('button', { name: /More/ })
+    await waitFor(() => expect(trigger().querySelector('.sac-entry-dot[data-sac-moved]')).toBeTruthy())
+    expect(trigger().textContent).toContain('One of your suggestions has news')
+    expect(document.querySelector('[data-suggest-entry]')).toBeNull()
+    await act(async () => { await markSeen(t.db, { app: t.adapters.words.app, account: 'sam' }, 'a', 'not-now') })
+    await waitFor(() => expect(trigger().querySelector('[data-sac-moved]')).toBeNull())
+  })
+
+  it('SuggestDot draws nothing when nothing moved', async () => {
+    const t = await setup()
+    const { container } = render(<SuggestDot adapters={t.adapters} moved={0} />)
+    expect(container.innerHTML).toBe('')
   })
 })

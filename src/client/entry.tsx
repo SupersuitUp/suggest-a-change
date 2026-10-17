@@ -2,9 +2,9 @@
 // THE ENTRY: one control, `data-suggest-entry`, which is the contract the screen checker looks for.
 // Signed out, it opens nothing and says why. Signed in, it hands over to the host (`onOpen`), which
 // shows the sheet. `<ReportProblem>` is the same control for an error screen, already filled in.
-import { useEffect, useState, type AriaRole } from 'react'
+import { useEffect, useState, type AriaRole, type ReactNode } from 'react'
 import type { Adapters } from './adapters.ts'
-import { useRuntime } from './runtime.ts'
+import { useRuntime, type Runtime } from './runtime.ts'
 import { firstToastThisOpen, moved, onSeen } from './seen.ts'
 import { SuggestSheet } from './sheet.tsx'
 import { toast, Toasts } from './toast.tsx'
@@ -18,18 +18,14 @@ export function KeepSending({ adapters }: { adapters: Adapters }) {
   return null
 }
 
-export function SuggestEntry({ adapters, onOpen, className, role }: { adapters: Adapters; onOpen(): void; className?: string; /** An ARIA role for the button (for example `menuitem` when the host shows it as a menu row). Unset by default. */ role?: AriaRole }) {
+// THE NEWS: once per mount, asks the app for this person's reports and compares each with what they last opened. A move
+// since then is counted (the dot), and the newest one gets the page load's one toast, whichever of the entry or a
+// root-mounted SuggestNews asks first (the guard is per page load and account, in seen.ts). Opening a report anywhere
+// recounts. `toasted` says this mount showed the toast, so a standalone entry knows to draw a toast host for it.
+function useNews(adapters: Adapters, rt: Runtime | null): { moved: number; toasted: boolean } {
   const S = stringsFor(adapters.words)
-  const [why, setWhy] = useState('')
-  const [busy, setBusy] = useState(false)
-  // The runtime keeps the outbox moving while the entry is mounted (what <KeepSending> does).
-  const { rt, who } = useRuntime(adapters)
   const [news, setNews] = useState(0)
-  const [toasting, setToasting] = useState(false)
-  useEffect(() => { setWhy('') }, [adapters])
-  useClearOnSignOut(rt, who, adapters.words.app)
-  // Once per mount, asks the app for this person's reports and compares each with what they last opened: a move since
-  // then shows the dot, and the newest one gets the open's one toast. Opening a report (anywhere) clears it.
+  const [toasted, setToasted] = useState(false)
   useEffect(() => {
     setNews(0)
     if (!rt) return
@@ -52,13 +48,50 @@ export function SuggestEntry({ adapters, onOpen, className, role }: { adapters: 
       const at = (x: string) => rows!.find((r) => r.id === x)?.at ?? 0
       const top = [...m].sort((a, b) => at(b.id) - at(a.id))[0]
       const note = top.status === 'not-now' ? rows.find((r) => r.id === top.id)?.note : undefined
-      setToasting(true)
+      setToasted(true)
       toast({ id: `sac-moved-${top.id}`, text: S.movedToast(statusWords(top.status, adapters.words.owner), typeof note === 'string' && note ? note : undefined), ms: 6000 })
     })()
     const off = onSeen(() => { void count() })
     return () => { live = false; off() }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rt])
+  return { moved: news, toasted }
+}
+
+/** For a host that shows the entry where it is not always visible (inside a menu): call this where the menu's trigger is
+ *  drawn. It asks the app once per mount and returns how many of this person's suggestions moved since they last opened
+ *  them (draw `<SuggestDot>` with it). The page load's one toast is shown by whichever of this, `<SuggestNews>` or the
+ *  entry asks first; a host using only this hook must also render `<Toasts />` somewhere always mounted. */
+export function useSuggestNews(adapters: Adapters): { moved: number } {
+  const { rt } = useRuntime(adapters)
+  return { moved: useNews(adapters, rt).moved }
+}
+
+/** Mount once at the app's root, always mounted: shows the page load's one toast when a suggestion moved, with no entry
+ *  on screen, and keeps the outbox moving (as `<KeepSending>` does). `children`, if given, receives `{ moved }`. */
+export function SuggestNews({ adapters, children }: { adapters: Adapters; children?: (news: { moved: number }) => ReactNode }) {
+  const news = useSuggestNews(adapters)
+  return <><Toasts />{children ? children(news) : null}</>
+}
+
+/** The entry's dot, for a host's own trigger (the three-dot button of a menu the entry sits in). Draws nothing when
+ *  `moved` is 0. It is positioned like the entry's dot, so the trigger needs `position: relative` (the class
+ *  `sac-dot-host` in the module's styles does it). */
+export function SuggestDot({ adapters, moved: count, className }: { adapters: Adapters; moved: number; className?: string }) {
+  const S = stringsFor(adapters.words)
+  if (!count) return null
+  return <><span className={`sac-entry-dot${className ? ` ${className}` : ''}`} data-sac-moved="" aria-hidden="true" /><span className="sac-sr">{S.entryMoved}</span></>
+}
+
+export function SuggestEntry({ adapters, onOpen, className, role }: { adapters: Adapters; onOpen(): void; className?: string; /** An ARIA role for the button (for example `menuitem` when the host shows it as a menu row). Unset by default. */ role?: AriaRole }) {
+  const S = stringsFor(adapters.words)
+  const [why, setWhy] = useState('')
+  const [busy, setBusy] = useState(false)
+  // The runtime keeps the outbox moving while the entry is mounted (what <KeepSending> does).
+  const { rt, who } = useRuntime(adapters)
+  const { moved: news, toasted: toasting } = useNews(adapters, rt)
+  useEffect(() => { setWhy('') }, [adapters])
+  useClearOnSignOut(rt, who, adapters.words.app)
   async function press() {
     setBusy(true)
     let who = null
@@ -72,7 +105,7 @@ export function SuggestEntry({ adapters, onOpen, className, role }: { adapters: 
     <span className="sac-entry-wrap">
       <button type="button" role={role} data-suggest-entry="" className={`sac-entry${className ? ` ${className}` : ''}`} aria-busy={busy || undefined} onClick={() => void press()}>
         {S.entry}
-        {news ? <><span className="sac-entry-dot" data-sac-moved="" aria-hidden="true" /><span className="sac-sr">{S.entryMoved}</span></> : null}
+        <SuggestDot adapters={adapters} moved={news} />
       </button>
       {why ? <span role="status" className="sac-entry-why">{why}</span> : null}
       {toasting ? <Toasts /> : null}
