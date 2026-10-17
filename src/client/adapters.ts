@@ -75,4 +75,10 @@ export interface Adapters {
   startTake?: typeof startTake
   /** False when the receiving side cannot take a voice note added to a report afterwards (the detail view then says so). */
   appendVoice?: boolean
+  /** The host's transcriber for one take, so the person sees the words before Send. Called in the background
+   *  once a note is kept and listed, with the note's key, its recording and its length; resolves the words, or
+   *  null when nothing could be heard, and may throw when the transcriber cannot be reached. The words are a
+   *  preview only: the report carries the voice note, and the receiving Mac writes the transcript. Without it
+   *  a note shows only its name. */
+  hear?(key: string, blob: Blob, ms: number): Promise<string | null>
 }

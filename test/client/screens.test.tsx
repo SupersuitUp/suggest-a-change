@@ -108,6 +108,90 @@ describe('the sheet', () => {
     expect(await db.get('blobs', 'take-words')).toBeUndefined()
   })
 
+  describe('the words heard, shown before Send', () => {
+    const notes = () => within(screen.getByRole('list', { name: 'Voice notes' }))
+
+    it('with no hear adapter, a note shows only its name, as before', async () => {
+      const { adapters } = await setup()
+      await sheet(adapters)
+      record()
+      await screen.findByText('Voice note 1, 0:04')
+      await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+      expect(document.querySelector('[data-sac-heard]')).toBeNull()
+      expect(screen.queryByText(/Hearing it/)).toBeNull()
+      expect(screen.queryByText(/written out when it arrives/)).toBeNull()
+    })
+
+    it('says it is hearing, then shows the words as plain text, and the report still carries the note, not the words', async () => {
+      let answer: (t: string | null) => void = () => {}
+      const hear = vi.fn((_k: string, _b: Blob, _ms: number) => new Promise<string | null>((res) => { answer = res }))
+      const { adapters, submitted, db } = await setup({ hear })
+      await sheet(adapters)
+      record()
+      await screen.findByText('Voice note 1, 0:04')
+      expect(await notes().findByText('Hearing it…')).toBeTruthy()
+      await waitFor(() => expect(hear).toHaveBeenCalledTimes(1))
+      expect(hear.mock.calls[0][0]).toMatch(/^voice:.+:1$/)
+      expect(hear.mock.calls[0][2]).toBe(4000)
+      await act(async () => { answer('bigger <b>photos</b> please') })
+      expect(await notes().findByText('bigger <b>photos</b> please')).toBeTruthy()
+      expect(document.querySelector('[data-sac-heard] b')).toBeNull()
+      expect(screen.queryByText('Hearing it…')).toBeNull()
+      // Kept on the phone, so a reopened draft still shows them.
+      const key = hear.mock.calls[0][0]
+      await waitFor(async () => expect((await db.get<{ heard?: string }>('kv', `sac-meta:${key}`))?.heard).toBe('bigger <b>photos</b> please'))
+      expect((screen.getByLabelText('Your suggestion') as HTMLTextAreaElement).value).toBe('')
+      fireEvent.click(sendButton())
+      await waitFor(() => expect(submitted).toHaveLength(1))
+      expect(submitted[0].words).toBe('')
+      expect(submitted[0].voice).toEqual([{ file: 'voice-1.webm', ms: 4000, field: 'words' }])
+    })
+
+    it('a reopened draft still shows the words heard', async () => {
+      const hear = vi.fn(async () => 'make the button bigger')
+      const { adapters } = await setup({ hear })
+      const r = await sheet(adapters)
+      record()
+      await screen.findByText('make the button bigger')
+      await act(async () => { await new Promise((res) => setTimeout(res, 30)) })
+      r.unmount()
+      await sheet(adapters)
+      expect(await screen.findByText('make the button bigger')).toBeTruthy()
+      expect(hear).toHaveBeenCalledTimes(1)
+    })
+
+    it('when nothing could be heard, or the host could not be reached, says the words get written out when it arrives', async () => {
+      const { adapters } = await setup({ hear: async () => null })
+      await sheet(adapters)
+      record()
+      await screen.findByText('Voice note 1, 0:04')
+      expect(await notes().findByText('The words get written out when it arrives.')).toBeTruthy()
+      cleanup()
+      const t = await setup({ hear: async () => { throw new Error('unreachable') } })
+      await sheet(t.adapters)
+      record()
+      expect(await screen.findByText('The words get written out when it arrives.')).toBeTruthy()
+      expect(screen.queryByText('Hearing it…')).toBeNull()
+    })
+
+    it('a note removed while it is being heard does not come back when the answer arrives', async () => {
+      let answer: (t: string | null) => void = () => {}
+      const hear = vi.fn((_k: string, _b: Blob, _ms: number) => new Promise<string | null>((res) => { answer = res }))
+      const { adapters, db } = await setup({ hear })
+      await sheet(adapters)
+      record()
+      await screen.findByText('Hearing it…')
+      const key = hear.mock.calls[0][0]
+      fireEvent.click(screen.getByRole('button', { name: 'Remove Voice note 1, 0:04' }))
+      await waitFor(() => expect(screen.queryByText('Voice note 1, 0:04')).toBeNull())
+      await act(async () => { answer('too late'); await new Promise((r) => setTimeout(r, 20)) })
+      expect(screen.queryByText('too late')).toBeNull()
+      expect(screen.queryByText(/Voice note 1/)).toBeNull()
+      expect(await db.get('kv', `sac-meta:${key}`)).toBeUndefined()
+      expect((sendButton() as HTMLButtonElement).disabled).toBe(true)
+    })
+  })
+
   it('the receipt never says received while the report is only on the phone', async () => {
     let release: (v: 'done') => void = () => {}
     const gate = new Promise<'done'>((res) => { release = res })

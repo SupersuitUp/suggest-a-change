@@ -49,6 +49,8 @@
 .sac-entry-dot { position: absolute; top: 6px; right: 6px; width: 10px; height: 10px; border-radius: 50%; background: var(--sac-accent); box-shadow: 0 0 0 2px var(--sac-bg); }
 .sac-new { align-self: flex-start; font-size: 0.8rem; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--sac-accent); color: var(--sac-accent-fg); }
 .sac-muted { color: var(--sac-muted); font-size: 0.9rem; }
+.sac-item-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 12rem; }
+.sac-heard { font-size: 0.9rem; overflow-wrap: anywhere; white-space: pre-wrap; }
 .sac-fyi { font-size: 0.8rem; margin: 0; }
 .sac-error { color: var(--sac-danger); margin: 0; }
 .sac-receipt-line { font-weight: 600; margin: 0; }
