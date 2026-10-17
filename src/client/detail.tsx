@@ -10,6 +10,7 @@ import { draftKey } from './drafts.ts'
 import { recoverTakes } from './recorder.ts'
 import { queueFollowUp, type Report } from './reports.ts'
 import { useRuntime, useTick, type FollowUp } from './runtime.ts'
+import { markSeen } from './seen.ts'
 import { Toasts } from './toast.tsx'
 import { dropCache, isRefusal, oneCacheKey, readCache, useClearOnSignOut, writeCache } from './view-cache.ts'
 import { effectiveCeilings, lengthWords, sizeWords, statusMeaning, statusWords, stringsFor } from './words.ts'
@@ -137,7 +138,11 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
       if (!fresh()) return
       if (!now || now.account !== rt.who.account) return
       setUpdating(false)
-      if (r) { shown.current = true; setOffline(false); setReport(r); void writeCache(rt.store, ckey, r) }
+      if (r) {
+        shown.current = true; setOffline(false); setReport(r); void writeCache(rt.store, ckey, r)
+        // The person has now seen it at this status: its New mark and the entry's dot clear.
+        void markSeen(rt.store, { app: adapters.words.app, account: rt.who.account }, id, statusOf(r))
+      }
       else if (refused) { shown.current = false; setOffline(false); void dropCache(rt.store, ckey); setReport(null) }
       else if (shown.current) setOffline(true)
       else setReport(null)

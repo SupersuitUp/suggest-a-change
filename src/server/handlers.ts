@@ -7,7 +7,7 @@
 // a report is decided here from the signed-in member and the explicit maintainers list, never from the
 // request. Nothing is uploaded through this server: `uploadUrl` issues a direct-to-storage link with the
 // size and type fixed, and `finalize` checks what actually landed.
-import { END, FLOW, STATUSES, isAcceptedMedia, isReportId, mayMove, meaningFor, validateReport, wordsFor } from '../contract.mjs'
+import { END, FLOW, STATUSES, TOLD, isAcceptedMedia, isReportId, mayMove, meaningFor, validateReport, wordsFor } from '../contract.mjs'
 import { effectiveLimits, type Limits } from './rate.ts'
 import { ACCEPTED_TYPES, canonicalType, sameType } from './sniff.ts'
 
@@ -84,8 +84,7 @@ export interface HostedStore {
 
 /** `status` events also carry the report's member and its new status. */
 export interface TellEvent { type: 'submitted' | 'followed-up' | 'status' | 'settled'; reportId: string; member?: string; status?: string }
-/** The moves the person who suggested a change hears about: the work starting, and every end. The planning steps stay quiet. */
-export const TOLD = ['being-made', 'live', 'sent-to-template', 'filed', 'not-now'] as const
+export { TOLD }
 /** What `tellSubmitter` is handed. `words` and `meaning` are the module's own words for the status (`wordsFor`/`meaningFor`),
  *  never the report's text, so a lock screen never shows what someone wrote. `note` is the one-line reason, on `not-now` only. */
 export interface SubmitterNews { member: string; reportId: string; status: string; words: string; meaning: string; ended: boolean; note?: string }
@@ -316,7 +315,9 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     // Filtered again here: a store that over-returns still cannot show another member's report.
     const rows = (await store.listFor(member)).filter((r) => r.who?.member === member)
     rows.sort((a, b) => (a.receivedAt < b.receivedAt ? 1 : -1))
-    return json(200, rows.map((r) => ({ id: r.id, status: lastStatus(r), kind: r.kind, at: Date.parse(r.receivedAt) })))
+    // A declined report carries its one-line reason, which the member's own view already shows; no other note is listed.
+    const reason = (r: StoredReport) => { const t = r.timeline[r.timeline.length - 1]; return t?.status === 'not-now' && t.note ? { note: t.note } : {} }
+    return json(200, rows.map((r) => ({ id: r.id, status: lastStatus(r), kind: r.kind, at: Date.parse(r.receivedAt), ...reason(r) })))
   }
 
   async function one(req: Request, id: string): Promise<Response> {
@@ -534,7 +535,7 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const member = r.who?.member
     // A maintainer is not told that the work they just started on their own report has started; an end is still news.
     const ownStart = status === 'being-made' && member === by
-    if (member && (TOLD as readonly string[]).includes(status) && !ownStart) {
+    if (member && TOLD.includes(status) && !ownStart) {
       await news({ member, reportId: id, status, words: wordsFor(status, { owner }), meaning: meaningFor(status, { owner }), ended: END.includes(status), ...(status === 'not-now' && note ? { note } : {}) })
     }
     return json(200, { id, status })

@@ -96,6 +96,12 @@ export interface Strings {
   addFailed: string
   overLimit: string
   stepLabel: string
+  /** On a row in My suggestions that moved since the person last opened it. */
+  newMark: string
+  /** Read by a screen reader on the entry when a suggestion has moved (the dot itself is decoration). */
+  entryMoved: string
+  /** The one toast per open. `words` is the status's own word (wordsFor); `note` is the not-now reason, when there is one. */
+  movedToast: (words: string, note?: string) => string
 }
 
 export const DEFAULT_STRINGS: Strings = {
@@ -179,6 +185,9 @@ export const DEFAULT_STRINGS: Strings = {
   addFailed: 'That could not be added. Try again.',
   overLimit: 'Something in this suggestion is over a limit. Remove an attachment and try again.',
   stepLabel: 'Where it is',
+  newMark: 'New',
+  entryMoved: 'One of your suggestions has news',
+  movedToast: (words, note) => (note ? `Your suggestion: ${words}. ${note}` : `Your suggestion: ${words}`),
 }
 
 export function stringsFor(words: Words): Strings {

@@ -977,3 +977,67 @@ describe('smaller promises', () => {
     expect(await screen.findByRole('list', { name: 'Progress' })).toBeTruthy()
   })
 })
+
+describe('the person hears that their suggestion moved', () => {
+  const seenKey = (app: string) => `sac:${app}:sam#view:seen`
+  const firstSight = async (t: Awaited<ReturnType<typeof setup>>, rows: Summary[]) => {
+    t.store.mine = async () => rows
+    const r = render(<SuggestEntry adapters={t.adapters} onOpen={() => {}} />)
+    await waitFor(async () => expect(await t.db.get('kv', seenKey(t.adapters.words.app))).toBeTruthy())
+    expect(document.querySelector('[data-sac-moved]')).toBeNull()
+    expect(document.querySelector('.sac-toast')).toBeNull()
+    r.unmount()
+  }
+
+  it('a move to live shows a dot on the entry and one toast in the module words; an old report taking the release shows nothing', async () => {
+    const t = await setup()
+    await firstSight(t, [{ id: 'a', status: 'received', at: 1 }, { id: 'b', status: 'live', at: 2 }])
+    t.store.mine = async () => [{ id: 'a', status: 'live', at: 1 }, { id: 'b', status: 'live', at: 2 }]
+    const again = render(<SuggestEntry adapters={t.adapters} onOpen={() => {}} />)
+    await waitFor(() => expect(document.querySelector('[data-sac-moved]')).toBeTruthy())
+    await waitFor(() => expect(document.querySelectorAll('.sac-toast')).toHaveLength(1))
+    expect(document.querySelector('.sac-toast')!.textContent).toBe('Your suggestion: Done')
+    again.unmount()
+    // the same open: the entry mounted again shows the dot and no second toast
+    clearToasts()
+    render(<SuggestEntry adapters={t.adapters} onOpen={() => {}} />)
+    await waitFor(() => expect(document.querySelector('[data-sac-moved]')).toBeTruthy())
+    await new Promise((r) => setTimeout(r, 30))
+    expect(document.querySelector('.sac-toast')).toBeNull()
+  })
+
+  it('a burst is one toast naming the newest move; the rest are only the dot; not-now carries its note', async () => {
+    const t = await setup()
+    await firstSight(t, [{ id: 'a', status: 'received', at: 1 }, { id: 'b', status: 'received', at: 5 }, { id: 'c', status: 'received', at: 3 }])
+    t.store.mine = async () => [{ id: 'b', status: 'not-now', at: 5, note: 'too big for now' }, { id: 'c', status: 'filed', at: 3 }, { id: 'a', status: 'being-made', at: 1 }]
+    render(<SuggestEntry adapters={t.adapters} onOpen={() => {}} />)
+    await waitFor(() => expect(document.querySelectorAll('.sac-toast')).toHaveLength(1))
+    expect(document.querySelector('.sac-toast')!.textContent).toBe('Your suggestion: Not now. too big for now')
+  })
+
+  it('My suggestions marks the moved row New, and opening it clears the mark and the dot', async () => {
+    const t = await setup()
+    await firstSight(t, [{ id: 'r-20261012120000-abcdef', status: 'being-made', at: 1, words: 'bigger photos' }, { id: 'r-20261012120000-bbbbbb', status: 'received', at: 2, words: 'a quiet one' }])
+    t.store.mine = async () => [{ id: 'r-20261012120000-abcdef', status: 'sent-to-template', at: 1, words: 'bigger photos' }, { id: 'r-20261012120000-bbbbbb', status: 'received', at: 2, words: 'a quiet one' }]
+    t.store.one = async (id) => ({ id, words: 'bigger photos', media: [], voice: [], timeline: [{ status: 'sent-to-template', by: 'freeda', at: 'x' }] })
+    render(<><SuggestEntry adapters={t.adapters} onOpen={() => {}} /><MySuggestions adapters={t.adapters} /></>)
+    const row = () => document.querySelector('[data-status="sent-to-template"]') as HTMLElement
+    await waitFor(() => expect(row()?.querySelector('[data-new]')?.textContent).toBe('New'))
+    expect((document.querySelector('[data-status="received"]') as HTMLElement).querySelector('[data-new]')).toBeNull()
+    await waitFor(() => expect(document.querySelector('[data-sac-moved]')).toBeTruthy())
+    fireEvent.click(within(row()).getByRole('button'))
+    await screen.findByText('bigger photos')
+    await waitFor(() => expect(document.querySelector('[data-sac-moved]')).toBeNull())
+    expect(await t.db.get('kv', seenKey(t.adapters.words.app))).toMatchObject({ 'r-20261012120000-abcdef': 'sent-to-template' })
+  })
+
+  it('signing out clears the marks', async () => {
+    let who: Identity | null = SAM
+    const t = await setup({ identity: async () => who })
+    await firstSight(t, [{ id: 'a', status: 'received', at: 1 }])
+    render(<SuggestEntry adapters={t.adapters} onOpen={() => {}} />)
+    who = null
+    await act(async () => { refreshIdentity() })
+    await waitFor(async () => expect(await t.db.get('kv', seenKey(t.adapters.words.app))).toBeUndefined())
+  })
+})

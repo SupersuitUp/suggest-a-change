@@ -8,6 +8,7 @@ import type { Adapters } from './adapters.ts'
 import { SuggestionDetail } from './detail.tsx'
 import type { Summary } from './reports.ts'
 import { useRuntime, useTick } from './runtime.ts'
+import { moved, onSeen } from './seen.ts'
 import { dropCache, isRefusal, mineCacheKey, pruneOnes, readCache, useClearOnSignOut, writeCache } from './view-cache.ts'
 import { Toasts } from './toast.tsx'
 import { statusMeaning, statusWords, stringsFor } from './words.ts'
@@ -23,6 +24,8 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
   const [open, setOpen] = useState<string | null>(null)
   const [bad, setBad] = useState('')
   const [updating, setUpdating] = useState(false)
+  // Reports that moved to a telling status since the person last opened them: their rows say New.
+  const [fresh, setFresh] = useState<Set<string>>(() => new Set())
 
   // Another account (or none) shows nothing of the last one's rows.
   const loads = useRef(0)
@@ -31,7 +34,15 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
   // The first answer after mount ends "Updating"; later periodic reloads refresh quietly.
   const answered = useRef(false)
   useClearOnSignOut(rt, who, adapters.words.app)
-  useEffect(() => { loads.current++; known.current = null; answered.current = false; setRows(null); setOpen(null); setBad(''); setUpdating(false) }, [rt])
+  useEffect(() => { loads.current++; known.current = null; answered.current = false; setRows(null); setOpen(null); setBad(''); setUpdating(false); setFresh(new Set()) }, [rt])
+
+  const recount = useCallback(async () => {
+    if (!rt || !known.current) return
+    const mine_ = loads.current
+    const m = await moved(rt.store, { app: adapters.words.app, account: rt.who.account }, known.current)
+    if (mine_ === loads.current) setFresh(new Set(m.map((x) => x.id)))
+  }, [adapters.words.app, rt])
+  useEffect(() => onSeen(() => { void recount() }), [recount])
 
   const load = useCallback(async () => {
     if (!rt) return
@@ -73,6 +84,7 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
       void pruneOnes(rt.store, { app: adapters.words.app, account: rt.who.account }, theirs.map((t) => t.id))
       setBad('')
       paint(theirs, local)
+      void recount()
     } else if (refused) {
       // The app said no: what the phone held is no longer this person's to see.
       known.current = null
@@ -86,7 +98,7 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
       setBad(S.couldNotLoadMine)
       paint([], local)
     }
-  }, [adapters, rt, S.couldNotLoadMine, S.offlineShowingSaved])
+  }, [adapters, rt, recount, S.couldNotLoadMine, S.offlineShowingSaved])
   useEffect(() => { void load() }, [load, tick])
 
   if (who === null) return <p role="alert">{S.signedOutMine}</p>
@@ -110,6 +122,7 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
             return (
               <li key={r.id} className="sac-row" data-status={r.status}>
                 <button type="button" className="sac-row-button" onClick={() => (onOpen ? onOpen(r.id) : setOpen(r.id))}>
+                  {fresh.has(r.id) ? <span className="sac-new" data-new="">{S.newMark}</span> : null}
                   {preview ? <span className="sac-row-words">{preview}</span> : null}
                   <span className="sac-row-status">{statusWords(r.status, owner)}</span>
                   <span className="sac-muted">{statusMeaning(r.status, owner)}</span>

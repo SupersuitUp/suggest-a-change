@@ -16,6 +16,8 @@ export const CEILINGS = {
 
 export const STATUSES = ["on-phone", "received", "with-freeda", "planned", "waiting-on-owner", "being-made", "live", "sent-to-template", "filed", "not-now"];
 export const END = ["live", "sent-to-template", "filed", "not-now"];
+// The moves the person who suggested a change hears about: the work starting, and every end. The planning steps stay quiet.
+export const TOLD = ["being-made", ...END];
 
 // actor: who PERFORMS this step (design section 7): sent by the person, received by the app, with Pluma by the Mac. A Helm on the owner's Mac posts straight into
 // the inbox, so a report may go from the phone to Pluma without the hosted app's "received". The owner may decline

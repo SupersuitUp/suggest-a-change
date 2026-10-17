@@ -816,6 +816,19 @@ describe('telling the person who suggested it', () => {
     expect(JSON.stringify(heard)).not.toContain('secret')
   })
 
+  it("the member's list carries the not-now reason, and no other note", async () => {
+    const { send, walk, st, h, call } = told()
+    const a = await send('amy')
+    await walk(a.id, ['with-freeda', 'planned'])
+    expect((await st(a.id, 'not-now', 'mo', { note: 'too big for now' })).status).toBe(200)
+    const b = await send('amy')
+    await walk(b.id, ['with-freeda', 'planned'])
+    expect((await st(b.id, 'being-made', 'mo', { note: 'starting' })).status).toBe(200)
+    const rows = (await (await h.mine(call('GET', '/m', { user: 'amy' }))).json()) as Record<string, unknown>[]
+    expect(rows.find((r) => r.id === a.id)!.note).toBe('too big for now')
+    expect(rows.find((r) => r.id === b.id)!.note).toBeUndefined()
+  })
+
   it('the status tell event carries the member and the status', async () => {
     const events: TellEvent[] = []
     const t = setup({ tell: (e) => { events.push(e) } })
