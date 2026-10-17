@@ -39,6 +39,7 @@ const stubFor = (app, owner) => `// ${STUB_SENTINEL}. These adapters sign nobody
 // Fill in the four below, then delete this line. "suggest-a-change-check --strict" fails while it is here.
 // The four things this app supplies to Suggest a change; the module owns everything else.
 import type { Adapters } from "${NAME}/client";
+import type { ReportHandlerOptions } from "${NAME}/server";
 
 /** Who is signed in: { account, role } where role is "operator", "member" or "maintainer", or null. */
 export const identity: Adapters["identity"] = async () => null; // TODO: read this app's own session
@@ -57,6 +58,11 @@ export const words: Adapters["words"] = { app: ${JSON.stringify(app)}, owner: ${
 
 /** Attachment limits. May lower the module's ceilings, never raise them. */
 export const limits: Adapters["limits"] = {};
+
+/** For the server half: createReportHandlers({ ..., tellSubmitter }) requires it. Tell e.member that their suggestion
+ *  is being made or has ended, on this app's own channel (push, email, an activity row), using e.words and e.note,
+ *  never the report's text. An app with nobody to tell passes { none: "<reason>" } instead. */
+export const tellSubmitter: ReportHandlerOptions["tellSubmitter"] = async () => {}; // TODO: tell e.member e.words
 `
 
 const componentFor = (adaptersImport) => `"use client";
@@ -142,6 +148,12 @@ export function initApp({ repo, app, owner = 'Owner' }) {
   // 2. The adapters stub: never overwritten.
   if (writeIfAbsent(join(root, 'tailor', 'suggest-a-change.ts'), stubFor(id, owner), log, 'tailor/suggest-a-change.ts'))
     log.notes.push('the adapters in tailor/suggest-a-change.ts are stubs: nobody is signed in and every report is refused, so the button opens nothing until you fill them in. Then delete the "suggest-a-change: STUB" line and use "suggest-a-change-check --strict" in your check script')
+
+  // The server half refuses to start without tellSubmitter, so say so wherever the adapters file does not carry one.
+  const tailor = join(root, 'tailor', 'suggest-a-change.ts')
+  const tailorText = existsSync(tailor) ? readFileSync(tailor, 'utf8') : ''
+  if (log.did.includes('wrote tailor/suggest-a-change.ts') || !/\btellSubmitter\b/.test(tailorText))
+    log.notes.push('the server half needs tellSubmitter: createReportHandlers({ ..., tellSubmitter }) throws at startup without it. Tell the person who suggested a change, on this app\'s own channel, when it is being made and when it ends (the stub in tailor/suggest-a-change.ts is where it goes), or pass tellSubmitter: { none: "<reason>" } when the app has nobody to tell')
 
   // 4. The component and the root layout.
   const compPath = join(root, dirname(appDir), 'components', 'suggest-a-change.tsx')

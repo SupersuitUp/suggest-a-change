@@ -88,7 +88,7 @@ npx suggest-a-change-check --help
 
 Exit 0 is clean, 1 is problems (each printed with the file and the fix), 2 is a usage error or nothing to check. `--json` prints `{ ok, problems, checked, exempted }`. The flags are `--repo`, `--config`, `--app-dir`, `--adapters` and `--strict`. An app directory with no pages is a usage error (exit 2: nothing was checked), as is an app directory outside the repo.
 
-**Put `suggest-a-change-check --strict` in the app's check script** once the adapters are real. `init` writes stubs that sign nobody in and refuse every report, and marks the file with a `suggest-a-change: STUB` line. Without `--strict` that line is a `warning:` (also in the `--json` `warnings`) and the exit stays 0; with `--strict` it is a problem and the exit is 1. Delete the line when the four adapters are real.
+**Put `suggest-a-change-check --strict` in the app's check script** once the adapters are real. `init` writes stubs that sign nobody in and refuse every report, and marks the file with a `suggest-a-change: STUB` line. Without `--strict` that line is a `warning:` (also in the `--json` `warnings`) and the exit stays 0; with `--strict` it is a problem and the exit is 1. Delete the line when the four adapters are real. The stub also carries `tellSubmitter` for the server half, which `createReportHandlers` requires (see below), and `init` says so in its notes whenever the adapters file has none.
 
 For a Next.js app (app router) it reads source, not a running app:
 

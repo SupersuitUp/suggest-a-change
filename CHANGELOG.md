@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **The person who suggested a change is told when it is being made and when it ends.** `createReportHandlers` takes a required `tellSubmitter(e)`, called once per move to `being-made` or an end (`TOLD`, now in the contract) with `{ member, reportId, status, words, meaning, ended, note? }`. The words are the module's own (`wordsFor`/`meaningFor`), never the report's text; `note` is the one-line reason, on `not-now` only. The planning steps, a repeat, a refused move and a maintainer's own report starting tell nobody, and a failure never fails the move. **Breaking:** without `tellSubmitter` the handlers throw at startup; an app with nobody to tell passes `{ none: "<reason>" }`. The `status` tell event also carries `member` and `status`, and a `not-now` row in the member's list carries its `note`.
+- **In the app, with no setup.** The entry compares each report's status with the one its owner last opened (kept on the phone per app and account, cleared on sign-out): a report that has since started or ended shows a dot on the entry, says New in My suggestions, and the newest move gets one toast per app open ("Your suggestion: Done"; new strings `newMark`, `entryMoved`, `movedToast`). Opening the report clears it. A report seen for the first time is recorded silently, so nothing old is announced.
+- `init` writes a `tellSubmitter` stub into the adapters file and names it in its notes.
+
 ## 0.1.6 (2026-10-15)
 
 - **Writes made in the same millisecond leave the phone in the order they were made.** `enqueue` stamps each op with `seq`, and the queue sorts by `at`, then `seq`, then id. Before, ties fell to the id, so a screen that saved a draft and then asked for it to be prepared in one tick sent the prepare first about half the time, and the receiver prepared the draft as it had been.

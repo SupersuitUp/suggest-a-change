@@ -127,6 +127,21 @@ test("init on a fixture app makes the check green", () => {
   rmSync(d, { recursive: true });
 });
 
+test("init names tellSubmitter: the stub carries it and the notes say the server half needs it", () => {
+  const d = temp("init-app");
+  const r = run("init.mjs", ["--repo", d, "--json"]);
+  assert.equal(r.status, 0, r.stderr);
+  const log = JSON.parse(r.stdout);
+  assert.match(log.notes.join("\n"), /tellSubmitter/);
+  assert.match(log.notes.join("\n"), /\{ none: "<reason>" \}/);
+  assert.match(readFileSync(join(d, "tailor/suggest-a-change.ts"), "utf8"), /export const tellSubmitter/);
+  // an adapters file of the app's own that has no tellSubmitter is reminded too
+  writeFileSync(join(d, "tailor/suggest-a-change.ts"), "export const identity = 1; export const store = 2; export const words = 3; export const limits = 4;\n");
+  const again = JSON.parse(run("init.mjs", ["--repo", d, "--json"]).stdout);
+  assert.match(again.notes.join("\n"), /tellSubmitter/);
+  rmSync(d, { recursive: true });
+});
+
 test("init is idempotent and never overwrites an adapters file", () => {
   const d = temp("init-app");
   run("init.mjs", ["--repo", d]);
