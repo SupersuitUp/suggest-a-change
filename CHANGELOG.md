@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.9 (2026-10-17)
+
+- **The door helpers are exported from `./server`.** `json`, `signIn`, `notFound`, `cappedText` and `peek` are what an app's own route wrapper needs to answer as the handlers do and never read a body past a cap. Two apps (cofounders-template, first-years-template) carried byte-identical copies; they now import these. The handlers use the same functions, so there is one copy of the door. No behaviour change.
+
 ## 0.1.8 (2026-10-17)
 
 - **The news reaches a person whose entry sits in a menu.** In the Cofounders and Us apps the entry lives in a three-dot menu that stays closed and remounts it on every open, so the 0.1.7 dot was never seen and the toast was drawn inside the closed menu. New in `./client`: `<SuggestNews adapters>`, mounted once at the root, shows the toast with no entry on screen (and keeps the outbox moving); `useSuggestNews(adapters)` returns `{ moved }` for the menu's trigger; `<SuggestDot adapters moved>` draws the entry's dot there (nothing at 0), and the class `sac-dot-host` gives the trigger the `position: relative` it needs. The toast is once per page load and account however many times the entry mounts, whichever of these asks first. `<SuggestEntry>` keeps its own dot and, alone, behaves as in 0.1.7.

@@ -10,6 +10,7 @@
 import { END, FLOW, STATUSES, TOLD, isAcceptedMedia, isReportId, mayMove, meaningFor, validateReport, wordsFor } from '../contract.mjs'
 import { effectiveLimits, type Limits } from './rate.ts'
 import { ACCEPTED_TYPES, canonicalType, sameType } from './sniff.ts'
+import { json, notFound, signIn, cappedText } from './http.ts'
 
 /** `by` is the actor (contract FLOW). `holder` is the maintainer whose Mac started or ended the work, written on a being-made
  *  or end entry: the approval on such a report never lapses, and it is how the list and the claim name who has it. */
@@ -129,34 +130,17 @@ const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 const FOLLOW = /^[A-Za-z0-9_-]{1,64}$/
 const FORBIDDEN = ['timeline', 'status', 'plan', 'decision', 'files', 'receivedAt', 'followUps', 'claimedBy', 'settledBy']
 
-const json = (status: number, body: unknown): Response =>
-  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } })
-const notFound = () => json(404, { error: 'not found' })
-const signIn = () => json(401, { error: 'sign in first' })
 const bad = (error: string) => json(400, { error })
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 
 type Body = { body: Record<string, unknown> } | { res: Response }
 /** Reads a JSON object body, refusing past `BODY_CAP` by the header and again by counting what arrives. */
 async function readBody(req: Request, cap = BODY_CAP, optional = false): Promise<Body> {
-  const declared = Number(req.headers.get('content-length'))
-  if (Number.isFinite(declared) && declared > cap) return { res: json(413, { error: 'too large' }) }
-  if (!req.body) return optional ? { body: {} } : { res: bad('a JSON body is needed') }
-  const reader = req.body.getReader()
-  const chunks: Uint8Array[] = []
-  let n = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    n += value.byteLength
-    if (n > cap) { await reader.cancel().catch(() => {}); return { res: json(413, { error: 'too large' }) } }
-    chunks.push(value)
-  }
-  const all = new Uint8Array(n)
-  let o = 0
-  for (const c of chunks) { all.set(c, o); o += c.byteLength }
+  if (!req.body && !(Number(req.headers.get('content-length')) > cap)) return optional ? { body: {} } : { res: bad('a JSON body is needed') }
+  const text = await cappedText(req, cap)
+  if (typeof text !== 'string') return { res: text }
   try {
-    const v = JSON.parse(new TextDecoder().decode(all))
+    const v = JSON.parse(text)
     return isObj(v) ? { body: v } : optional ? { body: {} } : { res: bad('a JSON object is needed') }
   } catch { return optional ? { body: {} } : { res: bad('the body is not JSON') } }
 }

@@ -212,6 +212,8 @@ A client adapter's `uploadPart` asks `upload-url`, PUTs the bytes straight to st
 
 The role stored on a report comes from the signed-in member and the `maintainers` list. A `who` sent by the phone is ignored; a report carrying `timeline`, `status`, `plan` or `decision` is refused. `sniffType(firstBytes)` names a file by its bytes (jpeg, png, webp, heic/heif, gif, mp4/mov, webm, m4a/aac, mp3, wav, ogg/opus; anything else is `null`) and `finalize` refuses a file whose bytes are not the type it was declared as.
 
+**A wrapper of your own answers in the module's words.** When an app's route has to check a caller or read one field before the handler runs, it uses the same door the handlers use: `json(status, body)` (JSON, never cached), `signIn()` (401) and `notFound()` (404), `cappedText(req, cap)` (the body as text, or a 413 `Response` past `cap` bytes, by the declared length and again by counting what arrives; no body reads as `""`), and `peek(text)` (a JSON object, or `{}` for anything else, for reading one field while the module judges the body). Copying these into an app made a second door that could drift from the first.
+
 **Settle carries a revision.** `agentList` gives each report a `revision`; the Mac sends it back with `settle`, and the store settles only if the report still has exactly that content. A follow-up or file that arrived in between answers 409 `stale`, drops the claim, and the next list offers the report with the addition. Adapters compute the same value with `reportRevision`.
 
 **The collector MUST verify.** `agentFile` answers the verified `bytes` and `sha256`; a Mac that downloads the link must check both before it trusts the file.
