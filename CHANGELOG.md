@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.8 (2026-10-17)
+
+- **The news reaches a person whose entry sits in a menu.** In the Cofounders and Us apps the entry lives in a three-dot menu that stays closed and remounts it on every open, so the 0.1.7 dot was never seen and the toast was drawn inside the closed menu. New in `./client`: `<SuggestNews adapters>`, mounted once at the root, shows the toast with no entry on screen (and keeps the outbox moving); `useSuggestNews(adapters)` returns `{ moved }` for the menu's trigger; `<SuggestDot adapters moved>` draws the entry's dot there (nothing at 0), and the class `sac-dot-host` gives the trigger the `position: relative` it needs. The toast is once per page load and account however many times the entry mounts, whichever of these asks first. `<SuggestEntry>` keeps its own dot and, alone, behaves as in 0.1.7.
+
 ## 0.1.7 (2026-10-17)
 
 - **The person who suggested a change is told when it is being made and when it ends.** `createReportHandlers` takes a required `tellSubmitter(e)`, called once per move to `being-made` or an end (`TOLD`, now in the contract) with `{ member, reportId, status, words, meaning, ended, note? }`. The words are the module's own (`wordsFor`/`meaningFor`), never the report's text; `note` is the one-line reason, on `not-now` only. The planning steps, a repeat, a refused move and a maintainer's own report starting tell nobody, and a failure never fails the move. **Breaking:** without `tellSubmitter` the handlers throw at startup; an app with nobody to tell passes `{ none: "<reason>" }`. The `status` tell event also carries `member` and `status`, and a `not-now` row in the member's list carries its `note`.
