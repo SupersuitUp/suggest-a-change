@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.11 (2026-10-17)
+
+- **The words heard show under a voice note before Send.** `Adapters` takes an optional `hear(key, blob, ms)`: the host's transcriber for one take, resolving the words or `null`, and allowed to throw when it cannot be reached. Once a take is kept and listed, the sheet calls it in the background (keeping the note never waits on it) and shows under the note's name "Hearing it…", then the words as plain text, or, when nothing was heard or the transcriber was out of reach, "The words get written out when it arrives." The words are kept on the note's saved details so a reopened draft shows them again, and a note removed while it was being heard stays removed. They are a preview: the report still carries the voice note and not the words, and the receiving Mac writes the transcript. New strings `hearingIt` and `heardLater`; new classes `sac-item-text` and `sac-heard`. A host without `hear` sees no change.
+
 ## 0.1.10 (2026-10-17)
 
 - **What goes with it is one small line.** The sheet no longer draws a section with a legend, an explainer and four switches above Send. Every diagnostic (the app's version, the time, the screen size, the phone type) goes with every report, beside the screen's name and address, and one muted line says what goes and to whom. Whoever acts on a report needs all of them, so leaving one out only ever cost a round trip. The `Words` keys the switches used (`withLegend`, `alwaysSent`, `include`, `screenName`) stay, so an app that overrides them still typechecks.

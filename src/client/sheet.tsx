@@ -16,7 +16,10 @@ import { toast, Toasts } from './toast.tsx'
 import { effectiveCeilings, lengthWords, phoneType, screenSize, sizeWords, stringsFor } from './words.ts'
 
 export interface SheetInitial { kind?: Kind; happened?: string }
-export interface Voice { key: string; file: string; ms: number; field: string }
+/** `heard` is the host's preview of the words (adapters.hear), kept so a reopened draft still shows it. Never sent. */
+export interface Voice { key: string; file: string; ms: number; field: string; heard?: string }
+/** What the sheet shows under a note while the host's `hear` works: nothing yet, the words, or a quiet fallback. */
+type Heard = { state: 'hearing' } | { state: 'heard'; text: string } | { state: 'later' }
 export interface Media { key: string; file: string; name: string; type: string; bytes: number; ms?: number }
 type Answers = { happened: string; expected: string; steps: string }
 const NO_ANSWERS: Answers = { happened: '', expected: '', steps: '' }
@@ -74,6 +77,7 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   const [words, setWords] = useState('')
   const [answers, setAnswers] = useState<Answers>({ ...NO_ANSWERS, happened: initial?.happened ?? '' })
   const [voice, setVoice] = useState<Voice[]>([])
+  const [heard, setHeard] = useState<Record<string, Heard>>({})
   const [media, setMedia] = useState<Media[]>([])
   const [error, setError] = useState('')
   const [announce, setAnnounce] = useState('')
@@ -135,6 +139,8 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
       }
       if (!live) return
       putVoice(takes)
+      // Words heard before the sheet was closed are shown again; a note never heard gets the quiet fallback.
+      if (adapters.hear) setHeard(Object.fromEntries(takes.map((t) => [t.key, t.heard ? { state: 'heard', text: t.heard } : { state: 'later' }])))
       putMedia(metas)
       setLoaded(true)
     })()
@@ -172,8 +178,28 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     await rt.store.put('kv', metaKey(k), v)
     putVoice([...voiceRef.current, v])
     setAnnounce(S.voiceNoteKept(voiceRef.current.length))
+    if (adapters.hear) void hearTake(v, blob)
     return { audio: k, text: '' }
-  }, [rt, key, ceilings, ensureId, S])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rt, key, ceilings, ensureId, S, adapters.hear])
+
+  // The host's preview of the words, in the background: keeping the note and the field's return never wait on it.
+  // A note removed (or sent) while it was being heard stays gone: nothing is drawn and nothing is written back.
+  async function hearTake(v: Voice, blob: Blob) {
+    const still = () => voiceRef.current.some((x) => x.key === v.key)
+    setHeard((h) => ({ ...h, [v.key]: { state: 'hearing' } }))
+    let text: string | null = null
+    try { text = await adapters.hear!(v.key, blob, v.ms) } catch { text = null }
+    if (!still()) return
+    const words = typeof text === 'string' ? text.trim() : ''
+    setHeard((h) => (v.key in h ? { ...h, [v.key]: words ? { state: 'heard', text: words } : { state: 'later' } } : h))
+    if (!words || !rt) return
+    const meta = await rt.store.get<Voice>('kv', metaKey(v.key))
+    if (!meta || !still()) return
+    await rt.store.put('kv', metaKey(v.key), { ...meta, heard: words })
+    // Removed in the moment between reading and writing: take the write back.
+    if (!still()) await rt.store.del('kv', metaKey(v.key))
+  }
 
   function fieldFor(id: string, label: string, value: string, set: (v: string) => void, opts: { placeholder?: string; multiline?: boolean } = {}) {
     const used = voice.reduce((n, v) => n + v.ms, 0)
@@ -244,6 +270,7 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   }
   async function removeVoice(v: Voice) {
     putVoice(voiceRef.current.filter((x) => x.key !== v.key))
+    setHeard((h) => { const { [v.key]: _gone, ...rest } = h; return rest })
     await rt?.store.del('blobs', v.key)
     await rt?.store.del('kv', metaKey(v.key))
     setAnnounce(S.voiceNoteRemoved)
@@ -315,6 +342,13 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [states.join(',')])
 
+  // Under a note's name: a quiet line while it is heard, the words as plain text, or a quiet fallback.
+  function heardLine(h: Heard | undefined) {
+    if (!h) return null
+    if (h.state === 'heard') return <span className="sac-heard" data-sac-heard="heard">{h.text}</span>
+    return <span className="sac-muted sac-heard" data-sac-heard={h.state}>{h.state === 'hearing' ? S.hearingIt : S.heardLater}</span>
+  }
+
   const kinds: { id: Kind; label: string }[] = [
     { id: 'change', label: S.kindChange },
     { id: 'broken', label: S.kindBroken },
@@ -379,7 +413,10 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
                 <ul className="sac-list" aria-label={S.voiceNotesLabel}>
                   {voice.map((v, i) => (
                     <li key={v.key} className="sac-item">
-                      <span className="sac-item-name">{S.voiceNote(i + 1, lengthWords(v.ms))}</span>
+                      <div className="sac-item-text">
+                        <span className="sac-item-name">{S.voiceNote(i + 1, lengthWords(v.ms))}</span>
+                        {heardLine(heard[v.key])}
+                      </div>
                       <button type="button" className="sac-button" aria-label={`${S.remove} ${S.voiceNote(i + 1, lengthWords(v.ms))}`} onClick={() => void removeVoice(v)}>{S.remove}</button>
                     </li>
                   ))}

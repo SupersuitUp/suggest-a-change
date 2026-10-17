@@ -70,6 +70,10 @@ export interface Strings {
   voiceNote: (n: number, length: string) => string
   voiceNoteKept: (n: number) => string
   voiceNoteRemoved: string
+  /** Under a voice note while the host's `hear` is working on it. */
+  hearingIt: string
+  /** Under a voice note nothing could be heard in, or whose transcriber could not be reached. */
+  heardLater: string
   attachmentRemoved: (name: string) => string
   waitingToSend: string
   sentWord: string
@@ -160,6 +164,8 @@ export const DEFAULT_STRINGS: Strings = {
   voiceNote: (n, length) => `Voice note ${n}, ${length}`,
   voiceNoteKept: (n) => `Voice note ${n} kept.`,
   voiceNoteRemoved: 'Voice note removed.',
+  hearingIt: 'Hearing it…',
+  heardLater: 'The words get written out when it arrives.',
   attachmentRemoved: (name) => `${name} removed.`,
   waitingToSend: 'Waiting to send',
   sentWord: 'Sent',
