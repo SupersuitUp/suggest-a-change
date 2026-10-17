@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createReportHandlers, reportRevision, type TellEvent } from '../../src/server/index.ts'
+import { createReportHandlers, reportRevision, TOLD, type SubmitterNews, type TellEvent } from '../../src/server/index.ts'
 import { makeMemoryStore } from './memory-store.ts'
 
 const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 73, 72, 68, 82])
@@ -12,7 +12,7 @@ const settle = async (agent: string, id: string) => lastSetup.h.agentSettle(last
 const newId = () => `r-20261012090000-${String(100000 + ++n).slice(1).padStart(6, 'a')}`
 const rid = () => `r-20261012090000-a${String(++n).padStart(5, '0')}`
 
-function setup(extra: { limits?: Record<string, number>; tell?: (e: TellEvent) => void; app?: Record<string, string>; maintainersSince?: Record<string, number | string> } = {}) {
+function setup(extra: { limits?: Record<string, number>; tell?: (e: TellEvent) => void; tellSubmitter?: ((e: SubmitterNews) => void | Promise<void>) | { none: string }; app?: Record<string, string>; maintainersSince?: Record<string, number | string> } = {}) {
   const mem = makeMemoryStore()
   const h = createReportHandlers({
     store: mem.store,
@@ -20,6 +20,7 @@ function setup(extra: { limits?: Record<string, number>; tell?: (e: TellEvent) =
     agent: async (req) => req.headers.get('x-agent'),
     maintainers: ['mo', 'lee'],
     now: () => mem.now(),
+    tellSubmitter: { none: 'these tests do not tell anyone' },
     ...extra,
   })
   const call = (method: string, path: string, who: { user?: string; agent?: string } | null, body?: unknown) => new Request(`https://app.test${path}`, {
@@ -739,5 +740,98 @@ describe('who may add to a report, and when', () => {
     expect((await ask(25 * 2 ** 20)).status).toBe(413)
     expect((await ask(2 * 2 ** 20)).status).toBe(413)
     expect((await ask(1_000_000)).status).toBe(200)
+  })
+})
+
+
+describe('telling the person who suggested it', () => {
+  const told = () => {
+    const heard: SubmitterNews[] = []
+    const t = setup({ tellSubmitter: (e) => { heard.push(e) }, app: { name: 'Notes', owner: 'Gary' } })
+    const st = (id: string, status: string, agent = 'mo', extra: Record<string, unknown> = {}) => t.h.agentStatus(t.call('POST', 'x', { agent }, { status, ...extra }), id)
+    const walk = async (id: string, to: string[], agent = 'mo') => { for (const s of to) expect((await st(id, s, agent)).status, s).toBe(200) }
+    return { ...t, heard, st, walk }
+  }
+
+  it('tells the submitter once on each telling move, with the module words', async () => {
+    for (const end of ['live', 'sent-to-template', 'filed', 'not-now']) {
+      const { send, walk, heard } = told()
+      const { id } = await send('amy')
+      await walk(id, ['with-freeda', 'planned', 'being-made', end])
+      expect(heard.map((e) => e.status)).toEqual(['being-made', end])
+      const last = heard[1]
+      expect(last).toMatchObject({ member: 'amy', reportId: id, status: end, ended: true })
+      const { wordsFor, meaningFor } = await import('../../src/contract.mjs')
+      expect(last.words).toBe(wordsFor(end, { owner: 'Gary' }))
+      expect(last.meaning).toBe(meaningFor(end, { owner: 'Gary' }))
+      expect(heard[0]).toMatchObject({ status: 'being-made', ended: false, words: 'Being made' })
+    }
+    expect([...TOLD]).toEqual(['being-made', 'live', 'sent-to-template', 'filed', 'not-now'])
+  })
+
+  it('stays quiet on the planning steps and on a repeat', async () => {
+    const { send, walk, st, heard } = told()
+    const { id } = await send('amy')
+    await walk(id, ['with-freeda', 'planned', 'waiting-on-owner'])
+    expect(heard).toEqual([])
+    await walk(id, ['being-made'])
+    expect((await st(id, 'being-made')).status).toBe(200) // a repeat
+    expect(heard).toHaveLength(1)
+  })
+
+  it('tells nobody when the store refused the move, and a throwing hook still answers 200', async () => {
+    const { send, walk, st, heard, mem } = told()
+    const { id } = await send('amy')
+    await walk(id, ['with-freeda', 'planned'])
+    const real = mem.store.setStatus
+    mem.store.setStatus = async () => false
+    expect((await st(id, 'being-made')).status).toBe(409)
+    mem.store.setStatus = real
+    expect(heard).toEqual([])
+    const boom = setup({ tellSubmitter: () => { throw new Error('the push service is down') } })
+    const r = await boom.send('amy')
+    for (const s of ['with-freeda', 'planned', 'being-made', 'live']) expect((await boom.h.agentStatus(boom.call('POST', 'x', { agent: 'mo' }, { status: s }), r.id)).status, s).toBe(200)
+  })
+
+  it("a maintainer's own report is not told it is being made, and is told it ended", async () => {
+    const { send, walk, heard } = told()
+    const { id } = await send('mo')
+    await walk(id, ['with-freeda', 'planned', 'being-made', 'live'])
+    expect(heard.map((e) => e.status)).toEqual(['live'])
+    const other = await send('mo')
+    await walk(other.id, ['with-freeda', 'planned', 'being-made'], 'lee') // another maintainer making it is news to mo
+    expect(heard.map((e) => e.status)).toEqual(['live', 'being-made'])
+  })
+
+  it('not-now passes the note and no other status does; words never carry the report', async () => {
+    const { send, walk, st, heard } = told()
+    const { id } = await send('amy', { words: 'my secret words' })
+    await walk(id, ['with-freeda', 'planned', 'being-made'])
+    expect((await st(id, 'not-now', 'mo', { note: 'too big for now' })).status).toBe(200)
+    const other = await send('amy')
+    await walk(other.id, ['with-freeda', 'planned'])
+    expect((await st(other.id, 'being-made', 'mo', { note: 'starting', step: 'reading' })).status).toBe(200)
+    expect(heard.find((e) => e.status === 'not-now')!.note).toBe('too big for now')
+    for (const e of heard.filter((e) => e.status !== 'not-now')) expect(e.note).toBeUndefined()
+    expect(JSON.stringify(heard)).not.toContain('secret')
+  })
+
+  it('the status tell event carries the member and the status', async () => {
+    const events: TellEvent[] = []
+    const t = setup({ tell: (e) => { events.push(e) } })
+    const { id } = await t.send('amy')
+    expect((await t.h.agentStatus(t.call('POST', 'x', { agent: 'mo' }, { status: 'with-freeda' }), id)).status).toBe(200)
+    expect(events.at(-1)).toEqual({ type: 'status', reportId: id, member: 'amy', status: 'with-freeda' })
+  })
+
+  it('refuses to start without the hook, and accepts an explicit none with a reason', async () => {
+    const mem = makeMemoryStore()
+    const base = { store: mem.store, identity: async () => null, agent: async () => null, maintainers: ['mo'] }
+    expect(() => createReportHandlers(base as never)).toThrow(/tellSubmitter[\s\S]*none/)
+    expect(() => createReportHandlers({ ...base, tellSubmitter: { none: '' } })).toThrow(/reason/)
+    expect(() => createReportHandlers({ ...base, tellSubmitter: { none: '   ' } })).toThrow(/reason/)
+    const quiet = setup({ tellSubmitter: { none: 'only the maintainer uses this app' } })
+    const { id } = await quiet.send('amy')
+    for (const s of ['with-freeda', 'planned', 'being-made', 'live']) expect((await quiet.h.agentStatus(quiet.call('POST', 'x', { agent: 'mo' }, { status: s }), id)).status, s).toBe(200)
   })
 })

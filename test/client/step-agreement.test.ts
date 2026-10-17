@@ -8,7 +8,7 @@ import { makeMemoryStore } from '../server/memory-store.ts'
 describe('client and server agree on a report\'s step', () => {
   it('the step the Mac set is the step the detail view reads from the server\'s own answer', async () => {
     const mem = makeMemoryStore()
-    const h = createReportHandlers({ store: mem.store, identity: async (r) => (r.headers.get('x-user') ? { account: r.headers.get('x-user')! } : null), agent: async (r) => r.headers.get('x-agent'), maintainers: ['mo'], now: () => mem.now() })
+    const h = createReportHandlers({ store: mem.store, identity: async (r) => (r.headers.get('x-user') ? { account: r.headers.get('x-user')! } : null), agent: async (r) => r.headers.get('x-agent'), maintainers: ['mo'], now: () => mem.now(), tellSubmitter: { none: 'this test tells nobody' } })
     const req = (method: string, who: Record<string, string>, body?: unknown) => new Request('https://app.test/x', { method, headers: who, ...(body ? { body: JSON.stringify(body) } : {}) })
     const id = 'r-20261012090000-abcdef'
     expect((await h.submit(req('POST', { 'x-user': 'amy' }, { id, kind: 'change', words: 'w', media: [], voice: [], where: {}, diagnostics: {} }))).status).toBe(200)

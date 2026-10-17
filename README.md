@@ -162,8 +162,11 @@ const h = createReportHandlers({
   app: { name: "Notes" },                 // stamped into every report from here; an app in the body is ignored
   maintainersSince: { mo: "2026-10-01" }, // optional: reports from before this are not offered to that maintainer's Mac
   tell: (e) => notify(e),                 // ids only, never words; a failure never fails the request
+  tellSubmitter: (e) => push(e.member, e.words, e.note), // REQUIRED: tell the person who suggested it (or { none: "<reason>" })
 });
 ```
+
+**Telling the person who suggested it is required.** `tellSubmitter` is called once when a report moves to `being-made` and once when it ends (`live`, `sent-to-template`, `filed`, `not-now`; the list is exported as `TOLD`), with `{ member, reportId, status, words, meaning, ended, note? }`. `words` and `meaning` are the module's own words for the status (`wordsFor`/`meaningFor`, with `app.owner` as the owner's name when given), never the report's text, so a lock screen never shows what someone wrote; `note` is the one-line reason and comes with `not-now` only. The planning steps (`with-freeda`, `planned`, `waiting-on-owner`) tell nobody, a repeat of a status tells nobody, a move the store refused tells nobody, and a maintainer is not told that the work they just started on their own report has started (its end is still told). Send it on the app's own channel (push, email, an activity row) to that member only. A failure never fails the move. `createReportHandlers` throws at startup when `tellSubmitter` is missing; an app that genuinely has nobody to tell passes `tellSubmitter: { none: "only the maintainer uses this app" }`, and an empty reason throws too. The `tell` event for a status move now also carries `member` and `status`.
 
 | Route | Handler | Answers |
 | --- | --- | --- |

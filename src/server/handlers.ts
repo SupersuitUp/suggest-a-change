@@ -7,7 +7,7 @@
 // a report is decided here from the signed-in member and the explicit maintainers list, never from the
 // request. Nothing is uploaded through this server: `uploadUrl` issues a direct-to-storage link with the
 // size and type fixed, and `finalize` checks what actually landed.
-import { END, FLOW, STATUSES, isAcceptedMedia, isReportId, mayMove, validateReport } from '../contract.mjs'
+import { END, FLOW, STATUSES, isAcceptedMedia, isReportId, mayMove, meaningFor, validateReport, wordsFor } from '../contract.mjs'
 import { effectiveLimits, type Limits } from './rate.ts'
 import { ACCEPTED_TYPES, canonicalType, sameType } from './sniff.ts'
 
@@ -82,7 +82,13 @@ export interface HostedStore {
   readUrl(a: { reportId: string; file: string; ttlMs: number }): Promise<{ url: string; expiresAt: number }>
 }
 
-export interface TellEvent { type: 'submitted' | 'followed-up' | 'status' | 'settled'; reportId: string; member?: string }
+/** `status` events also carry the report's member and its new status. */
+export interface TellEvent { type: 'submitted' | 'followed-up' | 'status' | 'settled'; reportId: string; member?: string; status?: string }
+/** The moves the person who suggested a change hears about: the work starting, and every end. The planning steps stay quiet. */
+export const TOLD = ['being-made', 'live', 'sent-to-template', 'filed', 'not-now'] as const
+/** What `tellSubmitter` is handed. `words` and `meaning` are the module's own words for the status (`wordsFor`/`meaningFor`),
+ *  never the report's text, so a lock screen never shows what someone wrote. `note` is the one-line reason, on `not-now` only. */
+export interface SubmitterNews { member: string; reportId: string; status: string; words: string; meaning: string; ended: boolean; note?: string }
 export interface ReportHandlerOptions {
   store: HostedStore
   /** The signed-in member, or null. Anything but `account` is ignored: the role is decided here. */
@@ -98,6 +104,11 @@ export interface ReportHandlerOptions {
   maintainersSince?: Record<string, number | string>
   /** Told when something happens, with ids and never words. A failure here never fails the request. */
   tell?(event: TellEvent): void | Promise<void>
+  /** REQUIRED: tells the person who suggested a change that it is being made or has ended, on the app's own channel (push,
+   *  email, an activity row). Called once per telling move (`TOLD`), never on a repeat, never when the store refused the move,
+   *  and never to a maintainer about their own report being made. A failure never fails the move. An app that genuinely
+   *  has nobody to tell passes `{ none: "<reason>" }`; leaving it out throws at startup. */
+  tellSubmitter: ((news: SubmitterNews) => void | Promise<void>) | { none: string }
   now?: () => number
 }
 
@@ -177,12 +188,21 @@ function declaredFile(r: StoredReport, file: string): Declared | null {
 
 export function createReportHandlers(opts: ReportHandlerOptions) {
   const { store, identity, agent } = opts
+  const hook = opts.tellSubmitter as unknown
+  if (typeof hook !== 'function') {
+    const reason = hook && typeof hook === 'object' ? (hook as { none?: unknown }).none : undefined
+    if (hook === undefined || hook === null) throw new Error('createReportHandlers needs tellSubmitter: a function that tells the person who suggested a change when it is being made and when it ends, or { none: "<reason>" } when the app has nobody to tell')
+    if (typeof reason !== 'string' || !reason.trim()) throw new Error('tellSubmitter { none } needs a reason: say why this app tells nobody, as { none: "<reason>" }')
+  }
+  const tellSubmitter = typeof hook === 'function' ? (hook as (n: SubmitterNews) => void | Promise<void>) : null
   const maintainers = [...opts.maintainers]
   const limits = effectiveLimits(opts.limits)
   const contractCeilings = { images: limits.images, imageBytes: limits.imageBytes, videos: limits.videos, videoBytes: limits.videoBytes, videoMs: limits.videoMs, voiceMs: limits.voiceMs, voiceTotalMs: limits.voiceTotalMs, perPersonPerDay: limits.perPersonPerDay }
   const now = opts.now ?? (() => Date.now())
   const since = (m: string) => { const v = opts.maintainersSince?.[m]; const t = typeof v === 'string' ? Date.parse(v) : v; return t !== undefined && Number.isFinite(t) ? t : undefined }
   const tell = async (e: TellEvent) => { try { await opts.tell?.(e) } catch { /* telling is best effort */ } }
+  const owner = typeof opts.app?.owner === 'string' && opts.app.owner ? opts.app.owner : 'the owner'
+  const news = async (n: SubmitterNews) => { try { await tellSubmitter?.(n) } catch { /* telling is best effort */ } }
   const isMaintainer = (m: string) => maintainers.includes(m)
   const roleOf = (m: string) => (isMaintainer(m) ? 'maintainer' : 'member')
 
@@ -510,7 +530,13 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
       if (needsApproval && from !== 'being-made' && PAST_ASKING.includes(status)) await store.claimApproval(id, by, APPROVAL_LEASE_MS)
       return json(409, { error: 'the report changed while this was sent; read it again' })
     }
-    await tell({ type: 'status', reportId: id })
+    await tell({ type: 'status', reportId: id, member: r.who?.member, status })
+    const member = r.who?.member
+    // A maintainer is not told that the work they just started on their own report has started; an end is still news.
+    const ownStart = status === 'being-made' && member === by
+    if (member && (TOLD as readonly string[]).includes(status) && !ownStart) {
+      await news({ member, reportId: id, status, words: wordsFor(status, { owner }), meaning: meaningFor(status, { owner }), ended: END.includes(status), ...(status === 'not-now' && note ? { note } : {}) })
+    }
     return json(200, { id, status })
   }
 
