@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.10 (2026-10-17)
+
+- **What goes with it is one small line.** The sheet no longer draws a section with a legend, an explainer and four switches above Send. Every diagnostic (the app's version, the time, the screen size, the phone type) goes with every report, beside the screen's name and address, and one muted line says what goes and to whom. Whoever acts on a report needs all of them, so leaving one out only ever cost a round trip. The `Words` keys the switches used (`withLegend`, `alwaysSent`, `include`, `screenName`) stay, so an app that overrides them still typechecks.
+
 ## 0.1.9 (2026-10-17)
 
 - **The door helpers are exported from `./server`.** `json`, `signIn`, `notFound`, `cappedText` and `peek` are what an app's own route wrapper needs to answer as the handlers do and never read a body past a cap. Two apps (cofounders-template, first-years-template) carried byte-identical copies; they now import these. The handlers use the same functions, so there is one copy of the door. No behaviour change.

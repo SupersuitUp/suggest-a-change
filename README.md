@@ -69,7 +69,7 @@ Styling: structure only, class names prefixed `sac-`. `@supersuit/suggest-a-chan
 | `--sac-backdrop` | `rgba(0, 0, 0, 0.45)` | the dim behind the sheet |
 | `--sac-focus` | `#1a56db` | focus rings |
 
-The four diagnostics are the app's version, the time, the screen size and the phone type; the app's version and the phone type are on by default and the time and screen size are off (the report's id and the app's own received time already say when it was sent), and the screen's name and address are always sent and shown as such.
+The four diagnostics are the app's version, the time, the screen size and the phone type. All four go with every report, with the screen's name and address, and the sheet says so in one small line above Send rather than a section of switches.
 
 **Identity.** Every screen asks `adapters.identity()` when it mounts, whenever it is handed a different `adapters` object, and whenever the host calls `refreshIdentity()` (exported from `"./client"`; call it after a sign-in, sign-out or account switch). When the account differs, the old account's rows leave the screen and its waiting reports stay on the phone, to be sent only while that account is signed in; every send re-confirms the account first. Keep `adapters` stable where you can; a parent that rebuilds it every render is safe, only slower (one `identity()` call per render).
 
