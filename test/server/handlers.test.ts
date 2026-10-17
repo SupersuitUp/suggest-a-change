@@ -747,7 +747,7 @@ describe('who may add to a report, and when', () => {
 describe('telling the person who suggested it', () => {
   const told = () => {
     const heard: SubmitterNews[] = []
-    const t = setup({ tellSubmitter: (e) => { heard.push(e) }, app: { name: 'Notes', owner: 'Gary' } })
+    const t = setup({ tellSubmitter: (e) => { heard.push(e) }, app: { name: 'Notes', owner: 'Alex' } })
     const st = (id: string, status: string, agent = 'mo', extra: Record<string, unknown> = {}) => t.h.agentStatus(t.call('POST', 'x', { agent }, { status, ...extra }), id)
     const walk = async (id: string, to: string[], agent = 'mo') => { for (const s of to) expect((await st(id, s, agent)).status, s).toBe(200) }
     return { ...t, heard, st, walk }
@@ -762,8 +762,8 @@ describe('telling the person who suggested it', () => {
       const last = heard[1]
       expect(last).toMatchObject({ member: 'amy', reportId: id, status: end, ended: true })
       const { wordsFor, meaningFor } = await import('../../src/contract.mjs')
-      expect(last.words).toBe(wordsFor(end, { owner: 'Gary' }))
-      expect(last.meaning).toBe(meaningFor(end, { owner: 'Gary' }))
+      expect(last.words).toBe(wordsFor(end, { owner: 'Alex' }))
+      expect(last.meaning).toBe(meaningFor(end, { owner: 'Alex' }))
       expect(heard[0]).toMatchObject({ status: 'being-made', ended: false, words: 'Being made' })
     }
     expect([...TOLD]).toEqual(['being-made', 'live', 'sent-to-template', 'filed', 'not-now'])
