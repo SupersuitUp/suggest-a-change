@@ -4,7 +4,7 @@
 import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { openStore } from '../../src/client/idb.ts'
-import { recoverTakes, startTake } from '../../src/client/recorder.ts'
+import { LIVE_TAKE_MS, recoverTakes, startTake } from '../../src/client/recorder.ts'
 
 const recorders: FakeRecorder[] = []
 class FakeRecorder {
@@ -42,7 +42,12 @@ describe('the recorder', () => {
     recorders[0].ondataavailable = null
     void take
     const next = await openStore(`rec-${n}`)
-    const got = await recoverTakes(next)
+    // Opened at once, the take still reads as live in some tab, and is left alone.
+    expect(await recoverTakes(next)).toEqual([])
+    expect((await next.all('blobs')).length).toBe(3)
+    // Opened once it has gone quiet, it is made whole.
+    const later = { now: Date.now() + LIVE_TAKE_MS + 1 }
+    const got = await recoverTakes(next, undefined, later)
     expect(got).toEqual([{ questionId: 'q-1', key: 'take-1', ms: 3000 }])
     const whole = await next.get<Blob>('blobs', 'take-1')
     expect(whole).toBeDefined()
@@ -50,7 +55,7 @@ describe('the recorder', () => {
     expect((await next.all('blobs')).map((r) => r.key)).toEqual(['take-1'])
     expect(await next.get('kv', 'rec:take-1')).toBeUndefined()
     // Recovering again finds nothing: a take is made whole once.
-    expect(await recoverTakes(next)).toEqual([])
+    expect(await recoverTakes(next, undefined, later)).toEqual([])
   })
 
   it('recovery can be limited to the takes the caller owns; the rest stay exactly as they were', async () => {
@@ -88,7 +93,37 @@ describe('the recorder', () => {
   it('a take that was begun but never heard is cleared without inventing a recording', async () => {
     const store = await fresh()
     await startTake(store, 'take-4', 'q-4')
-    expect(await recoverTakes(await openStore(`rec-${n}`))).toEqual([])
+    expect(await recoverTakes(await openStore(`rec-${n}`), undefined, { now: Date.now() + LIVE_TAKE_MS + 1 })).toEqual([])
     expect(await store.get('kv', 'rec:take-4')).toBeUndefined()
+  })
+
+  it("a second tab opening while the first records leaves the first tab's take alone, and the take ends whole (freedom-app-template#1)", async () => {
+    const store = await fresh()
+    const take = await startTake(store, 'take-5', 'review:r1')
+    recorders[0].second(0)
+    recorders[0].second(1)
+    await settle()
+    // Tab B opens on the same database while tab A is still recording: its boot runs recovery.
+    const tabB = await openStore(`rec-${n}`)
+    expect(await recoverTakes(tabB)).toEqual([])
+    expect(await tabB.get('kv', 'rec:take-5')).toBeDefined()
+    expect((await tabB.all('blobs')).map((r) => r.key).sort()).toEqual(['take-5#00000', 'take-5#00001'])
+    // Tab A keeps talking and stops normally: one whole take, nothing recovered twice.
+    recorders[0].second(2)
+    const rec = await take.stop()
+    expect(await read(rec.blob)).toBe('sound-0sound-1sound-2last')
+    expect(await recoverTakes(tabB, undefined, { now: Date.now() + LIVE_TAKE_MS + 1 })).toEqual([])
+  })
+
+  it('every second of a take refreshes its heartbeat, so a long take is never mistaken for abandoned', async () => {
+    const store = await fresh()
+    await startTake(store, 'take-6', 'q-6')
+    const first = (await store.get<{ beatAt: number }>('kv', 'rec:take-6'))!.beatAt
+    await new Promise((r) => setTimeout(r, 15))
+    recorders[0].second(0)
+    await settle()
+    const beat = (await store.get<{ beatAt: number; startedAt: number }>('kv', 'rec:take-6'))!
+    expect(beat.beatAt).toBeGreaterThan(first)
+    expect(beat.startedAt).toBe(first)
   })
 })

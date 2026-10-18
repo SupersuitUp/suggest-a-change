@@ -10,7 +10,18 @@ export function pickMime(): string {
   return ''
 }
 
-interface Meta { questionId: string; mime: string; startedAt: number }
+interface Meta { questionId: string; mime: string; startedAt: number; beatAt?: number }
+
+/**
+ * A take whose last second landed this recently is LIVE in some page, never abandoned. Two tabs
+ * share one IndexedDB, so a second tab opening while the first records would otherwise "recover"
+ * the first tab's take mid-recording: delete its marker and chunks, and leave every second said
+ * after that with no marker, lost if that tab then dies (freedom-app-template#1). Each second of a
+ * take refreshes `beatAt`, so a take nobody is recording goes quiet within a second and is made
+ * whole on the next open after this window. Chunks arrive every 1000 ms; the margin covers a busy
+ * main thread.
+ */
+export const LIVE_TAKE_MS = 5000
 export interface Recorded { key: string; blob: Blob; ms: number }
 
 export async function startTake(store: Store, key: string, questionId: string) {
@@ -21,12 +32,15 @@ export async function startTake(store: Store, key: string, questionId: string) {
   const started = Date.now()
   const chunks: Blob[] = []
   const writes: Promise<void>[] = []
-  await store.put('kv', `rec:${key}`, { questionId, mime: type, startedAt: started } satisfies Meta)
+  const meta: Meta = { questionId, mime: type, startedAt: started, beatAt: started }
+  await store.put('kv', `rec:${key}`, meta)
   rec.ondataavailable = (e) => {
     if (!e.data?.size) return
     const seq = chunks.length
     chunks.push(e.data)
     writes.push(store.put('blobs', `${key}#${String(seq).padStart(5, '0')}`, e.data).catch(() => {}))
+    // The heartbeat another tab's recovery reads (LIVE_TAKE_MS).
+    writes.push(store.put('kv', `rec:${key}`, { ...meta, beatAt: Date.now() }).catch(() => {}))
   }
   rec.start(1000)
   const meter = makeMeter(stream)
@@ -88,7 +102,9 @@ function makeMeter(stream: MediaStream): { level(): number; close(): void } | nu
 
 /** Takes the app was closed in the middle of, made whole again. */
 /** `claim` limits the recovery to takes the caller owns (by question id); the rest are left exactly as they are for their owner. */
-export async function recoverTakes(store: Store, claim?: (questionId: string) => boolean): Promise<{ questionId: string; key: string; ms: number }[]> {
+/** A take still beating (another tab recording it, LIVE_TAKE_MS) is left exactly as it is; it is recovered on an open after it goes quiet. */
+export async function recoverTakes(store: Store, claim?: (questionId: string) => boolean,
+  { now = Date.now(), liveMs = LIVE_TAKE_MS }: { now?: number; liveMs?: number } = {}): Promise<{ questionId: string; key: string; ms: number }[]> {
   const out: { questionId: string; key: string; ms: number }[] = []
   // By prefix: this runs before the first paint, and `kv` also holds every saved view.
   const metas = (await store.all<Meta>('kv', 'rec:')).filter((r) => r.key.startsWith('rec:'))
@@ -96,6 +112,8 @@ export async function recoverTakes(store: Store, claim?: (questionId: string) =>
   const blobs = await store.all<Blob>('blobs')
   for (const { key: metaKey, value: m } of metas) {
     if (claim && !claim(m.questionId)) continue
+    const beat = Number(m.beatAt ?? m.startedAt)
+    if (Number.isFinite(beat) && now - beat < liveMs) continue
     const key = metaKey.slice(4)
     const parts = blobs.filter((b) => b.key.startsWith(`${key}#`)).sort((a, b) => a.key.localeCompare(b.key))
     if (parts.length) {
