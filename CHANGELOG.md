@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.11 (2026-10-18)
+
 - **A second tab no longer takes over the first tab's recording.** Two tabs share one IndexedDB, and a tab that opened while another was recording ran `recoverTakes` over the live take: it deleted its marker and chunks, so every second said after that had no marker and was lost if the recording tab then died (freedom-app-template#1). Each second of a take now refreshes `beatAt` on its marker, and `recoverTakes` leaves a take that beat within `LIVE_TAKE_MS` (5 s, exported) exactly as it is; it is made whole on an open after it goes quiet. `recoverTakes(store, claim, { now, liveMs })` takes the clock for tests. An app reopened within 5 s of a crash recovers that take on its next open instead of this one; nothing is lost.
 
 ## 0.1.10 (2026-10-17)
