@@ -11,7 +11,7 @@ import { KeepSending, ReportProblem, SuggestDot, SuggestEntry, SuggestNews, useS
 import { markSeen } from '../../src/client/seen.ts'
 import { StatusStrip, SuggestionDetail } from '../../src/client/detail.tsx'
 import { SuggestSheet } from '../../src/client/sheet.tsx'
-import { draftKey, loadDraft } from '../../src/client/drafts.ts'
+import { draftKey, loadDraft, saveDraft } from '../../src/client/drafts.ts'
 import { openStore } from '../../src/client/idb.ts'
 import type { Report, StoreAdapter, Summary } from '../../src/client/reports.ts'
 import { effectiveCeilings, receiptWords } from '../../src/client/words.ts'
@@ -77,7 +77,7 @@ const where = { screen: 'Photos', route: '/photos?x=1' }
 const sendButton = () => screen.getByRole('button', { name: 'Send' })
 const sheet = async (adapters: Adapters, props: { initial?: { kind?: 'broken' | 'change' | 'feedback'; happened?: string } } = {}) => {
   const r = render(<SuggestSheet adapters={adapters} where={where} onClose={() => {}} {...props} />)
-  await screen.findByRole('radiogroup')
+  await screen.findByRole('combobox', { name: 'What kind?' })
   return r
 }
 const record = () => fireEvent.click(screen.getByRole('button', { name: 'Say it: Your suggestion' }))
@@ -194,28 +194,38 @@ describe('the sheet', () => {
     expect(JSON.stringify(submitted[0])).not.toMatch(/@/)
   })
 
-  it('the kind choice is a radio group of the design\'s three choices, and broken asks the design\'s three optional questions', async () => {
-    const { adapters, submitted } = await setup()
+  it('the kind is one small menu that starts on "Change something", and every kind says it in the one big box', async () => {
+    const { adapters, submitted } = await setup({ Field: undefined })
     await sheet(adapters)
-    const group = screen.getByRole('radiogroup')
-    expect(within(group).getAllByRole('radio').map((r) => r.parentElement!.textContent)).toEqual(['Change something', 'Something is broken', 'Just feedback'])
-    fireEvent.click(screen.getByRole('radio', { name: 'Something is broken' }))
-    for (const q of ['What happened', 'What you expected', 'How to make it happen again']) expect(screen.getByLabelText(q)).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('What happened'), { target: { value: 'it froze' } })
+    const menu = screen.getByRole('combobox', { name: 'What kind?' }) as HTMLSelectElement
+    expect([...menu.options].map((o) => o.textContent)).toEqual(['Change something', 'Something is broken', 'Just feedback'])
+    expect(menu.value).toBe('change')
+    expect(screen.queryByRole('radio')).toBeNull()
+    const box = () => screen.getByLabelText('Your suggestion') as HTMLTextAreaElement
+    expect(box().tagName).toBe('TEXTAREA')
+    const change = box().placeholder
+    fireEvent.change(menu, { target: { value: 'broken' } })
+    expect(box().placeholder).toMatch(/what happened, what you expected, and how to make it happen again/i)
+    fireEvent.change(menu, { target: { value: 'feedback' } })
+    expect(new Set([change, box().placeholder]).size).toBe(2)
+    for (const q of ['What happened', 'What you expected', 'How to make it happen again']) expect(screen.queryByLabelText(q)).toBeNull()
+    fireEvent.change(menu, { target: { value: 'broken' } })
+    fireEvent.change(box(), { target: { value: 'it froze' } })
     fireEvent.click(sendButton())
     await waitFor(() => expect(submitted).toHaveLength(1))
     expect(submitted[0].kind).toBe('broken')
-    expect(submitted[0].answers).toEqual({ happened: 'it froze', expected: '', steps: '' })
+    expect(submitted[0].words).toBe('it froze')
+    expect(submitted[0].answers).toBeUndefined()
   })
 
-  it('answers typed under "broken" do not enable Send once another kind is chosen', async () => {
-    const { adapters } = await setup()
+  it('a draft left from when broken asked three questions keeps its answers, in the one box', async () => {
+    const { adapters, db } = await setup()
+    const key = draftKey({ app: adapters.words.app, account: 'sam' })
+    await saveDraft(db, key, { kind: 'broken', words: 'the save button', attachments: [] })
+    await db.put('kv', `${key}#answers`, { happened: 'it froze', expected: 'it saves', steps: '' })
     await sheet(adapters)
-    fireEvent.click(screen.getByRole('radio', { name: 'Something is broken' }))
-    fireEvent.change(screen.getByLabelText('What happened'), { target: { value: 'it froze' } })
-    expect((sendButton() as HTMLButtonElement).disabled).toBe(false)
-    fireEvent.click(screen.getByRole('radio', { name: 'Just feedback' }))
-    expect((sendButton() as HTMLButtonElement).disabled).toBe(true)
+    await waitFor(() => expect((screen.getByLabelText('Your suggestion') as HTMLTextAreaElement).value).toBe('the save button\n\nit froze\n\nit saves'))
+    expect(await db.get('kv', `${key}#answers`)).toBeUndefined()
   })
 
   it('is a labelled dialog that holds focus and gives it back', async () => {
@@ -226,7 +236,7 @@ describe('the sheet', () => {
     const { unmount } = render(<SuggestSheet adapters={adapters} where={where} onClose={() => {}} />)
     const dialog = await screen.findByRole('dialog', { name: 'Suggest a change' })
     expect(dialog.getAttribute('aria-modal')).toBe('true')
-    await screen.findByRole('radiogroup')
+    await screen.findByRole('combobox', { name: 'What kind?' })
     const focusables = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea')].filter((el) => !el.hasAttribute('hidden'))
     const last = focusables[focusables.length - 1]
     last.focus()
@@ -424,7 +434,7 @@ describe('the sheet', () => {
     const { adapters } = await setup({}, null)
     render(<SuggestSheet adapters={adapters} where={where} />)
     expect((await screen.findByRole('alert')).textContent).toBe('Sign in to suggest a change.')
-    expect(screen.queryByRole('radiogroup')).toBeNull()
+    expect(screen.queryByRole('combobox')).toBeNull()
   })
 
   it('every person-facing line can be replaced through words.text', async () => {
@@ -461,8 +471,8 @@ describe('the entry', () => {
     render(<ReportProblem adapters={adapters} screen="Photos" error={new Error('boom at line 3')} />)
     fireEvent.click(screen.getByRole('button', { name: 'Report a problem' }))
     await screen.findByRole('dialog')
-    await waitFor(() => expect((screen.getByLabelText('What happened') as HTMLTextAreaElement).value).toBe('boom at line 3'))
-    expect((screen.getByRole('radio', { name: 'Something is broken' }) as HTMLInputElement).checked).toBe(true)
+    await waitFor(() => expect((screen.getByLabelText('Your suggestion') as HTMLTextAreaElement).value).toBe('boom at line 3'))
+    expect((screen.getByRole('combobox', { name: 'What kind?' }) as HTMLSelectElement).value).toBe('broken')
     fireEvent.click(sendButton())
     await waitFor(() => expect(submitted).toHaveLength(1))
     expect((submitted[0].where as { screen: string }).screen).toBe('Photos')
@@ -471,7 +481,7 @@ describe('the entry', () => {
   it('Report a problem wins over the kind of a draft left behind', async () => {
     const { adapters, db } = await setup()
     const first = await sheet(adapters)
-    fireEvent.click(screen.getByRole('radio', { name: 'Just feedback' }))
+    fireEvent.change(screen.getByRole('combobox', { name: 'What kind?' }), { target: { value: 'feedback' } })
     fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'kept words' } })
     const key = draftKey({ app: adapters.words.app, account: 'sam' })
     await waitFor(async () => expect((await loadDraft(db, key))?.kind).toBe('feedback'))
@@ -479,8 +489,8 @@ describe('the entry', () => {
     render(<ReportProblem adapters={adapters} screen="Photos" error="boom" />)
     fireEvent.click(screen.getByRole('button', { name: 'Report a problem' }))
     await screen.findByRole('dialog')
-    await waitFor(() => expect((screen.getByLabelText('Your suggestion') as HTMLTextAreaElement).value).toBe('kept words'))
-    expect((screen.getByRole('radio', { name: 'Something is broken' }) as HTMLInputElement).checked).toBe(true)
+    await waitFor(() => expect((screen.getByLabelText('Your suggestion') as HTMLTextAreaElement).value).toBe('kept words\n\nboom'))
+    expect((screen.getByRole('combobox', { name: 'What kind?' }) as HTMLSelectElement).value).toBe('broken')
   })
 })
 
@@ -525,7 +535,7 @@ describe('My suggestions and the detail view', () => {
   it('lists newest first, and a report still on the phone shows as on this phone', async () => {
     const { adapters } = await setup({}, SAM, { mine: async () => [{ id: 'old', status: 'received', at: 1 }, { id: 'new', status: 'being-made', at: 9 }], submit: async () => new Promise(() => {}) })
     const { container } = render(<><SuggestSheet adapters={adapters} where={where} /><MySuggestions adapters={adapters} /></>)
-    await screen.findByRole('radiogroup')
+    await screen.findByRole('combobox', { name: 'What kind?' })
     fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
     fireEvent.click(sendButton())
     await waitFor(() => expect(container.querySelectorAll('.sac-row').length).toBe(3))
@@ -538,7 +548,7 @@ describe('My suggestions and the detail view', () => {
     let refuse = true
     const { adapters, submitted } = await setup({}, SAM, { submit: async (r) => { submitted.push(r); return refuse ? { refused: 'that account may not suggest' } : 'done' }, one: async () => { throw new Error('not in the app') } })
     const { container } = render(<><SuggestSheet adapters={adapters} where={where} /><MySuggestions adapters={adapters} /></>)
-    await screen.findByRole('radiogroup')
+    await screen.findByRole('combobox', { name: 'What kind?' })
     fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'my words' } })
     fireEvent.click(sendButton())
     await waitFor(() => expect(container.querySelector('.sac-row .sac-error')?.textContent).toBe('that account may not suggest'))
@@ -793,11 +803,11 @@ describe('every text field sits in a voice field container', () => {
   it('in the sheet (every kind), the detail view and the list, with the module\'s own field', async () => {
     const { adapters } = await setup({ Field: undefined }, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }), mine: async () => [{ id: 'r-1', status: 'received', at: 1 }] })
     const r = render(<SuggestSheet adapters={adapters} where={where} onClose={() => {}} />)
-    await screen.findByRole('radiogroup')
+    await screen.findByRole('combobox', { name: 'What kind?' })
     await waitFor(() => expect(r.container.querySelectorAll('textarea').length).toBe(1))
     expect(textFieldsWithoutVoice(document.body)).toEqual([])
-    fireEvent.click(screen.getByRole('radio', { name: 'Something is broken' }))
-    await waitFor(() => expect(document.querySelectorAll('textarea').length).toBe(4))
+    fireEvent.change(screen.getByRole('combobox', { name: 'What kind?' }), { target: { value: 'broken' } })
+    await waitFor(() => expect(document.querySelectorAll('textarea').length).toBe(1))
     expect(textFieldsWithoutVoice(document.body)).toEqual([])
     r.unmount()
     const d = render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)

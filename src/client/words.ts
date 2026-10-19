@@ -31,6 +31,9 @@ export interface Strings {
   sayItLegend: string
   sayItLabel: string
   sayItPlaceholder: string
+  /** The one box's placeholder when the kind is "Something is broken": it asks what the three questions used to. */
+  sayItPlaceholderBroken: string
+  sayItPlaceholderFeedback: string
   showItLegend: string
   addImages: string
   addVideo: string
@@ -121,7 +124,9 @@ export const DEFAULT_STRINGS: Strings = {
   optional: 'optional',
   sayItLegend: 'Say it',
   sayItLabel: 'Your suggestion',
-  sayItPlaceholder: 'Type it, or hold the microphone and say it',
+  sayItPlaceholder: 'What would you change? Type it, or hold the microphone and say it',
+  sayItPlaceholderBroken: 'What happened, what you expected, and how to make it happen again. Type it, or hold the microphone and say it',
+  sayItPlaceholderFeedback: 'Whatever is on your mind. Type it, or hold the microphone and say it',
   showItLegend: 'Show it',
   addImages: 'Add a screenshot or photo',
   addVideo: 'Add a short video',

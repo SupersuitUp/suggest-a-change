@@ -1,5 +1,7 @@
 'use client'
-// THE SHEET (design section 2): kind, say it, show it, what goes with it, send. Phone first. Everything
+// THE SHEET (design section 2): kind, say it, show it, what goes with it, send. Phone first. The kind is one
+// small menu and saying it is one big box for every kind, broken included: the box is what takes the space,
+// so a person sees first that they will be heard out (the operator, 2026-10-19). Everything
 // typed is saved as it is typed, every recording as it is made, and nothing leaves the phone except
 // through the outbox, so a closed app loses nothing. A voice note alone is a whole report.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
@@ -20,9 +22,11 @@ export interface Voice { key: string; file: string; ms: number; field: string }
 export interface Media { key: string; file: string; name: string; type: string; bytes: number; ms?: number }
 type Answers = { happened: string; expected: string; steps: string }
 const NO_ANSWERS: Answers = { happened: '', expected: '', steps: '' }
+const joinWords = (...parts: string[]) => parts.map((p) => p.trim()).filter(Boolean).join('\n\n')
 type Diag = 'appVersion' | 'at' | 'screen' | 'device'
 // The fields of this sheet. A take cut off by a closed app is routed back by its question id, which names
-// the draft (app and account), so only the same account's interrupted take rejoins its draft.
+// the draft (app and account), so only the same account's interrupted take rejoins its draft. The three
+// broken questions are gone from the sheet; their ids stay so a take cut off before the change still rejoins.
 const OUR_FIELDS = ['words', 'happened', 'expected', 'steps']
 
 const metaKey = (key: string) => `sac-meta:${key}`
@@ -71,8 +75,8 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   useDialog(box, onClose)
 
   const [kind, setKind] = useState<Kind>(initial?.kind ?? 'change')
-  const [words, setWords] = useState('')
-  const [answers, setAnswers] = useState<Answers>({ ...NO_ANSWERS, happened: initial?.happened ?? '' })
+  // "Report a problem" can open with what went wrong already said: it starts the box.
+  const [words, setWords] = useState(initial?.happened ?? '')
   const [voice, setVoice] = useState<Voice[]>([])
   const [media, setMedia] = useState<Media[]>([])
   const [error, setError] = useState('')
@@ -110,9 +114,11 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
         if (!live) return
         // "Report a problem" opens as broken whatever kind an earlier draft was.
         if (!initial?.kind && (d.kind === 'change' || d.kind === 'broken' || d.kind === 'feedback')) setKind(d.kind)
-        setWords(d.words)
-        setAnswers((cur) => ({ ...a, happened: cur.happened || a.happened }))
-        if (d.words.trim() || takes.length || metas.length) toast({ id: 'sac-restored', text: S.restored })
+        // A draft from when broken asked three questions keeps its answers: they join the one box, once.
+        const restored = joinWords(d.words, a.happened, a.expected, a.steps)
+        setWords((cur) => (restored.includes(cur.trim()) ? restored : joinWords(restored, cur)))
+        if (a !== NO_ANSWERS) await rt.store.del('kv', answersKey(key))
+        if (restored.trim() || takes.length || metas.length) toast({ id: 'sac-restored', text: S.restored })
       }
       voiceN.current = highest(takes.map((t) => t.key))
       mediaN.current = highest(metas.map((m) => m.key))
@@ -148,9 +154,8 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     const fields = { kind, words, attachments: [...voice.map((v) => v.key), ...media.map((m) => m.key)] }
     chain.current = chain.current.then(async () => {
       await saveDraft(rt.store, key, fields)
-      await rt.store.put('kv', answersKey(key), answers)
     }).catch(() => {})
-  }, [rt, key, loaded, sent, kind, words, answers, voice, media])
+  }, [rt, key, loaded, sent, kind, words, voice, media])
 
   const ensureId = useCallback(async () => {
     await chain.current
@@ -261,8 +266,7 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   const lineParts = [`this screen (${where.screen}, ${sanitizeRoute(where.route)})`, ...avail.map((d) => d.label)]
   const summary = `${S.goesTo(adapters.words.owner)} ${S.includes(lineParts)}`
 
-  // Answers to the broken questions only count while the kind is broken: they are not sent otherwise.
-  const hasAnything = Boolean(words.trim() || voice.length || media.length || (kind === 'broken' && (answers.happened.trim() || answers.expected.trim() || answers.steps.trim())))
+  const hasAnything = Boolean(words.trim() || voice.length || media.length)
 
   async function send() {
     if (!rt || !who || !key || !hasAnything) return
@@ -277,7 +281,6 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
       ...(adapters.about ? { app: Object.fromEntries(Object.entries(adapters.about).filter(([k]) => k !== 'version')) } : {}),
       who: { member: who.account, role: who.role },
       words: words.trim(),
-      ...(kind === 'broken' ? { answers: { happened: answers.happened.trim(), expected: answers.expected.trim(), steps: answers.steps.trim() } } : {}),
       voice: voice.map((v) => ({ file: v.file, ms: v.ms, field: v.field })),
       media: await Promise.all(media.map(async (m) => {
         const blob = await rt.store.get<Blob>('blobs', m.key)
@@ -294,7 +297,6 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
       ...media.map((m) => ({ file: m.file, part: 0, blob: m.key })),
     ]
     await queueReport({ store: rt.store, outbox: rt.outbox, report, parts: partRefs, draft: key, ...(adapters.phone?.now ? { now: adapters.phone.now } : {}) })
-    await rt.store.del('kv', answersKey(key))
     for (const v of voice) await rt.store.del('kv', metaKey(v.key))
     for (const m of media) await rt.store.del('kv', metaKey(m.key))
     setSent({ id: report.id, files: [...voice.map((v, i) => ({ file: v.file, name: S.voiceNote(i + 1, lengthWords(v.ms)), bytes: 0 })), ...media.map((m) => ({ file: m.file, name: m.name, bytes: m.bytes }))] })
@@ -353,28 +355,16 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
           </div>
         ) : (
           <form className="sac-form" onSubmit={(e) => { e.preventDefault(); void send() }}>
-            <fieldset role="radiogroup" className="sac-group sac-kinds">
-              <legend>{S.kindLegend}</legend>
-              {kinds.map((k) => (
-                <label key={k.id} className="sac-choice">
-                  <input type="radio" name="sac-kind" value={k.id} checked={kind === k.id} onChange={() => setKind(k.id)} />
-                  <span>{k.label}</span>
-                </label>
-              ))}
-            </fieldset>
+            <div className="sac-kind">
+              <label htmlFor={`${titleId}-kind`}>{S.kindLegend}</label>
+              <select id={`${titleId}-kind`} className="sac-select" value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
+                {kinds.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
+              </select>
+            </div>
 
-            {kind === 'broken' ? (
-              <fieldset className="sac-group">
-                <legend>{S.kindBroken} ({S.optional})</legend>
-                {fieldFor('happened', S.brokenHappened, answers.happened, (v) => setAnswers((a) => ({ ...a, happened: v })))}
-                {fieldFor('expected', S.brokenExpected, answers.expected, (v) => setAnswers((a) => ({ ...a, expected: v })))}
-                {fieldFor('steps', S.brokenSteps, answers.steps, (v) => setAnswers((a) => ({ ...a, steps: v })))}
-              </fieldset>
-            ) : null}
-
-            <fieldset className="sac-group">
+            <fieldset className="sac-group sac-sayit">
               <legend>{S.sayItLegend}</legend>
-              {fieldFor('words', S.sayItLabel, words, setWords, { placeholder: S.sayItPlaceholder })}
+              {fieldFor('words', S.sayItLabel, words, setWords, { placeholder: kind === 'broken' ? S.sayItPlaceholderBroken : kind === 'feedback' ? S.sayItPlaceholderFeedback : S.sayItPlaceholder })}
               {voice.length ? (
                 <ul className="sac-list" aria-label={S.voiceNotesLabel}>
                   {voice.map((v, i) => (

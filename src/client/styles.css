@@ -32,6 +32,11 @@
 .sac-group > legend { font-weight: 600; padding: 0 4px; }
 .sac-choice, .sac-switch { display: flex; align-items: center; gap: 10px; min-height: 44px; }
 .sac-choice input, .sac-switch input { width: 24px; height: 24px; flex: none; }
+.sac-kind { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sac-kind label { color: var(--sac-muted); font-size: 0.9rem; }
+.sac-select { font: inherit; font-size: 16px; min-height: 36px; padding: 4px 10px; color: inherit; background: var(--sac-bg); border: 1px solid var(--sac-border); border-radius: var(--sac-radius); }
+/* Saying it is the sheet's biggest thing, whatever field the host puts in it. */
+.sac-sayit textarea { min-height: 9rem; }
 .sac-voice { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
 .sac-input, .sac-voice textarea, .sac-voice input { flex: 1; min-width: 0; min-height: 44px; font: inherit; font-size: 16px; color: inherit; background: var(--sac-bg); border: 1px solid var(--sac-border); border-radius: var(--sac-radius); padding: 10px 12px; box-sizing: border-box; }
 .sac-record { flex: none; width: 48px; height: 48px; min-width: 44px; min-height: 44px; border-radius: 50%; border: 1px solid var(--sac-border); background: var(--sac-bg); display: grid; place-items: center; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; cursor: pointer; }

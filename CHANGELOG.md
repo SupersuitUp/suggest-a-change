@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.12 (2026-10-19)
+
+- **The kind is one small menu, and saying it is one big box for every kind.** The sheet drew three radio rows for the kind and a one-line field for the words, so the choice took the space and the place to speak looked like an afterthought. The kind is now a compact `<select>` labelled "What kind?", starting on "Change something", and the words go in one multi-line box (at least 9rem tall whatever field the host supplies, through `.sac-sayit textarea`) whose placeholder follows the kind. "Something is broken" no longer adds three question boxes: its placeholder asks what happened, what was expected and how to make it happen again, and the answer goes in `words`. A report no longer carries `answers` (the contract still accepts them). A draft left with answers from an earlier version folds them into the box once. New `Words` keys: `sayItPlaceholderBroken`, `sayItPlaceholderFeedback`; `brokenHappened`, `brokenExpected`, `brokenSteps` and `optional` stay so an override still typechecks. `ReportProblem`'s `happened` now starts the box.
+
 ## 0.1.11 (2026-10-18)
 
 - **A second tab no longer takes over the first tab's recording.** Two tabs share one IndexedDB, and a tab that opened while another was recording ran `recoverTakes` over the live take: it deleted its marker and chunks, so every second said after that had no marker and was lost if the recording tab then died (freedom-app-template#1). Each second of a take now refreshes `beatAt` on its marker, and `recoverTakes` leaves a take that beat within `LIVE_TAKE_MS` (5 s, exported) exactly as it is; it is made whole on an open after it goes quiet. `recoverTakes(store, claim, { now, liveMs })` takes the clock for tests. An app reopened within 5 s of a crash recovers that take on its next open instead of this one; nothing is lost.
