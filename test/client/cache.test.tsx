@@ -157,8 +157,8 @@ describe('the entry takes a role', () => {
   })
 })
 
-// The cached answers only: the seen-status record sits under the same prefix (and is cleared with them) but is not a view.
-const keysOf = async (t: { phone: Awaited<ReturnType<typeof openStore>> }) => (await t.phone.all('kv')).map((r) => r.key).filter((k) => k.includes('#view') && !k.endsWith('#view:seen'))
+// The cached answers only: the seen-status and noticed records sit under the same prefix (and is cleared with them) but is not a view.
+const keysOf = async (t: { phone: Awaited<ReturnType<typeof openStore>> }) => (await t.phone.all('kv')).map((r) => r.key).filter((k) => k.includes('#view') && !k.endsWith('#view:seen') && !k.endsWith('#view:noticed'))
 const refusal = () => Object.assign(new Error('gone'), { refused: true })
 
 describe('the cache belongs to whoever asked (fix round 1)', () => {

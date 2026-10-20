@@ -3,7 +3,7 @@ import 'fake-indexeddb/auto'
 import { describe, expect, it } from 'vitest'
 import { openStore } from '../../src/client/idb.ts'
 import { clearViewCache } from '../../src/client/view-cache.ts'
-import { markSeen, moved, seenStatuses } from '../../src/client/seen.ts'
+import { fresh, markSeen, moved, seenStatuses } from '../../src/client/seen.ts'
 
 let n = 0
 const db = () => openStore(`seen-${++n}`)
@@ -36,5 +36,15 @@ describe('seen statuses', () => {
     await clearViewCache(s, SAM)
     expect(await seenStatuses(s, SAM)).toEqual({})
     expect(await seenStatuses(s, JO)).toEqual({ a: 'live' })
+  })
+
+  it('a move the last page load already saw is not fresh again; a newer move is, and an opened one drops out', async () => {
+    const s = await db()
+    expect(await fresh(s, SAM, [{ id: 'a', status: 'live' }])).toEqual([{ id: 'a', status: 'live' }]) // first load on the release
+    expect(await fresh(s, SAM, [{ id: 'a', status: 'live' }])).toEqual([]) // the next load: old news
+    expect(await fresh(s, SAM, [{ id: 'a', status: 'live' }, { id: 'b', status: 'filed' }])).toEqual([{ id: 'b', status: 'filed' }])
+    expect(await fresh(s, SAM, [{ id: 'b', status: 'filed' }])).toEqual([]) // a was opened
+    expect(await fresh(s, SAM, [{ id: 'a', status: 'not-now' }, { id: 'b', status: 'filed' }])).toEqual([{ id: 'a', status: 'not-now' }])
+    expect(await fresh(s, JO, [{ id: 'b', status: 'filed' }])).toEqual([{ id: 'b', status: 'filed' }]) // per account
   })
 })

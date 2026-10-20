@@ -5,7 +5,7 @@
 import { useEffect, useState, type AriaRole, type ReactNode } from 'react'
 import type { Adapters } from './adapters.ts'
 import { useRuntime, type Runtime } from './runtime.ts'
-import { firstToastThisOpen, moved, onSeen } from './seen.ts'
+import { firstToastThisOpen, fresh, moved, onSeen } from './seen.ts'
 import { SuggestSheet } from './sheet.tsx'
 import { toast, Toasts } from './toast.tsx'
 import { useClearOnSignOut } from './view-cache.ts'
@@ -19,7 +19,7 @@ export function KeepSending({ adapters }: { adapters: Adapters }) {
 }
 
 // THE NEWS: once per mount, asks the app for this person's reports and compares each with what they last opened. A move
-// since then is counted (the dot), and the newest one gets the page load's one toast, whichever of the entry or a
+// since then is counted (the dot), and the newest one the last page load had not already seen gets the page load's one toast, whichever of the entry or a
 // root-mounted SuggestNews asks first (the guard is per page load and account, in seen.ts). Opening a report anywhere
 // recounts. `toasted` says this mount showed the toast, so a standalone entry knows to draw a toast host for it.
 function useNews(adapters: Adapters, rt: Runtime | null): { moved: number; toasted: boolean } {
@@ -44,9 +44,12 @@ function useNews(adapters: Adapters, rt: Runtime | null): { moved: number; toast
       try { now = await adapters.identity() } catch { now = null }
       if (!live || !rows || !now || now.account !== rt.who.account) return
       const m = await count()
-      if (!live || !m?.length || !firstToastThisOpen(id)) return
+      if (!live || !m) return
+      // Only a move the last page load had not already seen is toasted; an older one keeps just the dot.
+      const f = await fresh(rt.store, id, m)
+      if (!f.length || !firstToastThisOpen(id)) return
       const at = (x: string) => rows!.find((r) => r.id === x)?.at ?? 0
-      const top = [...m].sort((a, b) => at(b.id) - at(a.id))[0]
+      const top = [...f].sort((a, b) => at(b.id) - at(a.id))[0]
       const note = top.status === 'not-now' ? rows.find((r) => r.id === top.id)?.note : undefined
       setToasted(true)
       toast({ id: `sac-moved-${top.id}`, text: S.movedToast(statusWords(top.status, adapters.words.owner), typeof note === 'string' && note ? note : undefined), ms: 6000 })

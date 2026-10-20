@@ -8,7 +8,7 @@ import type { Adapters, FieldProps, Identity } from '../../src/client/adapters.t
 import { DefaultField } from '../../src/client/default-field.tsx'
 import { MySuggestions } from '../../src/client/mine.tsx'
 import { KeepSending, ReportProblem, SuggestDot, SuggestEntry, SuggestNews, useSuggestNews } from '../../src/client/entry.tsx'
-import { markSeen } from '../../src/client/seen.ts'
+import { fresh, markSeen } from '../../src/client/seen.ts'
 import { StatusStrip, SuggestionDetail } from '../../src/client/detail.tsx'
 import { SuggestSheet } from '../../src/client/sheet.tsx'
 import { draftKey, loadDraft, saveDraft } from '../../src/client/drafts.ts'
@@ -1020,6 +1020,18 @@ describe('the person hears that their suggestion moved', () => {
     await screen.findByText('bigger photos')
     await waitFor(() => expect(document.querySelector('[data-sac-moved]')).toBeNull())
     expect(await t.db.get('kv', seenKey(t.adapters.words.app))).toMatchObject({ 'r-20261012120000-abcdef': 'sent-to-template' })
+  })
+
+  it('a move an earlier page load already saw keeps the dot and is not toasted again', async () => {
+    const t = await setup()
+    await firstSight(t, [{ id: 'a', status: 'received', at: 1 }])
+    // an earlier load of the app already had this move as news
+    await fresh(t.db, { app: t.adapters.words.app, account: 'sam' }, [{ id: 'a', status: 'live' }])
+    t.store.mine = async () => [{ id: 'a', status: 'live', at: 1 }]
+    render(<SuggestNews adapters={t.adapters}>{(n) => <span data-count="">{n.moved}</span>}</SuggestNews>)
+    await waitFor(() => expect(document.querySelector('[data-count]')!.textContent).toBe('1'))
+    await new Promise((r) => setTimeout(r, 30))
+    expect(document.querySelector('.sac-toast')).toBeNull()
   })
 
   it('signing out clears the marks', async () => {

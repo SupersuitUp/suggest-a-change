@@ -70,3 +70,22 @@ export function firstToastThisOpen(id: Id): boolean {
   toasted.add(k)
   return true
 }
+
+/** WHAT THE LAST PAGE LOAD ALREADY SAW. The moves (report and status) that were already news the last time the app was
+ *  loaded, so a move the person was told about, or could have been, is not toasted again on the next load; it keeps
+ *  only the dot and the New mark until they open it. Returns the moves in `m` that are new since then, and records `m`
+ *  as what this load saw. With no record yet (the first load on this release) every move is fresh, as before. */
+export const noticedKey = (id: Id) => `${draftKey(id)}#view:noticed`
+export function fresh(store: Store, id: Id, m: { id: string; status: string }[]): Promise<{ id: string; status: string }[]> {
+  return serial(noticedKey(id), async () => {
+    const had = await readCache<Seen>(store, noticedKey(id))
+    const before = had && typeof had === 'object' ? had : {}
+    const out = m.filter((r) => before[r.id] !== r.status)
+    const now: Seen = { ...before }
+    for (const r of m) now[r.id] = r.status
+    // A report no longer moved (opened, or gone) drops out, so the record stays the size of the dot.
+    for (const k of Object.keys(now)) if (!m.some((r) => r.id === k)) delete now[k]
+    await writeCache(store, noticedKey(id), now)
+    return out
+  })
+}
