@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **A toast is a small pill at the bottom, not a bar over the top of the page.** `.sac-toasts` anchored to the top safe area and each `.sac-toast` spanned the width, so the suggestion news shown when an app opened sat over the host's own header and first row. Toasts now sit above the bottom safe area, as wide as their words (up to 24rem), in a smaller type, with a drawn × so they read as dismissable; a tap still dismisses. Styling only: no API or `Words` change. Test: package.test.mjs, red against the old stylesheet.
+
 ## 0.1.12 (2026-10-19)
 
 - **The kind is one small menu, and saying it is one big box for every kind.** The sheet drew three radio rows for the kind and a one-line field for the words, so the choice took the space and the place to speak looked like an afterthought. The kind is now a compact `<select>` labelled "What kind?", starting on "Change something", and the words go in one multi-line box (at least 9rem tall whatever field the host supplies, through `.sac-sayit textarea`) whose placeholder follows the kind. "Something is broken" no longer adds three question boxes: its placeholder asks what happened, what was expected and how to make it happen again, and the answer goes in `words`. A report no longer carries `answers` (the contract still accepts them). A draft left with answers from an earlier version folds them into the box once. New `Words` keys: `sayItPlaceholderBroken`, `sayItPlaceholderFeedback`; `brokenHappened`, `brokenExpected`, `brokenSteps` and `optional` stay so an override still typechecks. `ReportProblem`'s `happened` now starts the box.
