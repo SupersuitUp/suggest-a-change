@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.13 (2026-10-21)
 
 - **Old news is no longer toasted on every open.** The page load's one toast went to the newest move the person had not opened, however long ago it happened, so opening the app a day later replayed the same news each time. The phone now keeps what the last page load already had as news (`#view:noticed`, beside the seen record and cleared with it): only a move that is new since that load is toasted, and an older one keeps the dot and the New mark until it is opened. The first load on this release behaves as before. New in `seen.ts`: `fresh(store, id, moves)`.
+- **A toast is a small pill at the bottom, not a bar over the top of the page.** `.sac-toasts` anchored to the top safe area and each `.sac-toast` spanned the width, so the suggestion news shown when an app opened sat over the host's own header and first row. Toasts now sit above the bottom safe area, as wide as their words (up to 24rem), in a smaller type, with a drawn × so they read as dismissable; a tap still dismisses. Styling only: no API or `Words` change. Test: package.test.mjs, red against the old stylesheet.
 
 ## 0.1.12 (2026-10-19)
 

@@ -117,3 +117,16 @@ test("importing the server entry needs no react", async () => {
   const mod = await import(join(ROOT, "dist", "server", "index.js"));
   for (const name of ["createReportHandlers", "runStoreConformance", "sniffType"]) assert.equal(typeof mod[name], "function", name);
 });
+
+// The suggestion news toast drew a full-width bar over the top of the host's page on open. Toasts sit small at the
+// bottom edge instead, as wide as their words.
+test("toasts sit small at the bottom, never over the top of the host's page", () => {
+  const css = readFileSync(join(ROOT, "src", "client", "styles.css"), "utf8");
+  const rule = (sel) => (css.match(new RegExp(`^\\${sel} \\{([^}]*)\\}`, "m")) || [])[1] || "";
+  const host = rule(".sac-toasts");
+  const pill = rule(".sac-toast");
+  assert.match(host, /\bbottom:/, ".sac-toasts must anchor to the bottom");
+  assert.doesNotMatch(host, /\btop:/, ".sac-toasts must not anchor to the top");
+  assert.doesNotMatch(pill, /\bwidth:\s*100%/, ".sac-toast must be as wide as its words, not full width");
+  assert.match(css, /\.sac-toast::after \{[^}]*content:/, ".sac-toast draws a dismiss mark");
+});
