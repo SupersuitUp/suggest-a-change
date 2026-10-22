@@ -129,7 +129,7 @@ jobs:
             echo "Check that setup-node above does not set registry-url."
             exit 1
           fi
-          npm publish
+          npm publish --loglevel=verbose
 
       - name: Dry run only
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
