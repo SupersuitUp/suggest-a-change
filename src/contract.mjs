@@ -38,13 +38,14 @@ export const FLOW = {
 export const mayMove = (from, to) => Boolean(FLOW[from]?.next.includes(to));
 
 // The design's status table (section 2), word for word. "planned" is a step inside Pluma's work
-// that the table does not name for a person, so it reads as "With Pluma".
+// that the table does not name for a person, so it reads as "With Pluma". The agent's name is the owner's
+// to choose (`agent`, default "Pluma"), so the rows that name her take it as they take the owner's.
 const TABLE = {
   "on-phone": ["On this phone", () => "Not sent yet; it will send when there is a connection"],
   "received": ["Received", () => "The app has it, safely stored"],
-  "with-freeda": ["With Pluma", (o) => `${o}'s Mac has picked it up`],
-  "planned": ["With Pluma", (o) => `${o}'s Mac has picked it up`],
-  "waiting-on-owner": [null, (o) => `Pluma has a plan and is asking ${o}`],
+  "with-freeda": [(a) => `With ${a}`, (o) => `${o}'s Mac has picked it up`],
+  "planned": [(a) => `With ${a}`, (o) => `${o}'s Mac has picked it up`],
+  "waiting-on-owner": [null, (o, a) => `${a} has a plan and is asking ${o}`],
   "being-made": ["Being made", () => "A session is working on it; the current step shows underneath"],
   "live": ["Done", () => "Shipped in the app, with the date it went live"],
   "sent-to-template": ["Sent to the template", () => "It became a change to the template every copy of this app uses; it reaches this app once merged"],
@@ -55,8 +56,13 @@ const row = (status) => {
   if (!TABLE[status]) throw new Error(`${status} is not a status`);
   return TABLE[status];
 };
-export const wordsFor = (status, { owner } = {}) => row(status)[0] ?? `Waiting on ${owner}`;
-export const meaningFor = (status, { owner } = {}) => row(status)[1](owner);
+export const DEFAULT_AGENT = "Pluma";
+const agentOf = (agent) => (typeof agent === "string" && agent.trim() ? agent.trim() : DEFAULT_AGENT);
+export const wordsFor = (status, { owner, agent } = {}) => {
+  const w = row(status)[0];
+  return typeof w === "function" ? w(agentOf(agent)) : w ?? `Waiting on ${owner}`;
+};
+export const meaningFor = (status, { owner, agent } = {}) => row(status)[1](owner, agentOf(agent));
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const randomSix = () => {

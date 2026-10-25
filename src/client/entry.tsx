@@ -52,7 +52,7 @@ function useNews(adapters: Adapters, rt: Runtime | null): { moved: number; toast
       const top = [...f].sort((a, b) => at(b.id) - at(a.id))[0]
       const note = top.status === 'not-now' ? rows.find((r) => r.id === top.id)?.note : undefined
       setToasted(true)
-      toast({ id: `sac-moved-${top.id}`, text: S.movedToast(statusWords(top.status, adapters.words.owner), typeof note === 'string' && note ? note : undefined), ms: 6000 })
+      toast({ id: `sac-moved-${top.id}`, text: S.movedToast(statusWords(top.status, adapters.words.owner, adapters.words.agent), typeof note === 'string' && note ? note : undefined), ms: 6000 })
     })()
     const off = onSeen(() => { void count() })
     return () => { live = false; off() }

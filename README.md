@@ -36,7 +36,7 @@ import "@supersuit/suggest-a-change/styles.css"; // optional
 const adapters: Adapters = {
   identity: async () => (user ? { account: user.memberKey, role: "member" } : null),
   store,                                  // a StoreAdapter: submit, uploadPart, mine, one, append (dedupe by id)
-  words: { app: "notes", owner: "Alex" },    // the owner's name is passed in, never written in the module
+  words: { app: "notes", owner: "Alex", agent: "Pluma" }, // names are passed in, never written in the module; agent defaults to Pluma
   limits: { images: 3 },                  // may lower the ceilings, never raise them
   Field: GoldenVoiceField,                // optional: a host's own voice field; the module ships DefaultField
   snapshot: async () => screenshotBlob(), // optional: one tap to attach a picture of this screen

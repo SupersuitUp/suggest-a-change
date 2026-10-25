@@ -1,7 +1,11 @@
 'use client'
 // THE SHEET (design section 2): kind, say it, show it, what goes with it, send. Phone first. The kind is one
 // small menu and saying it is one big box for every kind, broken included: the box is what takes the space,
-// so a person sees first that they will be heard out (the operator, 2026-10-19). Everything
+// so a person sees first that they will be heard out (the operator, 2026-10-19). Saying it and showing it are
+// the SAME box, like a message composer: the words on top and, inside its border, one bar with Record, Photo,
+// Video and Screenshot, with what was recorded or added listed as chips above it. Two bordered sections with
+// their own legends read as a form to fill in, and the microphone beside the box read as an afterthought
+// (the operator, 2026-10-24). Everything
 // typed is saved as it is typed, every recording as it is made, and nothing leaves the phone except
 // through the outbox, so a closed app loses nothing. A voice note alone is a whole report.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
@@ -15,7 +19,7 @@ import { queueReport, type PartRef } from './reports.ts'
 import { Receipt } from './receipt.tsx'
 import { useRuntime, useTick } from './runtime.ts'
 import { toast, Toasts } from './toast.tsx'
-import { effectiveCeilings, lengthWords, phoneType, screenSize, sizeWords, stringsFor } from './words.ts'
+import { agentName, effectiveCeilings, lengthWords, phoneType, screenSize, sizeWords, stringsFor } from './words.ts'
 
 export interface SheetInitial { kind?: Kind; happened?: string }
 export interface Voice { key: string; file: string; ms: number; field: string }
@@ -180,9 +184,11 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     return { audio: k, text: '' }
   }, [rt, key, ceilings, ensureId, S])
 
-  function fieldFor(id: string, label: string, value: string, set: (v: string) => void, opts: { placeholder?: string; multiline?: boolean } = {}) {
+  function fieldFor(id: string, label: string, value: string, set: (v: string) => void, opts: { placeholder?: string; multiline?: boolean; toolbar?: React.ReactNode } = {}) {
     const used = voice.reduce((n, v) => n + v.ms, 0)
-    return (
+    // The module's own field draws the toolbar inside its box; a host's field is given the box around it instead.
+    const own = !adapters.Field
+    const field = (
       <Field
         rt={{ store: rt!.store }}
         id={id}
@@ -193,12 +199,14 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
         multiline={opts.multiline ?? true}
         persist={false}
         startTake={adapters.startTake}
-        labels={{ holdToTalk: S.holdToTalk, stopTalking: S.stopTalking, micDenied: S.micDenied, voiceUnavailable: S.voiceUnavailable, voiceTotalLimit: S.voiceTotalLimit }}
+        labels={{ holdToTalk: S.holdToTalk, stopTalking: S.stopTalking, micDenied: S.micDenied, voiceUnavailable: S.voiceUnavailable, voiceTotalLimit: S.voiceTotalLimit, recordShort: S.recordShort, recordingShort: S.recordingShort }}
         scope={key ?? undefined}
         maxMs={Math.min(ceilings.voiceMs, Math.max(0, ceilings.voiceTotalMs - used))}
         upload={(k, blob, ms) => keepTake(id, k, blob, ms)}
+        {...(own ? { toolbar: opts.toolbar } : {})}
       />
     )
+    return own ? field : <div className="sac-composer">{field}<div className="sac-voice-bar">{opts.toolbar}</div></div>
   }
 
   async function lengthOf(file: Blob) {
@@ -264,7 +272,7 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     { name: 'device', label: S.diagDevice, value: adapters.device ? adapters.device() : phoneType() },
   ] as { name: Diag; label: string; value: string | undefined }[]).filter((d): d is { name: Diag; label: string; value: string } => Boolean(d.value))
   const lineParts = [`this screen (${where.screen}, ${sanitizeRoute(where.route)})`, ...avail.map((d) => d.label)]
-  const summary = `${S.goesTo(adapters.words.owner)} ${S.includes(lineParts)}`
+  const summary = `${S.goesTo(adapters.words.owner, agentName(adapters.words))} ${S.includes(lineParts)}`
 
   const hasAnything = Boolean(words.trim() || voice.length || media.length)
 
@@ -362,41 +370,36 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
               </select>
             </div>
 
-            <fieldset className="sac-group sac-sayit">
-              <legend>{S.sayItLegend}</legend>
-              {fieldFor('words', S.sayItLabel, words, setWords, { placeholder: kind === 'broken' ? S.sayItPlaceholderBroken : kind === 'feedback' ? S.sayItPlaceholderFeedback : S.sayItPlaceholder })}
-              {voice.length ? (
-                <ul className="sac-list" aria-label={S.voiceNotesLabel}>
-                  {voice.map((v, i) => (
-                    <li key={v.key} className="sac-item">
-                      <span className="sac-item-name">{S.voiceNote(i + 1, lengthWords(v.ms))}</span>
-                      <button type="button" className="sac-button" aria-label={`${S.remove} ${S.voiceNote(i + 1, lengthWords(v.ms))}`} onClick={() => void removeVoice(v)}>{S.remove}</button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </fieldset>
-
-            <fieldset className="sac-group">
-              <legend>{S.showItLegend}</legend>
-              <div className="sac-actions">
-                <button type="button" className="sac-button" onClick={() => fileInput.current?.click()}>{S.addImages}</button>
-                <button type="button" className="sac-button" onClick={() => videoInput.current?.click()}>{S.addVideo}</button>
-                {adapters.snapshot ? <button type="button" className="sac-button" onClick={() => void takeScreenshot()}>{S.takeScreenshot}</button> : null}
-              </div>
+            <div className="sac-sayit">
+              {fieldFor('words', S.sayItLabel, words, setWords, {
+                placeholder: kind === 'broken' ? S.sayItPlaceholderBroken : kind === 'feedback' ? S.sayItPlaceholderFeedback : S.sayItPlaceholder,
+                toolbar: (
+                  <>
+                    {voice.length || media.length ? (
+                      <ul className="sac-list sac-chips" aria-label={S.attachmentsLabel}>
+                        {voice.map((v, i) => (
+                          <li key={v.key} className="sac-chip" data-sac-voice="">
+                            <span className="sac-item-name">{S.voiceNote(i + 1, lengthWords(v.ms))}</span>
+                            <button type="button" className="sac-chip-remove" aria-label={`${S.remove} ${S.voiceNote(i + 1, lengthWords(v.ms))}`} onClick={() => void removeVoice(v)}>{'\u00d7'}</button>
+                          </li>
+                        ))}
+                        {media.map((m) => (
+                          <li key={m.key} className="sac-chip">
+                            <span className="sac-item-name">{m.name}, {sizeWords(m.bytes)}</span>
+                            <button type="button" className="sac-chip-remove" aria-label={`${S.remove} ${m.name}`} onClick={() => void removeMedia(m)}>{'\u00d7'}</button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <button type="button" className="sac-tool" aria-label={S.addImages} onClick={() => fileInput.current?.click()}>{S.photoShort}</button>
+                    <button type="button" className="sac-tool" aria-label={S.addVideo} onClick={() => videoInput.current?.click()}>{S.videoShort}</button>
+                    {adapters.snapshot ? <button type="button" className="sac-tool" aria-label={S.takeScreenshot} onClick={() => void takeScreenshot()}>{S.screenshotShort}</button> : null}
+                  </>
+                ),
+              })}
               <input ref={fileInput} type="file" accept="image/*" multiple hidden aria-label={S.addImages} data-sac-images="" onChange={(e) => { const f = [...(e.target.files ?? [])]; e.target.value = ''; void addMedia(f, 'image') }} />
               <input ref={videoInput} type="file" accept="video/*" hidden aria-label={S.addVideo} data-sac-video="" onChange={(e) => { const f = [...(e.target.files ?? [])]; e.target.value = ''; void addMedia(f, 'video') }} />
-              {media.length ? (
-                <ul className="sac-list" aria-label={S.attachmentsLabel}>
-                  {media.map((m) => (
-                    <li key={m.key} className="sac-item">
-                      <span className="sac-item-name">{m.name}, {sizeWords(m.bytes)}</span>
-                      <button type="button" className="sac-button" aria-label={`${S.remove} ${m.name}`} onClick={() => void removeMedia(m)}>{S.remove}</button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </fieldset>
+            </div>
 
             <p className="sac-muted sac-fyi" data-sac-summary="">{summary}</p>
 

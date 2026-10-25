@@ -124,8 +124,8 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
                 <button type="button" className="sac-row-button" onClick={() => (onOpen ? onOpen(r.id) : setOpen(r.id))}>
                   {fresh.has(r.id) ? <span className="sac-new" data-new="">{S.newMark}</span> : null}
                   {preview ? <span className="sac-row-words">{preview}</span> : null}
-                  <span className="sac-row-status">{statusWords(r.status, owner)}</span>
-                  <span className="sac-muted">{statusMeaning(r.status, owner)}</span>
+                  <span className="sac-row-status">{statusWords(r.status, owner, adapters.words.agent)}</span>
+                  <span className="sac-muted">{statusMeaning(r.status, owner, adapters.words.agent)}</span>
                 </button>
                 {r.error ? (
                   <>

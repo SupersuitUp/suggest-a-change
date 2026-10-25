@@ -2,13 +2,16 @@
 // live in contract.mjs (`wordsFor`, `meaningFor`); the receipt lines, the sheet's labels and the
 // button come from design section 2. The owner's name and the app's name are passed in by the host,
 // never written here. An app may replace any string through `words.text`.
-import { CEILINGS, meaningFor, wordsFor } from '../contract.mjs'
+import { CEILINGS, DEFAULT_AGENT, meaningFor, wordsFor } from '../contract.mjs'
 
 export interface Words {
   /** A short id for the app. It names the draft on the phone, so it may not contain ":". */
   app: string
   /** The owner's first name, as the receipt says it ("Alex"). */
   owner: string
+  /** The name the owner gave their agent, wherever a person reads it ("Goes to Alex and Pluma", "With Pluma").
+   *  Default "Pluma". An app reads it from its own settings rather than writing it into `text`. */
+  agent?: string
   /** Replaces any string below. */
   text?: Partial<Strings>
 }
@@ -40,7 +43,8 @@ export interface Strings {
   takeScreenshot: string
   remove: string
   withLegend: string
-  goesTo: (owner: string) => string
+  /** `agent` is `words.agent` (default "Pluma"); an override that takes only the owner still typechecks. */
+  goesTo: (owner: string, agent: string) => string
   includes: (parts: string[]) => string
   /** The part of the line that is always sent: where the person was. */
   screenName: string
@@ -63,8 +67,17 @@ export interface Strings {
   mineTitle: string
   mineEmpty: string
   back: string
+  /** The microphone button's name while it is idle. The key keeps its old name; it is a tap now, not a hold. */
   holdToTalk: string
+  /** The microphone button's name while it records. */
   stopTalking: string
+  /** The short words on the microphone button, idle and recording (`time` is "0:07"). */
+  recordShort: string
+  recordingShort: (time: string) => string
+  /** The short words on the attach buttons inside the box; each keeps its full name (addImages, addVideo, takeScreenshot) for a screen reader. */
+  photoShort: string
+  videoShort: string
+  screenshotShort: string
   micDenied: string
   voiceUnavailable: string
   loading: string
@@ -124,16 +137,16 @@ export const DEFAULT_STRINGS: Strings = {
   optional: 'optional',
   sayItLegend: 'Say it',
   sayItLabel: 'Your suggestion',
-  sayItPlaceholder: 'What would you change? Type it, or hold the microphone and say it',
-  sayItPlaceholderBroken: 'What happened, what you expected, and how to make it happen again. Type it, or hold the microphone and say it',
-  sayItPlaceholderFeedback: 'Whatever is on your mind. Type it, or hold the microphone and say it',
+  sayItPlaceholder: 'What would you change? Type it, or tap Record and say it',
+  sayItPlaceholderBroken: 'What happened, what you expected, and how to make it happen again. Type it, or tap Record and say it',
+  sayItPlaceholderFeedback: 'Whatever is on your mind. Type it, or tap Record and say it',
   showItLegend: 'Show it',
   addImages: 'Add a screenshot or photo',
   addVideo: 'Add a short video',
   takeScreenshot: 'Take a screenshot of this screen',
   remove: 'Remove',
   withLegend: 'What goes with it',
-  goesTo: (owner) => `Goes to ${owner} and Pluma.`,
+  goesTo: (owner, agent = DEFAULT_AGENT) => `Goes to ${owner} and ${agent}.`,
   includes: (parts) => `Includes ${list(parts)}.`,
   screenName: "this screen's name",
   alwaysSent: (screen, route) => `Always sent: the screen you are on (${screen}) and its address (${route}).`,
@@ -155,8 +168,13 @@ export const DEFAULT_STRINGS: Strings = {
   mineTitle: 'My suggestions',
   mineEmpty: 'You have not sent a suggestion yet.',
   back: 'Back',
-  holdToTalk: 'Hold to talk',
+  holdToTalk: 'Record a voice note',
   stopTalking: 'Stop and keep the recording',
+  recordShort: 'Record',
+  recordingShort: (time) => `Stop ${time}`,
+  photoShort: 'Photo',
+  videoShort: 'Video',
+  screenshotShort: 'Screenshot',
   micDenied: 'The microphone could not be used. You can type it instead.',
   voiceUnavailable: 'Voice notes cannot be added here',
   loading: 'Loading',
@@ -205,18 +223,23 @@ function list(parts: string[]): string {
 }
 
 /** The design's status word for a status; a status the contract does not know shows as itself instead of taking the list down. */
-export function statusWords(status: string, owner: string): string {
-  try { return wordsFor(status, { owner }) } catch { return String(status) }
+export function statusWords(status: string, owner: string, agent?: string): string {
+  try { return wordsFor(status, { owner, agent }) } catch { return String(status) }
 }
-export function statusMeaning(status: string, owner: string): string {
-  try { return meaningFor(status, { owner }) } catch { return '' }
+export function statusMeaning(status: string, owner: string, agent?: string): string {
+  try { return meaningFor(status, { owner, agent }) } catch { return '' }
+}
+
+/** The agent's name as a person reads it: the app's `words.agent`, else "Pluma". */
+export function agentName(words: Pick<Words, 'agent'>): string {
+  return typeof words.agent === 'string' && words.agent.trim() ? words.agent.trim() : DEFAULT_AGENT
 }
 
 export type ReceiptState = 'on-phone' | 'received' | 'on-mac'
 
 /** The receipt's one line (design section 2). `received` is only ever asked for after the adapter said `done`. */
-export function receiptWords(state: ReceiptState, words: Pick<Words, 'owner'>): string {
-  if (state === 'received') return `Got it. Pluma picks it up next time ${words.owner}'s Mac is on.`
+export function receiptWords(state: ReceiptState, words: Pick<Words, 'owner' | 'agent'>): string {
+  if (state === 'received') return `Got it. ${agentName(words)} picks it up next time ${words.owner}'s Mac is on.`
   if (state === 'on-mac') return 'On your Mac.'
   return 'On this phone, waiting to send.'
 }
