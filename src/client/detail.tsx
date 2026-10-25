@@ -33,20 +33,20 @@ const timelineOf = (r?: Record<string, unknown>): string[] | undefined =>
 
 /** The strip is made from the contract's own statuses, one step per distinct word ("planned" reads as "With Pluma"),
  *  and a step is marked from the report's timeline: reached, skipped (the report went past it), or still ahead. */
-export function StatusStrip({ status, owner, step, timeline, label }: { status: string; owner: string; step?: string; timeline?: string[]; /** The list's accessible name; the screens pass the app's own (words.text.stepLabel). */ label?: string }) {
+export function StatusStrip({ status, owner, agent, step, timeline, label }: { status: string; owner: string; /** The agent's name (words.agent); default Pluma. */ agent?: string; step?: string; timeline?: string[]; /** The list's accessible name; the screens pass the app's own (words.text.stepLabel). */ label?: string }) {
   const nodes = useMemo(() => {
     const out: { words: string; ids: string[] }[] = []
     for (const id of STATUSES.filter((s: string) => !END.includes(s))) {
-      const words = statusWords(id, owner)
+      const words = statusWords(id, owner, agent)
       const had = out.find((n) => n.words === words)
       if (had) had.ids.push(id); else out.push({ words, ids: [id] })
     }
     return out
-  }, [owner])
+  }, [owner, agent])
   const ended = END.includes(status)
   const here = nodes.findIndex((n) => n.ids.includes(status))
   const at = ended ? nodes.length : Math.max(0, here)
-  const items = [...nodes, { words: statusWords(ended ? status : 'live', owner), ids: [ended ? status : 'end'] }]
+  const items = [...nodes, { words: statusWords(ended ? status : 'live', owner, agent), ids: [ended ? status : 'end'] }]
   const reached = new Set(timeline ?? [])
   return (
     <ol className="sac-strip" aria-label={label ?? stringsFor({ app: 'x', owner }).stepLabel} data-status={status}>
@@ -93,7 +93,7 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
   const n = useRef(0)
   const key = who ? draftKey({ app: adapters.words.app, account: who.account }) : null
   const fuKey = key ? `${key}#fu:${id}` : null
-  const labels = { holdToTalk: S.holdToTalk, stopTalking: S.stopTalking, micDenied: S.micDenied, voiceUnavailable: S.voiceUnavailable, voiceTotalLimit: S.voiceTotalLimit }
+  const labels = { holdToTalk: S.holdToTalk, stopTalking: S.stopTalking, micDenied: S.micDenied, voiceUnavailable: S.voiceUnavailable, voiceTotalLimit: S.voiceTotalLimit, recordShort: S.recordShort, recordingShort: S.recordingShort }
 
   // Each load takes a number; only the newest may paint, so a load still running for the account that
   // was just replaced never draws its rows under the new one.
@@ -190,6 +190,7 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
   if (report === null) return <p role="alert">{S.couldNotOpen}</p>
   const status = statusOf(report)
   const owner = adapters.words.owner
+  const agent = adapters.words.agent
   const open = !END.includes(status) && status !== 'on-phone'
   const answers = (report.answers ?? {}) as Record<string, string>
   const voice = Array.isArray(report.voice) ? (report.voice as { file: string; ms: number }[]) : []
@@ -228,8 +229,8 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
 
   return (
     <article className="sac-detail" data-report={id}>
-      <h3 className="sac-status" data-status={status}>{statusWords(status, owner)}</h3>
-      <p className="sac-muted">{statusMeaning(status, owner)}{status === 'live' && typeof report.liveAt === 'string' ? ` (${new Date(report.liveAt).toLocaleDateString()})` : ''}</p>
+      <h3 className="sac-status" data-status={status}>{statusWords(status, owner, agent)}</h3>
+      <p className="sac-muted">{statusMeaning(status, owner, agent)}{status === 'live' && typeof report.liveAt === 'string' ? ` (${new Date(report.liveAt).toLocaleDateString()})` : ''}</p>
       {refusal ? (
         <>
           <p role="alert" className="sac-error">{refusal}</p>
@@ -238,7 +239,7 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
       ) : null}
       {updating ? <p role="status" className="sac-muted" data-updating="">{S.updating}</p> : null}
       {offline ? <p role="alert" className="sac-error">{S.offlineShowingSaved}</p> : null}
-      <StatusStrip status={status} owner={owner} label={S.stepLabel} step={stepOf(report)} timeline={timelineOf(report)} />
+      <StatusStrip status={status} owner={owner} agent={agent} label={S.stepLabel} step={stepOf(report)} timeline={timelineOf(report)} />
       {typeof report.words === 'string' && report.words ? <p className="sac-words">{report.words}</p> : null}
       {Object.entries(answers).filter(([, v]) => v).map(([k, v]) => <p key={k} className="sac-words" data-answer={k}>{v}</p>)}
       {voice.length ? <ul className="sac-list" aria-label={S.voiceNotesLabel}>{voice.map((v, i) => <li key={v.file} className="sac-item">{S.voiceNote(i + 1, lengthWords(v.ms))}</li>)}</ul> : null}

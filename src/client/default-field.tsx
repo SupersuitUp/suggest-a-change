@@ -1,27 +1,39 @@
 'use client'
-// THE MODULE'S OWN VOICE FIELD, for hosted apps that have no golden one. A text area with a hold-to-talk
-// button beside it, in one [data-voice-field] container with nothing else typeable in it. A take is
+// THE MODULE'S OWN VOICE FIELD, for hosted apps that have no golden one. One box, like a message composer:
+// the text area on top and, inside the same border, a bar with the Record button and whatever the host puts
+// in `toolbar` (the sheet's attach buttons and chips). One [data-voice-field] container with nothing else
+// typeable in it. A take is
 // recorded with the module's recorder (written to the phone's database as it is made). Transcription is
 // not done here: the take goes to `upload`, and the receiving Mac writes the transcript. A voice note
 // alone is a whole report, so a field with no words and one take is a complete answer.
 //
-// Holding the button records; letting go (or leaving it) stops. For anyone who cannot hold, Space or
-// Enter on the focused button starts a take and again stops it.
-import { useEffect, useRef, useState } from 'react'
+// A TAP starts a take and a second tap stops it (mouse, touch, Space and Enter alike). It was hold-to-talk
+// until 0.1.14, and a hold could not survive the first use: the browser's microphone prompt takes the finger
+// off the button, so the take was cancelled before it began, and on a phone that asks again per visit it never
+// recorded at all (the operator, 2026-10-24). While it records the button shows the running time.
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { FieldProps } from './adapters.ts'
 import { startTake as defaultStartTake } from './recorder.ts'
 import { toast } from './toast.tsx'
-import { DEFAULT_STRINGS } from './words.ts'
+import { DEFAULT_STRINGS, lengthWords } from './words.ts'
 
 
 type Take = Awaited<ReturnType<typeof defaultStartTake>>
 
-export function DefaultField(props: FieldProps) {
-  const { rt, id, label, value, onChange, placeholder, multiline = false, type = 'text', upload, onHeard, onKept, onHearing, disabled, startTake = defaultStartTake, maxMs, labels, scope } = props
-  const L = labels ?? DEFAULT_STRINGS
+const MicIcon = () => (
+  <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0" /><path d="M12 18v3" />
+  </svg>
+)
+
+export function DefaultField(props: FieldProps & { toolbar?: ReactNode }) {
+  const { rt, id, label, value, onChange, placeholder, multiline = false, type = 'text', upload, onHeard, onKept, onHearing, disabled, startTake = defaultStartTake, maxMs, labels, scope, toolbar } = props
+  const L = { ...DEFAULT_STRINGS, ...labels }
   // With nowhere to send a take, recording would lose it silently: the control stays, switched off, and says why.
   const canRecord = Boolean(upload || onKept)
   const [recording, setRecording] = useState(false)
+  const [startedAt, setStartedAt] = useState(0)
+  const [, setNow] = useState(0)
   const take = useRef<Take | null>(null)
   const wanted = useRef(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -40,6 +52,7 @@ export function DefaultField(props: FieldProps) {
       if (!wanted.current) { await t.cancel(); return }
       take.current = t
       setRecording(true)
+      setStartedAt(Date.now())
       if (maxMs) timer.current = setTimeout(() => void end(), maxMs)
     } catch {
       wanted.current = false
@@ -66,6 +79,13 @@ export function DefaultField(props: FieldProps) {
     } finally { cb.current.onHearing?.(false) }
   }
   useEffect(() => () => { wanted.current = false; if (timer.current) clearTimeout(timer.current); void take.current?.cancel() }, [])
+  // The running time on the button, so a person can see it is listening.
+  useEffect(() => {
+    if (!recording) return
+    const t = setInterval(() => setNow(Date.now()), 500)
+    return () => clearInterval(t)
+  }, [recording])
+  const elapsed = recording ? lengthWords(Math.max(0, Date.now() - startedAt)) : ''
 
   const control = (
     <button
@@ -75,27 +95,21 @@ export function DefaultField(props: FieldProps) {
       aria-pressed={recording}
       aria-label={canRecord ? `${recording ? L.stopTalking : L.holdToTalk}: ${label}` : `${L.voiceUnavailable}: ${label}`}
       disabled={disabled || !canRecord}
-      onPointerDown={(e) => { e.preventDefault(); void begin() }}
-      onPointerUp={() => void end()}
-      onPointerLeave={() => { if (wanted.current) void end() }}
-      onPointerCancel={() => void end()}
-      onContextMenu={(e) => e.preventDefault()}
-      onKeyDown={(e) => {
-        if (e.key !== ' ' && e.key !== 'Enter') return
-        e.preventDefault()
-        if (e.repeat) return
-        void (take.current || wanted.current ? end() : begin())
-      }}
+      onClick={() => void (take.current || wanted.current ? end() : begin())}
     >
-      <span aria-hidden="true" className="sac-record-dot" />
+      <MicIcon />
+      <span aria-hidden="true" className="sac-record-words">{recording ? L.recordingShort(elapsed) : L.recordShort}</span>
     </button>
   )
   const shared = { id: `sac-field-${id}`, value, placeholder, disabled, className: 'sac-input', onChange: (e: { target: { value: string } }) => onChange(e.target.value) }
   return (
     <div data-voice-field="" className="sac-voice" data-recording={recording ? '' : undefined}>
-      {control}
       <label htmlFor={`sac-field-${id}`} className="sac-sr">{label}</label>
       {multiline ? <textarea rows={3} {...shared} /> : <input type={type} {...shared} />}
+      <div className="sac-voice-bar">
+        {control}
+        {toolbar}
+      </div>
     </div>
   )
 }

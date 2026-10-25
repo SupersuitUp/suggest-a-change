@@ -86,6 +86,14 @@ test("wordsFor carries the design's table, with the owner's name", () => {
   assert.throws(() => C.wordsFor("bogus", { owner: "Alex" }), /not a status/);
 });
 
+test("the agent's name is the owner's choice, and Pluma when unset", () => {
+  assert.equal(C.wordsFor("with-freeda", { owner: "Alex", agent: "Robin" }), "With Robin");
+  assert.equal(C.wordsFor("planned", { owner: "Alex", agent: "Robin" }), "With Robin");
+  assert.equal(C.meaningFor("waiting-on-owner", { owner: "Alex", agent: "Robin" }), "Robin has a plan and is asking Alex");
+  assert.equal(C.wordsFor("with-freeda", { owner: "Alex", agent: "  " }), "With Pluma");
+  assert.equal(C.wordsFor("received", { owner: "Alex", agent: "Robin" }), "Received");
+});
+
 test("new ids match the shape and differ", () => {
   const id = C.newReportId(new Date("2026-10-12T17:45:00Z"), () => "abc123");
   assert.equal(id, "r-20261012174500-abc123");

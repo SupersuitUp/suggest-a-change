@@ -35,13 +35,26 @@
 .sac-kind { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sac-kind label { color: var(--sac-muted); font-size: 0.9rem; }
 .sac-select { font: inherit; font-size: 16px; min-height: 36px; padding: 4px 10px; color: inherit; background: var(--sac-bg); border: 1px solid var(--sac-border); border-radius: var(--sac-radius); }
-/* Saying it is the sheet's biggest thing, whatever field the host puts in it. */
-.sac-sayit textarea { min-height: 9rem; }
-.sac-voice { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
-.sac-input, .sac-voice textarea, .sac-voice input { flex: 1; min-width: 0; min-height: 44px; font: inherit; font-size: 16px; color: inherit; background: var(--sac-bg); border: 1px solid var(--sac-border); border-radius: var(--sac-radius); padding: 10px 12px; box-sizing: border-box; }
-.sac-record { flex: none; width: 48px; height: 48px; min-width: 44px; min-height: 44px; border-radius: 50%; border: 1px solid var(--sac-border); background: var(--sac-bg); display: grid; place-items: center; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; cursor: pointer; }
-.sac-record-dot { width: 18px; height: 18px; border-radius: 50%; background: var(--sac-danger); }
-.sac-voice[data-recording] .sac-record { border-color: var(--sac-danger); box-shadow: 0 0 0 4px color-mix(in srgb, var(--sac-danger) 25%, transparent); }
+/* Saying it and showing it are ONE box, like a message composer: the words on top, and inside the same border a bar
+   with Record and the attach buttons, the recorded notes and added files as chips above them. The box is the
+   sheet's biggest thing, whatever field the host puts in it. */
+.sac-sayit textarea, .sac-sayit .sac-voice > textarea { min-height: 9rem; }
+.sac-voice, .sac-composer { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--sac-border); border-radius: var(--sac-radius); background: var(--sac-bg); overflow: hidden; }
+.sac-voice:focus-within, .sac-composer:focus-within { border-color: var(--sac-focus); }
+.sac-voice > textarea, .sac-voice > input { flex: 1; min-width: 0; min-height: 44px; font: inherit; font-size: 16px; color: inherit; background: transparent; border: 0; border-radius: 0; padding: 12px 14px 6px; box-sizing: border-box; resize: vertical; outline: none; }
+.sac-input { min-width: 0; min-height: 44px; font: inherit; font-size: 16px; color: inherit; background: var(--sac-bg); border: 1px solid var(--sac-border); border-radius: var(--sac-radius); padding: 10px 12px; box-sizing: border-box; }
+.sac-voice > .sac-input { border: 0; border-radius: 0; }
+.sac-voice-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px 8px; }
+.sac-record svg { width: 16px; height: 16px; }
+.sac-voice-bar:empty { display: none; }
+.sac-chips { flex-basis: 100%; order: -1; flex-direction: row; flex-wrap: wrap; gap: 6px; }
+.sac-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; font-size: 0.85rem; padding: 2px 4px 2px 10px; border-radius: 999px; background: color-mix(in srgb, var(--sac-fg) 7%, transparent); }
+.sac-chip .sac-item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sac-chip-remove { font: inherit; font-size: 1rem; line-height: 1; width: 32px; height: 32px; min-width: 32px; border: 0; border-radius: 50%; background: transparent; color: var(--sac-muted); cursor: pointer; }
+.sac-record, .sac-tool { font: inherit; font-size: 0.85rem; min-height: 36px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--sac-border); background: var(--sac-bg); color: var(--sac-fg); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.sac-record { font-weight: 600; font-variant-numeric: tabular-nums; }
+.sac-record:disabled { opacity: 0.5; cursor: not-allowed; }
+.sac-voice[data-recording] .sac-record { background: var(--sac-danger); border-color: var(--sac-danger); color: #fff; box-shadow: 0 0 0 4px color-mix(in srgb, var(--sac-danger) 25%, transparent); }
 .sac-button, .sac-entry, .sac-row-button { font: inherit; font-size: 16px; min-height: 44px; min-width: 44px; padding: 8px 14px; border-radius: var(--sac-radius); border: 1px solid var(--sac-border); background: var(--sac-bg); color: var(--sac-fg); cursor: pointer; }
 .sac-primary { background: var(--sac-accent); color: var(--sac-accent-fg); border-color: var(--sac-accent); }
 .sac-button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -71,6 +84,6 @@
 .sac-toast::after { content: "\00d7"; color: var(--sac-muted); font-size: 1rem; line-height: 1; }
 .sac-toast[data-tone="warn"] { background: var(--sac-fg); color: var(--sac-bg); }
 .sac-entry-why { margin-left: 8px; color: var(--sac-muted); font-size: 0.9rem; }
-.sac-sheet :focus-visible, .sac-entry:focus-visible, .sac-button:focus-visible, .sac-record:focus-visible, .sac-row-button:focus-visible { outline: 3px solid var(--sac-focus); outline-offset: 2px; }
+.sac-sheet :focus-visible, .sac-entry:focus-visible, .sac-button:focus-visible, .sac-record:focus-visible, .sac-tool:focus-visible, .sac-row-button:focus-visible { outline: 3px solid var(--sac-focus); outline-offset: 2px; }
 @media (min-width: 640px) { .sac-backdrop { align-items: center; } .sac-sheet { border-radius: var(--sac-radius); } }
-@media (prefers-reduced-motion: no-preference) { .sac-voice[data-recording] .sac-record { transition: box-shadow 0.15s; } }
+@media (prefers-reduced-motion: no-preference) { .sac-record { transition: background 0.15s, box-shadow 0.15s; } }

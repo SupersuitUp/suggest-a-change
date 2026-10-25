@@ -154,6 +154,34 @@ describe('the sheet', () => {
     expect(receiptWords('on-mac', { owner: 'Alex' })).toBe('On your Mac.')
   })
 
+  it('every line that names the agent says the name the owner chose', async () => {
+    expect(receiptWords('received', { owner: 'Sam', agent: 'Robin' })).toBe("Got it. Robin picks it up next time Sam's Mac is on.")
+    const { adapters } = await setup({ words: { app: `app${++n}`, owner: 'Alex', agent: 'Robin' } })
+    await sheet(adapters)
+    expect(document.querySelector('[data-sac-summary]')!.textContent).toMatch(/^Goes to Alex and Robin\. /)
+    expect(document.body.textContent).not.toMatch(/Pluma|Freeda/)
+  })
+
+  it('saying it and showing it are one box: Record, the attach buttons and the chips sit inside the voice field', async () => {
+    const blob = new Blob(['audio'], { type: 'audio/mp4' })
+    const startTake = vi.fn(async (_s: unknown, key: string) => ({ started: 0, level: () => null, stop: async () => ({ key, blob, ms: 3000 }), cancel: async () => {} }))
+    const { adapters } = await setup({ Field: undefined, snapshot: async () => new Blob([new Uint8Array(8)], { type: 'image/png' }), startTake: startTake as unknown as Adapters['startTake'] })
+    await sheet(adapters)
+    const box = document.querySelector('[data-voice-field]')!
+    expect(box.querySelectorAll('textarea')).toHaveLength(1)
+    for (const name of ['Record a voice note: Your suggestion', 'Add a screenshot or photo', 'Add a short video', 'Take a screenshot of this screen']) {
+      expect(box.contains(screen.getByRole('button', { name }))).toBe(true)
+    }
+    expect(document.querySelectorAll('fieldset')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Record a voice note: Your suggestion' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Stop and keep/ }))
+    const chip = await screen.findByText('Voice note 1, 0:03')
+    expect(box.contains(chip)).toBe(true)
+    fireEvent.change(images(), { target: { files: [png('shot.png')] } })
+    expect(box.contains(await screen.findByText('shot.png, 2.0 KB'))).toBe(true)
+    expect(textFieldsWithoutVoice(document.body)).toEqual([])
+  })
+
   it('after Send, focus moves to the receipt, the live region carries its line, and Tab stays in the dialog', async () => {
     const { adapters } = await setup({}, SAM, { submit: () => new Promise(() => {}) })
     await sheet(adapters)
@@ -347,7 +375,7 @@ describe('the sheet', () => {
     const startTake = vi.fn(async (_s: unknown, key: string) => ({ started: 0, level: () => null, stop: async () => ({ key, blob, ms: 400 }), cancel: async () => {} }))
     const { adapters, submitted } = await setup({ Field: undefined, limits: { voiceMs: 100 }, startTake: startTake as unknown as Adapters['startTake'] })
     await sheet(adapters)
-    fireEvent.pointerDown(screen.getByRole('button', { name: 'Hold to talk: Your suggestion' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Record a voice note: Your suggestion' }))
     await screen.findByText('Voice note 1, 0:00', undefined, { timeout: 2000 })
     fireEvent.click(sendButton())
     await waitFor(() => expect(submitted).toHaveLength(1))
@@ -680,9 +708,9 @@ describe('My suggestions and the detail view', () => {
       append: async (_i, more) => { order.push('append'); appended.push(more); return 'done' },
     })
     render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
-    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Hold to talk: Add to it' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Record a voice note: Add to it' }))
     await screen.findByRole('button', { name: /Stop and keep/ })
-    fireEvent.pointerUp(screen.getByRole('button', { name: /Stop and keep/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Stop and keep/ }))
     await screen.findByText('Voice note 1, 0:02')
     expect(order).toEqual([])
     expect((await db0.all('blobs')).map((b) => b.key).filter((k) => k.startsWith('take:'))).toEqual([])
@@ -777,7 +805,7 @@ describe('My suggestions and the detail view', () => {
     const startTake = vi.fn(async () => { throw new Error('denied') })
     const { adapters } = await setup({ Field: undefined, startTake: startTake as unknown as Adapters['startTake'] }, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }) })
     render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
-    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Hold to talk: Add to it' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Record a voice note: Add to it' }))
     expect(await screen.findByText('The microphone could not be used. You can type it instead.')).toBeTruthy()
   })
 
@@ -833,28 +861,50 @@ describe('the default field', () => {
     const startTake = vi.fn(async (_s: unknown, key: string) => ({ started: 0, level: () => null, stop: async () => ({ key, blob, ms }), cancel: async () => {} }))
     return { startTake: startTake as unknown as FieldProps['startTake'] }
   }
-  it('records while the button is held and hands the take to upload; transcription is not its job', async () => {
+  it('a tap starts a take, a second tap stops it and hands the take to upload; transcription is not its job', async () => {
     const store = await openStore(`field-${++n}`)
     const { startTake } = fakeTake()
     const upload = vi.fn(async (_k: string, _b: Blob, _ms: number) => ({ audio: 'k', text: '' }))
     const onChange = vi.fn()
     render(<DefaultField rt={{ store }} id="words" label="Your suggestion" value="" onChange={onChange} upload={upload} startTake={startTake} />)
-    fireEvent.pointerDown(screen.getByRole('button', { name: /Hold to talk/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Record a voice note/ }))
     await waitFor(() => expect(screen.getByRole('button', { name: /Stop and keep/ }).getAttribute('aria-pressed')).toBe('true'))
-    fireEvent.pointerUp(screen.getByRole('button', { name: /Stop and keep/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Stop and keep/ }))
     await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
     expect(upload.mock.calls[0][2]).toBe(1500)
     expect(onChange).not.toHaveBeenCalled()
   })
-  it('can be used from the keyboard: Space starts a take and Space stops it', async () => {
+  it('a take survives the finger leaving the button: the microphone prompt no longer cancels it', async () => {
+    // Hold-to-talk lost every first take: the browser's permission prompt lifts the finger off the button, which
+    // fired pointerup/pointercancel and cancelled the take while getUserMedia was still asking.
+    const store = await openStore(`field-${++n}`)
+    let grant!: () => void
+    const blob = new Blob(['audio'], { type: 'audio/mp4' })
+    const cancel = vi.fn(async () => {})
+    const startTake = vi.fn((_s: unknown, key: string) => new Promise((res) => { grant = () => res({ started: 0, level: () => null, stop: async () => ({ key, blob, ms: 3000 }), cancel }) }))
+    const upload = vi.fn(async (_k: string, _b: Blob, _ms: number) => ({ audio: 'k', text: '' }))
+    render(<DefaultField rt={{ store }} id="words" label="Say" value="" onChange={() => {}} upload={upload} startTake={startTake as never} />)
+    const button = screen.getByRole('button', { name: /Record a voice note/ })
+    fireEvent.click(button)
+    fireEvent.pointerUp(button)
+    fireEvent.pointerCancel(button)
+    fireEvent.pointerLeave(button)
+    await act(async () => { grant(); await new Promise((r) => setTimeout(r, 10)) })
+    expect(cancel).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /Stop and keep/ }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: /Stop and keep/ }).textContent).toMatch(/^Stop 0:0\d$/)
+    fireEvent.click(screen.getByRole('button', { name: /Stop and keep/ }))
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+  })
+  it('the words heard join the box', async () => {
     const store = await openStore(`field-${++n}`)
     const { startTake } = fakeTake()
     const upload = vi.fn(async (_k: string, _b: Blob, _ms: number) => ({ audio: 'k', text: 'transcribed words' }))
     const onChange = vi.fn()
     render(<DefaultField rt={{ store }} id="words" label="Say" value="before" onChange={onChange} upload={upload} startTake={startTake} />)
-    fireEvent.keyDown(screen.getByRole('button'), { key: ' ' })
+    fireEvent.click(screen.getByRole('button'))
     await waitFor(() => expect(screen.getByRole('button').getAttribute('aria-pressed')).toBe('true'))
-    fireEvent.keyDown(screen.getByRole('button'), { key: ' ' })
+    fireEvent.click(screen.getByRole('button'))
     await waitFor(() => expect(onChange).toHaveBeenCalledWith('before transcribed words'))
   })
   it('with nowhere to send a take, the control is off and says why instead of recording into nothing', async () => {
@@ -950,7 +1000,7 @@ describe('smaller promises', () => {
     const store = await openStore(`field-${++n}`)
     const startTake = vi.fn()
     render(<><DefaultField rt={{ store }} id="w" label="Say" value="" onChange={() => {}} upload={async () => ({ audio: 'k', text: '' })} startTake={startTake as never} maxMs={0} labels={{ holdToTalk: 'Hold', stopTalking: 'Stop', micDenied: 'no mic', voiceUnavailable: 'off', voiceTotalLimit: 'No voice time left; type the rest.' }} /><Toasts /></>)
-    fireEvent.pointerDown(screen.getByRole('button'))
+    fireEvent.click(screen.getByRole('button'))
     expect(await screen.findByText('No voice time left; type the rest.')).toBeTruthy()
     expect(startTake).not.toHaveBeenCalled()
   })

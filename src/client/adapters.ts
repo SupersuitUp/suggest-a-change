@@ -41,7 +41,7 @@ export interface FieldProps {
   /** Scopes this field's recorded takes (the sheet passes the draft key: app and account), so an interrupted take can only rejoin its own account. */
   scope?: string
   /** The default field's own words, from the app's `words.text`. */
-  labels?: { holdToTalk: string; stopTalking: string; micDenied: string; voiceUnavailable: string; voiceTotalLimit: string }
+  labels?: { holdToTalk: string; stopTalking: string; micDenied: string; voiceUnavailable: string; voiceTotalLimit: string; recordShort?: string; recordingShort?: (time: string) => string }
 }
 
 export interface Adapters {
