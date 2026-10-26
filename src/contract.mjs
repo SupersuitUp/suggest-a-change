@@ -107,11 +107,14 @@ export function validContext(ctx) {
 }
 
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** A GitHub "owner/name": two plain segments, neither "." nor "..", so it can never walk out of /repos/ in a URL.
+ *  @param {unknown} s @returns {s is string} */
+export const isRepoName = (s) => typeof s === "string" && REPO.test(s) && !s.split("/").some((p) => p === "." || p === "..");
 /** The issue a report became: `{ repo: "owner/name", number, url }`, the url on github.com. Problems as a list. */
 export function validIssue(issue) {
   if (!issue || typeof issue !== "object" || Array.isArray(issue)) return ["issue is not an object"];
   const errs = [];
-  if (typeof issue.repo !== "string" || !REPO.test(issue.repo)) errs.push("issue.repo is not owner/name");
+  if (!isRepoName(issue.repo)) errs.push("issue.repo is not owner/name");
   if (!Number.isInteger(issue.number) || issue.number < 1) errs.push("issue.number is not a positive whole number");
   if (typeof issue.url !== "string" || !issue.url.startsWith("https://github.com/")) errs.push("issue.url is not a https://github.com/ link");
   return errs;

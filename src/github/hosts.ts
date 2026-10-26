@@ -2,6 +2,7 @@
 // file to an issue, so each file is committed to the repo's own `suggestion-attachments` branch and linked: it shows to
 // exactly the people who can read the repo, and to nobody else. Two hosts ship: one for a filer that can push, one
 // through the repo owner's own GitHub App, by way of a suggestion relay, for everyone who cannot.
+import { isRepoName } from '../contract.mjs'
 import { github, GitHubError, type Fetch } from './api.ts'
 
 /** Which issue a file belongs to. The relay reads that issue and requires it to carry `Report <reportId>`. */
@@ -12,7 +13,6 @@ export interface AttachmentHost { put(target: AttachmentTarget, file: Attachment
 export const ATTACHMENTS_BRANCH = 'suggestion-attachments'
 const REPORT_ID = /^r-\d{14}-[a-z0-9]{6}$/
 const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
-const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 /** Base64 with no dependency and no reliance on btoa's string rules. */
@@ -28,7 +28,7 @@ export function toBase64(bytes: Uint8Array | ArrayBuffer): string {
 
 /** Refuses anything that would write outside attachments/<report id>/<file>. */
 function pathFor(t: AttachmentTarget, name: string): string {
-  if (!REPO.test(t.repo)) throw new Error(`${JSON.stringify(t.repo)} is not owner/name`)
+  if (!isRepoName(t.repo)) throw new Error(`${JSON.stringify(t.repo)} is not owner/name`)
   if (!REPORT_ID.test(String(t.reportId))) throw new Error(`${JSON.stringify(t.reportId)} is not a report id`)
   if (!FILE.test(name)) throw new Error(`${JSON.stringify(name)} is not a plain file name`)
   return `attachments/${t.reportId}/${name}`

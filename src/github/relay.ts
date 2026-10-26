@@ -10,14 +10,14 @@
 //   reading the issue and requiring it to carry the report.
 //
 // Web-standard only: Request, Response, fetch, crypto.subtle.
-import { CEILINGS, isReportId, validateReport } from '../contract.mjs'
+import { CEILINGS, isRepoName, isReportId, validContact, validateReport } from '../contract.mjs'
 import { cappedText, json } from '../server/http.ts'
 import { ACCEPTED_TYPES, sameType, sniffType } from '../server/sniff.ts'
 import { withPlace, type GeoHook } from '../server/geo.ts'
 import { addFollowUp, fileIssue, github, GitHubError, issueStates, issueStatus, type Fetch } from './api.ts'
 import { composeIssue } from './compose.ts'
 import { ATTACHMENTS_BRANCH, attachmentUrl, branchHost } from './hosts.ts'
-import { privacyCatch, type Person } from './privacy.ts'
+import { privacyCatch, redact, type Person } from './privacy.ts'
 
 /** A voice recording's ceiling; the same number as the server half's VOICE_FILE_BYTES (a test holds them together). */
 export const RELAY_VOICE_BYTES = 25 * 2 ** 20
@@ -46,15 +46,20 @@ export const RELAY_LIMITS: RelayLimits = {
 }
 
 export interface FiledRecord { account: string; reportId: string; number: number; url: string }
-/** What the relay remembers. Every method is atomic in a real store (one transaction or a conditional write). */
+/** A day's allowance held for one request, until it is committed (it happened) or released (it did not). */
+export type Reservation = { ok: true; token: string } | { ok: false; over: 'reports' | 'bytes' }
+/** What the relay remembers. Every method is ATOMIC in a real store (one transaction or a conditional write): a check
+ *  and the change it guards are one step, so two requests at once can never both pass a cap of one. */
 export interface RelayUsage {
-  /** Records that `account` used `reportId` on `day` (YYYY-MM-DD); answers how many different reports it has that day. */
-  touch(account: string, day: string, reportId: string): Promise<number>
-  /** Whether `account` already used `reportId` on `day`, and how many different reports it has that day. */
-  peek(account: string, day: string, reportId: string): Promise<{ known: boolean; count: number }>
-  /** Adds bytes sent by `account` on `day`; answers the day's total. */
-  addBytes(account: string, day: string, n: number): Promise<number>
-  bytes(account: string, day: string): Promise<number>
+  /** Holds today's allowance for this request: one more report (unless `reportId` was already counted today for
+   *  `account`) and `bytes` more bytes, refusing when either would pass its limit. Nothing is held on a refusal. */
+  reserve(account: string, day: string, reportId: string, bytes: number, limits: { reports: number; bytes: number }): Promise<Reservation>
+  /** The request that reserved this happened: keep it. */
+  commit(token: string): Promise<void>
+  /** The request that reserved this did not happen: give it back. */
+  release(token: string): Promise<void>
+  /** A report belongs to the first identity that files or attaches for it: 'ok' for that identity, 'taken' for anyone else. */
+  bind(repo: string, reportId: string, account: string): Promise<'ok' | 'taken'>
   /** Starts filing a report, first caller wins: 'go', or 'busy' while another filing of it runs, or the record of the issue it already became. */
   begin(repo: string, reportId: string, account: string): Promise<{ state: 'go' } | { state: 'busy' } | ({ state: 'filed' } & FiledRecord)>
   /** The filing that began succeeded: keep the record, by report and by issue number. */
@@ -65,30 +70,62 @@ export interface RelayUsage {
   filer(repo: string, number: number): Promise<FiledRecord | null>
 }
 /** In memory, so ONE SERVER INSTANCE ONLY: a platform that runs several instances (most serverless hosts) needs a store
- *  backed by its database, or the caps, the idempotency and who-filed-what are per instance and lost on restart. */
+ *  backed by its database, or the caps, the idempotency and who-filed-what are per instance and lost on restart. Each
+ *  method below changes what it checks before it yields, which is what makes it atomic in one process. */
 export function memoryUsage(): RelayUsage {
   const days = new Map<string, Set<string>>()
   const bytes = new Map<string, number>()
+  const held = new Map<string, { k: string; reportId: string; counted: boolean; bytes: number }>()
+  const owners = new Map<string, string>()
   const filings = new Map<string, { state: 'busy' } | ({ state: 'filed' } & FiledRecord)>()
   const issues = new Map<string, FiledRecord>()
-  const set = (a: string, d: string) => { const k = `${a}\u0000${d}`; let s = days.get(k); if (!s) days.set(k, (s = new Set())); return s }
+  let n = 0
   return {
-    async touch(a, d, r) { const s = set(a, d); s.add(r); return s.size },
-    async peek(a, d, r) { const s = set(a, d); return { known: s.has(r), count: s.size } },
-    async addBytes(a, d, n) { const k = `${a}\u0000${d}`; const t = (bytes.get(k) ?? 0) + n; bytes.set(k, t); return t },
-    async bytes(a, d) { return bytes.get(`${a}\u0000${d}`) ?? 0 },
+    async reserve(a, d, r, b, lim) {
+      const k = `${a}\u0000${d}`
+      const set = days.get(k) ?? new Set<string>()
+      const counted = !set.has(r)
+      if (counted && set.size >= lim.reports) return { ok: false, over: 'reports' }
+      if ((bytes.get(k) ?? 0) + b > lim.bytes) return { ok: false, over: 'bytes' }
+      if (counted) { set.add(r); days.set(k, set) }
+      bytes.set(k, (bytes.get(k) ?? 0) + b)
+      const token = `t${++n}`
+      held.set(token, { k, reportId: r, counted, bytes: b })
+      return { ok: true, token }
+    },
+    async commit(t) { held.delete(t) },
+    async release(t) {
+      const h = held.get(t); if (!h) return
+      held.delete(t)
+      if (h.counted) days.get(h.k)?.delete(h.reportId)
+      bytes.set(h.k, Math.max(0, (bytes.get(h.k) ?? 0) - h.bytes))
+    },
+    async bind(repo, r, a) { const k = `${repo}#${r}`; const had = owners.get(k); if (had === undefined) { owners.set(k, a); return 'ok' } return had === a ? 'ok' : 'taken' },
     async begin(repo, r) { const k = `${repo}#${r}`; const had = filings.get(k); if (had) return had; filings.set(k, { state: 'busy' }); return { state: 'go' } },
     async finish(repo, rec) { filings.set(`${repo}#${rec.reportId}`, { state: 'filed', ...rec }); issues.set(`${repo}#${rec.number}`, rec) },
     async abandon(repo, r) { const k = `${repo}#${r}`; if (filings.get(k)?.state === 'busy') filings.delete(k) },
-    async filer(repo, n) { return issues.get(`${repo}#${n}`) ?? null },
+    async filer(repo, num) { return issues.get(`${repo}#${num}`) ?? null },
   }
+}
+
+/** Who is calling, as the host knows them. The issue's name, role, app and contact come from here and never from the
+ *  request: a request can say whether to share the contact (it sends `report.who.contact`), never what it is. */
+export interface RelayIdentity {
+  account: string
+  /** The name the issue says it was filed by; "Someone" without one. */
+  name?: string
+  role?: 'operator' | 'member' | 'maintainer'
+  /** The app the suggestion came from; it names the issue's `app:<slug>` label. Without one there is no app label. */
+  appName?: string
+  /** How to reach them, shared only when the request asks (the person left it ticked). */
+  contact?: { email?: string; phone?: string; handle?: string }
 }
 
 export interface SuggestionRelayOptions {
   /** The GitHub App the relay acts as: its numeric id and its private key (PEM, PKCS#1 as GitHub issues it, or PKCS#8). */
   app: { id: number | string; privateKey: string }
   /** Who is calling, from the request (a session, an API key, whatever the server already uses), or null. */
-  identity(req: Request): Promise<{ account: string } | null>
+  identity(req: Request): Promise<RelayIdentity | null>
   /** The repos this identity may file on; null (or no function) means any repo the App is installed on. */
   repos?(account: string): string[] | null | Promise<string[] | null>
   /** What the privacy catch looks for besides credentials, emails and phones: third parties, and secrets the host knows. */
@@ -106,7 +143,6 @@ export interface SuggestionRelayOptions {
 /** The 0.2.0 name, for a relay that only attaches. */
 export type AttachRelayOptions = SuggestionRelayOptions
 
-const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 const B64 = /^[A-Za-z0-9+/]+={0,2}$/
 const ACTIONS = ['file', 'follow-up', 'status', 'attach'] as const
@@ -176,9 +212,14 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
   const now = opts.now ?? (() => Date.now())
   const day = () => new Date(now()).toISOString().slice(0, 10)
   let key: Promise<CryptoKey> | null = null
-  // One file at the largest size the limits allow, base64, plus room for the rest; `file` may carry a report's worth.
-  const oneCap = Math.ceil(Math.max(limits.imageBytes, limits.videoBytes, limits.voiceBytes) / 3) * 4 + 64 * 1024
-  const reportCap = Math.ceil((limits.images * limits.imageBytes + limits.videos * limits.videoBytes + 10 * limits.voiceBytes) / 3) * 4 + 512 * 1024
+  // The largest body each action can need, base64 and the rest of the JSON included, and never more than one day's
+  // byte budget allows: a body past it is refused by its declared length, or as soon as the count passes it.
+  const b64 = (n: number) => Math.ceil(n / 3) * 4
+  const room = 64 * 1024
+  const budget = b64(limits.bytesPerPersonPerDay) + room
+  const oneCap = Math.min(b64(Math.max(limits.imageBytes, limits.videoBytes, limits.voiceBytes)) + room, budget)
+  const reportCap = Math.min(b64(limits.images * limits.imageBytes + limits.videos * limits.videoBytes + 10 * limits.voiceBytes) + 4 * room, budget)
+  const caps: Record<Action, number> = { file: reportCap, 'follow-up': oneCap, status: room, attach: oneCap }
   const bad = (error: string) => json(400, { error })
   const gone = (e: unknown) => json(502, { error: 'GitHub could not be reached or refused the relay; try again', ...(e instanceof GitHubError ? { status: e.status } : {}) })
 
@@ -208,13 +249,15 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     return { name: x.name, type: real, kind, bytes }
   }
 
-  /** The catch, on the relay: a credential refuses by its kind (never its text); anything else holds unless redacted. */
-  function catchIt(readable: Record<string, unknown>, account: string, redacted: boolean): Response | null {
+  /** The catch, on the relay, over every string that would reach the issue. A credential refuses by its kind (never its
+   *  text). Anything else holds, unless the filer says they redacted: then the relay redacts what it found itself and
+   *  answers the clean copy, so raw text is never filed on the filer's word. */
+  function catchIt<T extends Record<string, unknown>>(readable: T, account: string, redacted: boolean): { res: Response } | { clean: T } {
     const { hits } = privacyCatch(readable, { people: opts.privacy?.people ?? [], secrets: [...(opts.privacy?.secrets ?? []), account] })
     const creds = hits.filter((h) => h.kind === 'credential')
-    if (creds.length) return json(422, { error: `a credential was found in ${[...new Set(creds.map((h) => h.field))].join(', ')}; it is never filed`, kinds: ['credential'] })
-    if (hits.length && !redacted) return json(409, { held: true, hits: hits.map((h) => ({ kind: h.kind, field: h.field })) })
-    return null
+    if (creds.length) return { res: json(422, { error: `a credential was found in ${[...new Set(creds.map((h) => h.field))].join(', ')}; it is never filed`, kinds: ['credential'] }) }
+    if (hits.length && !redacted) return { res: json(409, { held: true, hits: hits.map((h) => ({ kind: h.kind, field: h.field })) }) }
+    return { clean: hits.length ? redact(readable, hits) : readable }
   }
 
   async function readJson(req: Request, cap: number): Promise<Record<string, unknown> | Response> {
@@ -228,16 +271,20 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     return list && !list.includes(repo) ? json(403, { error: `this account may not file on ${repo}` }) : null
   }
 
-  async function overDay(account: string, reportId: string, bytes: number): Promise<Response | null> {
-    const seen = await usage.peek(account, day(), reportId)
-    if (!seen.known && seen.count >= limits.perPersonPerDay) return json(429, { error: 'you have reached today\'s limit of suggestions' })
-    if ((await usage.bytes(account, day())) + bytes > limits.bytesPerPersonPerDay) return json(429, { error: 'you have reached today\'s limit of attachments' })
-    return null
+  /** Today's allowance, held atomically for this request: the token to commit or release, or the refusal. */
+  async function reserve(account: string, reportId: string, bytes: number): Promise<{ token: string } | Response> {
+    const r = await usage.reserve(account, day(), reportId, bytes, { reports: limits.perPersonPerDay, bytes: limits.bytesPerPersonPerDay })
+    if (r.ok) return { token: r.token }
+    return json(429, { error: r.over === 'reports' ? 'you have reached today\'s limit of suggestions' : 'you have reached today\'s limit of attachments' })
   }
 
-  async function file(account: string, body: Record<string, unknown>, req: Request): Promise<Response> {
+  /** The contact to share: the host's, and only when the request asked (the person left it ticked). */
+  const contactFor = (me: RelayIdentity, asked: unknown) => (asked !== undefined && me.contact && !validContact(me.contact).length ? me.contact : undefined)
+
+  async function file(me: RelayIdentity, body: Record<string, unknown>, req: Request): Promise<Response> {
+    const account = me.account
     const repo = body.repo
-    if (typeof repo !== 'string' || !REPO.test(repo)) return bad('repo is not owner/name')
+    if (!isRepoName(repo)) return bad('repo is not owner/name')
     const refused = await allowed(account, repo); if (refused) return refused
     const report = body.report as Record<string, unknown> | undefined
     if (!report || typeof report !== 'object') return bad('report is needed')
@@ -253,81 +300,91 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
       if (want[1] === 'audio/*' && c.kind !== 'voice') return json(422, { error: `${c.name} is a voice note and is not audio` })
       files.push(c)
     }
-    const transcript = typeof body.transcript === 'string' ? body.transcript : undefined
-    // The catch reads the context too, and knows the sender's own contact is theirs to share.
-    const held = catchIt({ words: report.words, transcript, followUps: report.followUps, context: report.context, who: { contact: (report.who as { contact?: unknown } | undefined)?.contact } }, account, body.redacted === true); if (held) return held
-    if (report.context !== undefined || opts.geo) report.context = await withPlace(report.context, req, opts.geo)
+    // Who it is from comes from the host, never the request: the name, the role, the app and the contact.
+    const contact = contactFor(me, (report.who as { contact?: unknown } | undefined)?.contact)
+    const appVersion = typeof (report.diagnostics as { appVersion?: unknown } | undefined)?.appVersion === 'string' ? (report.diagnostics as { appVersion: string }).appVersion : undefined
+    const readable = {
+      words: report.words, followUps: report.followUps, where: report.where, diagnostics: report.diagnostics,
+      context: report.context, transcript: typeof body.transcript === 'string' ? body.transcript : undefined,
+      filerName: me.name, appName: me.appName, who: { contact },
+    }
+    const caught = catchIt(readable, account, body.redacted === true); if ('res' in caught) return caught.res
+    const clean = caught.clean as typeof readable
+    const context = clean.context !== undefined || opts.geo ? await withPlace(clean.context, req, opts.geo) : undefined
 
-    // Once per report: a repeat answers the issue it already became; nobody else may use the id.
+    if ((await usage.bind(repo, reportId, account)) === 'taken') return json(409, { error: 'that report id is taken; start the suggestion again' })
+    // Once per report: a repeat answers the issue it already became.
     const began = await usage.begin(repo, reportId, account)
     if (began.state === 'filed') return began.account === account ? json(200, { number: began.number, url: began.url }) : json(409, { error: 'that report id is taken; start the suggestion again' })
     if (began.state === 'busy') return json(409, { error: 'that report is being filed right now; try again in a moment' })
+    const held = await reserve(account, reportId, files.reduce((n, f) => n + f.bytes.length, 0))
+    if (held instanceof Response) { await usage.abandon(repo, reportId); return held }
     try {
-      const total = files.reduce((n, f) => n + f.bytes.length, 0)
-      const over = await overDay(account, reportId, total); if (over) { await usage.abandon(repo, reportId); return over }
-      const token = await repoToken(repo); if (token instanceof Response) { await usage.abandon(repo, reportId); return token }
+      const token = await repoToken(repo); if (token instanceof Response) { await usage.abandon(repo, reportId); await usage.release(held.token); return token }
       // The files first, so the issue opens complete; a file already there from an interrupted try is its link.
       const host = branchHost({ repo, token, fetch: opts.fetch })
       const attachmentUrls: Record<string, string> = {}
       for (const f of files) attachmentUrls[f.name] = (await host.put({ repo, issue: 0, reportId }, { name: f.name, type: f.type, bytes: f.bytes })).url
-      // The account id never reaches the issue; the sender's own contact does, because they chose to share it.
-      const who = (report.who ?? {}) as { role?: string; contact?: unknown }
-      const issue = composeIssue({ ...report, who: { role: who.role, ...(who.contact ? { contact: who.contact } : {}) } } as never, {
-        appName: typeof body.appName === 'string' ? body.appName.slice(0, 100) : undefined,
-        appVersion: typeof body.appVersion === 'string' ? body.appVersion.slice(0, 50) : undefined,
-        filerName: typeof body.filerName === 'string' && body.filerName.trim() ? body.filerName.trim().slice(0, 100) : 'Someone',
-        filerRole: who.role,
-        transcript,
+      const role = me.role ?? 'member'
+      const issue = composeIssue({ ...report, words: clean.words, where: clean.where, diagnostics: clean.diagnostics, ...(context !== undefined ? { context } : {}), who: { role, ...(clean.who.contact ? { contact: clean.who.contact } : {}) } } as never, {
+        appName: typeof clean.appName === 'string' ? clean.appName.slice(0, 100) : undefined,
+        appVersion: appVersion?.slice(0, 50),
+        filerName: typeof clean.filerName === 'string' && clean.filerName.trim() ? clean.filerName.trim().slice(0, 100) : 'Someone',
+        filerRole: role,
+        transcript: clean.transcript,
         attachmentUrls,
       })
       const made = await fileIssue({ repo, token, fetch: opts.fetch, api: opts.api }, issue)
       await usage.finish(repo, { account, reportId, number: made.number, url: made.url })
-      await usage.touch(account, day(), reportId)
-      await usage.addBytes(account, day(), total)
+      await usage.commit(held.token)
       return json(200, { number: made.number, url: made.url })
-    } catch (e) { await usage.abandon(repo, reportId); return gone(e) }
+    } catch (e) { await usage.abandon(repo, reportId); await usage.release(held.token); return gone(e) }
   }
 
-  async function followUp(account: string, body: Record<string, unknown>): Promise<Response> {
+  async function followUp(me: RelayIdentity, body: Record<string, unknown>): Promise<Response> {
+    const account = me.account
     const { repo, number, reportId } = body
-    if (typeof repo !== 'string' || !REPO.test(repo)) return bad('repo is not owner/name')
+    if (!isRepoName(repo)) return bad('repo is not owner/name')
     if (!Number.isInteger(number) || (number as number) < 1) return bad('number is not an issue number')
     if (typeof reportId !== 'string' || !isReportId(reportId)) return bad('reportId is not a report id')
-    const words = typeof body.words === 'string' ? body.words.slice(0, 20_000) : ''
+    const refused = await allowed(account, repo); if (refused) return refused
     const rec = await usage.filer(repo, number as number)
     if (!rec || rec.account !== account || rec.reportId !== reportId) return json(403, { error: 'only the person who filed it may add to it' })
     const files: Checked[] = []
     for (const f of Array.isArray(body.files) ? body.files : []) { const c = checkFile(f); if (c instanceof Response) return c; files.push(c) }
-    const transcript = typeof body.transcript === 'string' ? body.transcript : undefined
-    const held = catchIt({ words, transcript }, account, body.redacted === true); if (held) return held
+    const readable = { words: typeof body.words === 'string' ? body.words.slice(0, 20_000) : '', transcript: typeof body.transcript === 'string' ? body.transcript : undefined }
+    const caught = catchIt(readable, account, body.redacted === true); if ('res' in caught) return caught.res
+    const { words, transcript } = caught.clean
     if (!words.trim() && !transcript && !files.length) return bad('a follow-up needs words or a file')
-    const total = files.reduce((n, f) => n + f.bytes.length, 0)
-    const over = await overDay(account, reportId, total); if (over) return over
+    const held = await reserve(account, reportId, files.reduce((n, f) => n + f.bytes.length, 0))
+    if (held instanceof Response) return held
     try {
-      const token = await repoToken(repo); if (token instanceof Response) return token
+      const token = await repoToken(repo); if (token instanceof Response) { await usage.release(held.token); return token }
       const host = branchHost({ repo, token, fetch: opts.fetch })
       const links: string[] = []
       for (const f of files) {
         const { url } = await host.put({ repo, issue: number as number, reportId }, { name: f.name, type: f.type, bytes: f.bytes })
         links.push(f.kind === 'image' ? `![${f.name}](${url})` : `[${f.name}](${url})`)
       }
-      const text = ['## Added later', words.trim(), transcript ? `\n### Voice note\n${transcript.trim()}` : '', links.length ? `\n${links.join('\n')}` : ''].filter(Boolean).join('\n')
+      // A follow-up is the person's own words, so it sits in a fence like the words of the report.
+      const fenced = (s: string) => { const run = Math.max(0, ...[...s.matchAll(/`+/g)].map((m) => m[0].length)); const f = '`'.repeat(Math.max(3, run + 1)); return `${f}\n${s}\n${f}` }
+      const text = ['## Added later', words.trim() ? fenced(words.trim()) : '', transcript ? `\n### Voice note\n${fenced(transcript.trim())}` : '', links.length ? `\n${links.join('\n')}` : ''].filter(Boolean).join('\n')
       const got = await addFollowUp({ repo, token, fetch: opts.fetch, api: opts.api }, number as number, text)
-      await usage.addBytes(account, day(), total)
+      await usage.commit(held.token)
       return json(200, got)
-    } catch (e) { return gone(e) }
+    } catch (e) { await usage.release(held.token); return gone(e) }
   }
 
-  async function status(account: string, body: Record<string, unknown>): Promise<Response> {
+  async function status(me: RelayIdentity, body: Record<string, unknown>): Promise<Response> {
     const items = Array.isArray(body.items) ? body.items : null
     if (!items || !items.length || items.length > 100) return bad('items is a list of 1 to 100 { repo, number }')
     const list: { repo: string; number: number }[] = []
     for (const it of items) {
       const x = it as { repo?: unknown; number?: unknown }
-      if (typeof x?.repo !== 'string' || !REPO.test(x.repo) || !Number.isInteger(x.number) || (x.number as number) < 1) return bad('an item is not { repo, number }')
-      const rec = await usage.filer(x.repo, x.number as number)
-      if (!rec || rec.account !== account) return json(403, { error: 'only the person who filed an issue may ask its state' })
-      list.push({ repo: x.repo, number: x.number as number })
+      if (!isRepoName(x?.repo) || !Number.isInteger(x.number) || (x.number as number) < 1) return bad('an item is not { repo, number }')
+      const rec = await usage.filer(x.repo as string, x.number as number)
+      if (!rec || rec.account !== me.account) return json(403, { error: 'only the person who filed an issue may ask its state' })
+      list.push({ repo: x.repo as string, number: x.number as number })
     }
     try {
       const out: Record<string, unknown>[] = []
@@ -341,43 +398,54 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     } catch (e) { return gone(e) }
   }
 
-  async function attach(account: string, body: Record<string, unknown>): Promise<Response> {
+  /** The proof an issue carries a report: its body ENDS with the composer's own "## Filed by" line for that report.
+   *  "Report <id>" anywhere else proves nothing. */
+  const carries = (body: string, reportId: string) => {
+    const lines = body.replace(/\s+$/, '').split('\n')
+    const last = lines[lines.length - 1] ?? ''
+    return lines[lines.length - 2]?.trim() === '## Filed by' && / \(.+\), through Suggest a change in the .+\. Report r-\d{14}-[a-z0-9]{6}\.$/.test(last) && last.endsWith(` Report ${reportId}.`)
+  }
+
+  async function attach(me: RelayIdentity, body: Record<string, unknown>): Promise<Response> {
+    const account = me.account
     const { repo, issue, reportId } = body
-    if (typeof repo !== 'string' || !REPO.test(repo)) return bad('repo is not owner/name')
+    if (!isRepoName(repo)) return bad('repo is not owner/name')
     if (!Number.isInteger(issue) || (issue as number) < 1) return bad('issue is not an issue number')
     if (typeof reportId !== 'string' || !isReportId(reportId)) return bad('reportId is not a report id')
     const c = checkFile(body); if (c instanceof Response) return c
     const refused = await allowed(account, repo); if (refused) return refused
-    const over = await overDay(account, reportId, c.bytes.length); if (over) return over
+    // A report belongs to the first identity that files or attaches for it; nobody else may add files to it.
+    if ((await usage.bind(repo, reportId, account)) === 'taken') return json(403, { error: 'this report belongs to someone else' })
+    const held = await reserve(account, reportId, c.bytes.length); if (held instanceof Response) return held
+    const fail = async (res: Response) => { await usage.release(held.token); return res }
     try {
-      const token = await repoToken(repo); if (token instanceof Response) return token
+      const token = await repoToken(repo); if (token instanceof Response) return fail(token)
       const cfg = { ...cfgBase, token }
-      // Proof the caller could file here: the issue exists, is an issue, is open or recently closed, and carries this report.
+      // Proof the caller could file here: the issue exists, is an issue, is open or recently closed, and ends with this report's line.
       let found: { body?: string; pull_request?: unknown; state?: string; closed_at?: string | null }
       try { found = (await github(cfg, 'GET', `/repos/${repo}/issues/${issue}`)).body }
-      catch (e) { if (e instanceof GitHubError && e.status === 404) return json(404, { error: `there is no issue #${issue} on ${repo}` }); throw e }
-      if (found.pull_request) return json(403, { error: `#${issue} is a pull request, not an issue` })
-      if (!new RegExp(`(^|[^A-Za-z0-9-])Report ${reportId}(?![A-Za-z0-9-])`).test(String(found.body ?? ''))) return json(403, { error: `issue #${issue} does not carry Report ${reportId}` })
-      if (found.state === 'closed' && found.closed_at && now() - Date.parse(found.closed_at) > limits.closedGraceMs) return json(403, { error: `issue #${issue} closed too long ago to add to` })
+      catch (e) { if (e instanceof GitHubError && e.status === 404) return fail(json(404, { error: `there is no issue #${issue} on ${repo}` })); throw e }
+      if (found.pull_request) return fail(json(403, { error: `#${issue} is a pull request, not an issue` }))
+      if (!carries(String(found.body ?? ''), reportId)) return fail(json(403, { error: `issue #${issue} does not carry Report ${reportId}` }))
+      if (found.state === 'closed' && found.closed_at && now() - Date.parse(found.closed_at) > limits.closedGraceMs) return fail(json(403, { error: `issue #${issue} closed too long ago to add to` }))
       // What the report already holds: never the same path twice, never past its caps.
       const folder = `attachments/${reportId}`
       let names: string[] = []
       try { names = ((await github(cfg, 'GET', `/repos/${repo}/contents/${folder}?ref=${ATTACHMENTS_BRANCH}`)).body as { name: string }[]).map((x) => x.name) }
       catch (e) { if (!(e instanceof GitHubError) || e.status !== 404) throw e }
-      if (names.includes(c.name)) return json(409, { error: `${folder}/${c.name} is already written` })
+      if (names.includes(c.name)) return fail(json(409, { error: `${folder}/${c.name} is already written` }))
       const have = names.filter((n) => kindByName(n) === c.kind).length
       const room = c.kind === 'image' ? limits.images : c.kind === 'video' ? limits.videos : limits.voice
-      if (have >= room) return json(422, { error: `this report has all the ${c.kind === 'voice' ? 'recordings' : `${c.kind}s`} it can carry` })
+      if (have >= room) return fail(json(422, { error: `this report has all the ${c.kind === 'voice' ? 'recordings' : `${c.kind}s`} it can carry` }))
       try {
         await branchHost({ repo, token, fetch: opts.fetch, refuseExisting: true }).put({ repo, issue: issue as number, reportId }, { name: c.name, type: c.type, bytes: c.bytes })
-      } catch (e) { if (e instanceof GitHubError && e.status === 409) return json(409, { error: `${folder}/${c.name} is already written` }); throw e }
-      await usage.touch(account, day(), reportId)
-      await usage.addBytes(account, day(), c.bytes.length)
+      } catch (e) { if (e instanceof GitHubError && e.status === 409) return fail(json(409, { error: `${folder}/${c.name} is already written` })); throw e }
+      await usage.commit(held.token)
       return json(200, { url: attachmentUrl(repo, ATTACHMENTS_BRANCH, `${folder}/${c.name}`) })
-    } catch (e) { return gone(e) }
+    } catch (e) { await usage.release(held.token); return gone(e) }
   }
 
-  const run: Record<Action, (account: string, body: Record<string, unknown>, req: Request) => Promise<Response>> = { file, 'follow-up': followUp, status, attach }
+  const run: Record<Action, (me: RelayIdentity, body: Record<string, unknown>, req: Request) => Promise<Response>> = { file, 'follow-up': followUp, status, attach }
 
   return async function relay(req: Request): Promise<Response> {
     // The action is the last segment of the path the handler is mounted on: .../file, .../follow-up, .../status, .../attach.
@@ -387,9 +455,9 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     if (req.method !== 'POST') return json(405, { error: 'method not allowed' })
     const me = await opts.identity(req)
     if (!me || typeof me.account !== 'string' || !me.account) return json(401, { error: 'sign in first' })
-    const body = await readJson(req, action === 'file' ? reportCap : oneCap)
+    const body = await readJson(req, caps[action])
     if (body instanceof Response) return body
-    return run[action](me.account, body, req)
+    return run[action](me, body, req)
   }
 }
 

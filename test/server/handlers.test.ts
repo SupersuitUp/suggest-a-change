@@ -13,7 +13,7 @@ const settle = async (agent: string, id: string) => lastSetup.h.agentSettle(last
 const newId = () => `r-20261012090000-${String(100000 + ++n).slice(1).padStart(6, 'a')}`
 const rid = () => `r-20261012090000-a${String(++n).padStart(5, '0')}`
 
-function setup(extra: { limits?: Record<string, number>; tell?: (e: TellEvent) => void; tellSubmitter?: ((e: SubmitterNews) => void | Promise<void>) | { none: string }; app?: Record<string, string>; maintainersSince?: Record<string, number | string>; github?: ReportHandlerOptions['github']; geo?: ReportHandlerOptions['geo'] } = {}) {
+function setup(extra: { limits?: Record<string, number>; tell?: (e: TellEvent) => void; tellSubmitter?: ((e: SubmitterNews) => void | Promise<void>) | { none: string }; app?: Record<string, string>; maintainersSince?: Record<string, number | string>; github?: ReportHandlerOptions['github']; geo?: ReportHandlerOptions['geo']; contactOf?: ReportHandlerOptions['contactOf'] } = {}) {
   const mem = makeMemoryStore()
   const h = createReportHandlers({
     store: mem.store,
@@ -981,7 +981,7 @@ describe('filing straight from the app\'s server (the github option)', () => {
 
   it('the issue carries the context table and how to reach them, and the sender\'s own email is not held', async () => {
     const g = gh()
-    const t = setup({ github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch } })
+    const t = setup({ github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch }, contactOf: () => ({ email: 'pat@example.com' }) })
     const { id } = await t.send('amy', { words: 'write to me at pat@example.com', who: { member: 'x', role: 'member', contact: { email: 'pat@example.com' } }, context: CONTEXT })
     expect(t.mem.reports.get(id)!.timeline.at(-1)!.status).toBe('open')
     const body = issues(g)[0].body.body as string
@@ -993,9 +993,10 @@ describe('filing straight from the app\'s server (the github option)', () => {
 const CONTEXT = { items: [{ key: 'device', label: 'Your device', value: 'iPhone, iOS 18.1, Safari 18.1', why: 'so the fixer can try it on the same kind of phone' }], taps: [{ label: 'Save note', at: '2026-10-26T17:04:05Z' }] }
 
 describe('context, a way to reach them, and roughly where they were', () => {
-  it('keeps the context and the sender\'s contact, and shows both back to them', async () => {
-    const { h, call, send, mem } = setup()
-    const { id, res } = await send('amy', { who: { member: 'x', role: 'member', contact: { email: 'pat@example.com', handle: '@pat' } }, context: CONTEXT })
+  it('keeps the context and the contact the HOST knows for the sender, and shows both back to them', async () => {
+    const { h, call, send, mem } = setup({ contactOf: (m: string) => (m === 'amy' ? { email: 'pat@example.com', handle: '@pat' } : null) })
+    // the phone says to share (it sends who.contact), and what it typed there is ignored
+    const { id, res } = await send('amy', { who: { member: 'x', role: 'member', contact: { email: 'evil@example.com' } }, context: CONTEXT })
     expect(res.status).toBe(200)
     expect(mem.reports.get(id)!.who).toEqual({ member: 'amy', role: 'member', contact: { email: 'pat@example.com', handle: '@pat' } })
     expect(mem.reports.get(id)!.context).toEqual(CONTEXT)
@@ -1004,11 +1005,19 @@ describe('context, a way to reach them, and roughly where they were', () => {
     expect((view.who as Record<string, unknown>).contact).toEqual({ email: 'pat@example.com', handle: '@pat' })
   })
 
-  it('refuses a contact of the wrong shape, and an email anywhere but the contact', async () => {
-    const { send } = setup()
-    expect((await send('amy', { who: { member: 'x', role: 'member', contact: { email: 'not an email' } } })).res.status).toBe(422)
-    expect((await send('amy', { who: { member: 'x', role: 'member', contact: { address: 'here' } } })).res.status).toBe(422)
-    expect((await send('amy', { context: { items: [{ key: 'k', label: 'l', value: 'v', why: 'w' }], email: 'a@example.com' } })).res.status).toBe(422)
+  it('never takes a contact from the phone: without contactOf nothing is kept, a host contact of the wrong shape is dropped, and an unticked one is not shared', async () => {
+    const plain = setup()
+    const a = await plain.send('amy', { who: { member: 'x', role: 'member', contact: { email: 'evil@example.com' } } })
+    expect(a.res.status).toBe(200)
+    expect(plain.mem.reports.get(a.id)!.who.contact).toBeUndefined()
+    const odd = setup({ contactOf: () => ({ email: 'not an email' }) as never })
+    const b = await odd.send('amy', { who: { member: 'x', role: 'member', contact: {} } })
+    expect(b.res.status).toBe(200)
+    expect(odd.mem.reports.get(b.id)!.who.contact).toBeUndefined()
+    const host = setup({ contactOf: () => ({ email: 'pat@example.com' }) })
+    const c = await host.send('amy') // no who.contact: the person left it unticked
+    expect(host.mem.reports.get(c.id)!.who.contact).toBeUndefined()
+    expect((await host.send('amy', { context: { items: [{ key: 'k', label: 'l', value: 'v', why: 'w' }], email: 'a@example.com' } })).res.status).toBe(422)
   })
 
   it('adds roughly where they were from the request, through geo, and never takes a place the phone claims', async () => {

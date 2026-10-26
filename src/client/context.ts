@@ -12,16 +12,36 @@ export interface ReportContext extends Trail { items: ContextItem[] }
 export interface AppContextItem { label: string; value: string; why: string }
 
 const MAX = { routes: 10, taps: 20, errors: 10, items: 40 }
-const trail: Trail = { routes: [], taps: [], errors: [] }
-let installedAt = 0
-let undo: (() => void) | null = null
+// ONE trail per page, however many copies of the module a host bundles: the state lives on the global object under a
+// registered symbol, so a second copy finds the first one's listeners installed and shares its trail.
+type Shared = { trail: Trail; installedAt: number; undo: (() => void) | null }
+const SHARED = Symbol.for('@supersuit/suggest-a-change/context')
+const shared: Shared = ((globalThis as Record<symbol, unknown>)[SHARED] as Shared | undefined)
+  ?? ((globalThis as Record<symbol, unknown>)[SHARED] = { trail: { routes: [], taps: [], errors: [] }, installedAt: 0, undo: null }) as Shared
+const trail = shared.trail
 
 const clip = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1).trimEnd()}…`)
 const iso = () => new Date().toISOString()
 const push = <T>(list: T[], x: T, max: number) => { list.push(x); if (list.length > max) list.splice(0, list.length - max) }
 /** A URL or path with no query and no hash, wherever it appears in a piece of text. */
 export const withoutQueries = (s: string) => s.replace(/([^\s?#'"()]*)[?#][^\s'"():]*/g, (_m, before: string) => before)
-const routeOf = (href: string) => { try { return new URL(href, 'http://x').pathname } catch { return String(href).split(/[?#]/)[0] } }
+/** A path segment that is an id, a token or an address rather than a name: a uuid, a long number, a long hex or
+ *  base64 run with letters and digits, anything over 24 characters, or anything with an @. */
+const idLike = (raw: string) => {
+  let s = raw
+  try { s = decodeURIComponent(raw) } catch { /* as it is */ }
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+    || /^\d{4,}$/.test(s)
+    || (/^[0-9a-f]{12,}$/i.test(s) && /\d/.test(s))
+    || (/^[A-Za-z0-9_-]{16,}$/.test(s) && /\d/.test(s) && /[A-Za-z]/.test(s))
+    || s.length > 24
+    || s.includes('@')
+}
+const routeOf = (href: string) => {
+  let path: string
+  try { path = new URL(href, 'http://x').pathname } catch { path = String(href).split(/[?#]/)[0] }
+  return path.split('/').map((seg) => (seg && idLike(seg) ? ':id' : seg)).join('/')
+}
 
 function recordRoute() {
   if (typeof location === 'undefined') return
@@ -33,6 +53,10 @@ function recordRoute() {
 /** What a tapped thing is called: its label or its text, never what was typed into it. */
 function labelOf(target: EventTarget | null): string | null {
   if (!(target instanceof Element)) return null
+  // Anything someone types into is "a text field", by its own label at most and never its text: an editable region,
+  // a text, search or combo box, wherever inside it the tap landed.
+  const typing = target.closest('[contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="searchbox"], [role="combobox"]')
+  if (typing) return clip(typing.getAttribute('aria-label')?.trim() || 'a text field', 60)
   const el = target.closest('button, a, summary, label, select, textarea, input, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="checkbox"], [aria-label]') ?? target
   const aria = el.getAttribute('aria-label')?.trim()
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
@@ -63,8 +87,10 @@ function recordError(message: string, stack?: unknown) {
 
 /** Starts keeping the trail. Idempotent: every screen of the module calls it on mount, and it installs once. */
 export function installContextListeners(): void {
-  if (undo || typeof window === 'undefined' || typeof document === 'undefined') return
-  installedAt = Date.now()
+  if (shared.undo || typeof window === 'undefined' || typeof document === 'undefined') return
+  shared.installedAt = Date.now()
+  // A wrapper a host put on top of ours may outlive a reset; once reset, ours only passes the call through.
+  let live = true
   recordRoute()
   const onClick = (e: Event) => { const l = labelOf(e.target); if (l) push(trail.taps, { label: l, at: iso() }, MAX.taps) }
   const onError = (e: Event) => { const ev = e as ErrorEvent; recordError(ev.message || messageOf(ev.error), (ev.error as { stack?: unknown } | undefined)?.stack) }
@@ -76,26 +102,33 @@ export function installContextListeners(): void {
   window.addEventListener('popstate', onNav)
   window.addEventListener('hashchange', onNav)
   const { pushState, replaceState } = history
-  history.pushState = function (...a: Parameters<History['pushState']>) { const r = pushState.apply(this, a); recordRoute(); return r }
-  history.replaceState = function (...a: Parameters<History['replaceState']>) { const r = replaceState.apply(this, a); recordRoute(); return r }
+  const ourPush = function (this: History, ...a: Parameters<History['pushState']>) { const r = pushState.apply(this, a); if (live) recordRoute(); return r }
+  history.pushState = ourPush
+  const ourReplace = function (this: History, ...a: Parameters<History['replaceState']>) { const r = replaceState.apply(this, a); if (live) recordRoute(); return r }
+  history.replaceState = ourReplace
   const consoleError = console.error
-  console.error = function (...args: unknown[]) {
-    try { recordError(args.map(messageOf).filter(Boolean).join(' '), (args.find((a) => a instanceof Error) as Error | undefined)?.stack) } catch { /* the trail never breaks logging */ }
+  const ourError = function (this: Console, ...args: unknown[]) {
+    if (live) try { recordError(args.map(messageOf).filter(Boolean).join(' '), (args.find((a) => a instanceof Error) as Error | undefined)?.stack) } catch { /* the trail never breaks logging */ }
     return consoleError.apply(this, args as [])
   }
-  undo = () => {
+  console.error = ourError
+  shared.undo = () => {
+    live = false
     document.removeEventListener('click', onClick, true)
     window.removeEventListener('error', onError)
     window.removeEventListener('unhandledrejection', onRejection)
     window.removeEventListener('popstate', onNav)
     window.removeEventListener('hashchange', onNav)
-    history.pushState = pushState; history.replaceState = replaceState; console.error = consoleError
+    // Put back only what is still ours: a wrapper the host added later stays, and calls through ours harmlessly.
+    if (history.pushState === ourPush) history.pushState = pushState
+    if (history.replaceState === ourReplace) history.replaceState = replaceState
+    if (console.error === ourError) console.error = consoleError
   }
 }
 
 /** Stops keeping the trail and forgets it (tests, and a host that signs someone out). */
 export function resetContext(): void {
-  undo?.(); undo = null
+  shared.undo?.(); shared.undo = null
   trail.routes.length = 0; trail.taps.length = 0; trail.errors.length = 0
 }
 
@@ -186,7 +219,7 @@ export async function collectContext(o: CollectOptions = {}): Promise<ReportCont
     const c = (navigator as Navigator & { connection?: { type?: string; effectiveType?: string } }).connection
     add('connection', 'Connection', [navigator.onLine === false ? 'offline' : 'online', c?.type, c?.effectiveType && `${c.effectiveType} speed`].filter(Boolean).join(', '), 'a slow or dropped connection explains many problems')
   }
-  const since = installedAt || (typeof performance !== 'undefined' ? performance.timeOrigin : 0)
+  const since = shared.installedAt || (typeof performance !== 'undefined' ? performance.timeOrigin : 0)
   if (since) {
     const min = Math.max(0, Math.round((now.getTime() - since) / 60_000))
     add('age', 'How long the page was open', min < 1 ? 'under a minute' : `${min} minute${min === 1 ? '' : 's'}`, 'some problems only start after a page has been open a while')

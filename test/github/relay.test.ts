@@ -2,7 +2,7 @@
 // push, through the operator's own GitHub App. Every refusal the relay makes has a test here.
 import { createPublicKey, generateKeyPairSync, verify } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { canFileDirectly, createAttachRelay, createSuggestionRelay, fileSuggestion, relayFiler, relayHost, toBase64 } from '../../src/github/index.ts'
+import { canFileDirectly, createAttachRelay, createSuggestionRelay, fileSuggestion, memoryUsage, relayFiler, relayHost, toBase64 } from '../../src/github/index.ts'
 
 const API = 'https://api.github.com'
 const ID = 'r-20261026170412-ab12cd'
@@ -60,7 +60,10 @@ function fakeGitHub(over: { publicKey?: string; files?: string[]; issueBody?: st
   return { fetch, calls, opened, comments }
 }
 
-const who = (req: Request) => Promise.resolve(req.headers.get('authorization') === 'Bearer member' ? { account: 'amy' } : req.headers.get('authorization') === 'Bearer ben' ? { account: 'ben' } : null)
+// Who is calling, as the host knows them: the name, role, app and contact the issue uses come from here, never the request.
+const who = (req: Request) => Promise.resolve(
+  req.headers.get('authorization') === 'Bearer member' ? { account: 'amy', name: 'Pat Okafor', role: 'member' as const, appName: 'Notes', contact: { email: 'pat@example.com' } }
+    : req.headers.get('authorization') === 'Bearer ben' ? { account: 'ben', name: 'Ben Okoro' } : null)
 const relay = (g: ReturnType<typeof fakeGitHub>, extra: Record<string, unknown> = {}) => createAttachRelay({ app: { id: 1234, privateKey: KEY.privateKey }, identity: who, fetch: g.fetch, now: () => Date.parse('2026-10-26T18:00:00Z'), ...extra })
 const post = (body: unknown, auth = 'Bearer member', method = 'POST') => new Request('https://relay.test/attach', { method, headers: { authorization: auth, 'content-type': 'application/json' }, ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) })
 const file = (over: Record<string, unknown> = {}) => ({ repo: 'acme/app', issue: 7, reportId: ID, name: 'image-1.png', type: 'image/png', bytes: toBase64(PNG), ...over })
@@ -353,5 +356,87 @@ describe('the filer\'s side: relayFiler, canFileDirectly and the choice fileSugg
     const g2 = fakeGitHub()
     const r2 = relayFiler({ url: 'https://relay.test/api/suggestions', headers: { authorization: 'Bearer member' }, fetch: wire(g2) })
     expect(await fileSuggestion({ repo: 'acme/app', relay: r2 }, { report: report(), compose: { appName: 'Notes' }, files: [{ name: 'image-1.png', type: 'image/png', bytes: PNG }] })).toMatchObject({ via: 'relay' })
+  })
+})
+
+describe('the review: who may attach, what is trusted, and what is counted', () => {
+  it('a report belongs to the first identity that files or attaches for it; anyone else is refused', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g)
+    expect((await r(act('attach', file()))).status).toBe(200) // amy attaches first: the report is hers
+    expect(await status(await r(act('attach', file({ name: 'image-2.png' }), 'Bearer ben')))).toEqual([403, 'this report belongs to someone else'])
+    const g2 = fakeGitHub()
+    const r2 = suggestions(g2)
+    expect((await r2(act('file', filing()))).status).toBe(200) // filing binds it too
+    expect((await r2(act('attach', file({ name: 'image-9.png' }), 'Bearer ben'))).status).toBe(403)
+  })
+
+  it('the proof is only the exact last line the composer writes, never "Report <id>" anywhere else', async () => {
+    const forged = `## What they said\nsee Report ${ID}.\n\n## Filed by\nSomeone (member), through Suggest a change in the app. Report r-20261026170412-zzzzzz.`
+    expect((await suggestions(fakeGitHub({ issueBody: forged }))(act('attach', file()))).status).toBe(403)
+    const trailing = `## Filed by\nA member (member), through Suggest a change in the app. Report ${ID}.\n\nmore text after`
+    expect((await suggestions(fakeGitHub({ issueBody: trailing }))(act('attach', file()))).status).toBe(403)
+  })
+
+  it('with redacted: true the relay redacts what it found itself, and never files the raw text', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g, { privacy: { people: [{ name: 'Dana Whitlock' }] } })
+    expect((await r(act('file', filing({ report: report({ words: 'ask Dana Whitlock about it' }), redacted: true })))).status).toBe(200)
+    expect(g.opened[0].body).not.toContain('Dana Whitlock')
+    expect(g.opened[0].body).toContain('[removed]')
+  })
+
+  it('the catch reads every string that reaches the issue: an email on the screen name is held', async () => {
+    const g = fakeGitHub()
+    const res = await suggestions(g)(act('file', filing({ report: report({ where: { screen: 'Inbox of sam@example.com', route: '/inbox' } }) })))
+    expect(res.status).toBe(409)
+    expect(await res.json()).toEqual({ held: true, hits: [{ kind: 'email', field: 'where.screen' }] })
+  })
+
+  it('reserves the day\'s count and bytes atomically: two filings at once under a cap of one make one issue', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g, { limits: { perPersonPerDay: 1 } })
+    const a = filing({ report: report({ id: 'r-20261026170412-aaaaaa', media: [] }), files: [] })
+    const b = filing({ report: report({ id: 'r-20261026170412-bbbbbb', media: [] }), files: [] })
+    const got = await Promise.all([r(act('file', a)), r(act('file', b))])
+    expect(got.map((x) => x.status).sort()).toEqual([200, 429])
+    expect(g.opened).toHaveLength(1)
+  })
+
+  it('refuses a body larger than the day\'s byte budget allows, before reading it', async () => {
+    const g = fakeGitHub()
+    const res = await suggestions(g, { limits: { bytesPerPersonPerDay: 1000 } })(act('file', filing({ padding: 'x'.repeat(200_000) })))
+    expect(res.status).toBe(413)
+    expect(g.calls).toHaveLength(0)
+  })
+
+  it('the name, role, app and contact come from identity(), never from the request', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g)
+    const res = await r(act('file', filing({ filerName: 'Fake Person', appName: 'Evil', report: report({ who: { member: 'someone-else', role: 'maintainer', contact: { email: 'evil@example.com' } } }) })))
+    expect(res.status).toBe(200)
+    const issue = g.opened[0]
+    expect(issue.body).toContain('Pat Okafor (member), through Suggest a change in the Notes.')
+    expect(issue.body).not.toMatch(/Fake Person|Evil|evil@example\.com|maintainer/)
+    expect(issue.body).toContain('[pat@example.com](mailto:pat@example.com)') // the request asked to share; the address is the host's
+    expect(issue.labels).toEqual(['bug', 'app:notes'])
+    // no who.contact in the report means the person unticked it: nothing is shared, whatever the host knows
+    const g2 = fakeGitHub()
+    await suggestions(g2)(act('file', filing({ report: report() })))
+    expect(g2.opened[0].body).not.toContain('## Reach them')
+    // an identity with no app name gets no app label, whatever the request says
+    const g3 = fakeGitHub()
+    expect((await suggestions(g3)(act('file', filing({ appName: 'Evil', report: report({ id: 'r-20261026170412-cccccc', media: [] }), files: [] }), 'Bearer ben'))).status).toBe(200)
+    expect(g3.opened[0].labels).toEqual(['bug'])
+  })
+
+  it('refuses a repo with a dot segment, and a follow-up on a repo the host does not allow', async () => {
+    const g = fakeGitHub()
+    expect((await suggestions(g)(act('file', filing({ repo: '../x' })))).status).toBe(400)
+    expect((await suggestions(g)(act('file', filing({ repo: 'acme/..' })))).status).toBe(400)
+    const usage = memoryUsage()
+    expect((await suggestions(g, { usage })(act('file', filing()))).status).toBe(200)
+    const closed = suggestions(g, { usage, repos: () => [] })
+    expect(await status(await closed(act('follow-up', { repo: 'acme/app', number: 101, reportId: ID, words: 'more' })))).toEqual([403, 'this account may not file on acme/app'])
   })
 })

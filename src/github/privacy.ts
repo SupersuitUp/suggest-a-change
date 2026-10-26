@@ -43,21 +43,30 @@ function entropy(s: string): number {
 }
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
-// The context fields the catch reads too: each list, and the one text field in each entry.
-const CONTEXT_FIELDS = [['items', 'value'], ['routes', 'route'], ['taps', 'label'], ['errors', 'message'], ['errors', 'frame']] as const
+/** Text as it will read once rendered: compatibility forms folded (NFKC, so fullwidth letters are letters) and invisible
+ *  format characters removed (zero-width spaces and joiners, soft hyphens, direction marks), so a split token still matches. */
+export const normalize = (s: string) => s.normalize('NFKC').replace(/\p{Cf}/gu, '')
 
-/** Every field the catch reads, with its name: words, transcript, followUps.<i>.words, and the context's
- *  context.items.<i>.value, context.routes.<i>.route, context.taps.<i>.label, context.errors.<i>.message and .frame. */
+/** EVERY string that reaches the issue, with the path it sits at: the words, the transcript, the follow-ups, where, every
+ *  diagnostic, the names given (filerName, appName), the contact's handle, and every part of the context (each item's
+ *  label, value and why, and the routes, taps and errors). Each is normalized before it is read. */
 function fields(r: Readable): [string, string][] {
   const out: [string, string][] = []
-  if (typeof r.words === 'string') out.push(['words', r.words])
-  if (typeof r.transcript === 'string') out.push(['transcript', r.transcript])
-  if (Array.isArray(r.followUps)) r.followUps.forEach((f, i) => { if (f && typeof (f as { words?: unknown }).words === 'string') out.push([`followUps.${i}.words`, (f as { words: string }).words]) })
-  const ctx = r.context as Record<string, unknown> | undefined
-  if (ctx && typeof ctx === 'object') {
-    for (const [list, field] of CONTEXT_FIELDS) {
+  const at = (path: string, v: unknown) => { if (typeof v === 'string' && v) out.push([path, normalize(v)]) }
+  const obj = (v: unknown) => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null)
+  at('words', r.words)
+  at('transcript', r.transcript)
+  if (Array.isArray(r.followUps)) r.followUps.forEach((f, i) => at(`followUps.${i}.words`, obj(f)?.words))
+  const where = obj(r.where)
+  at('where.screen', where?.screen); at('where.route', where?.route)
+  for (const [k, v] of Object.entries(obj(r.diagnostics) ?? {})) at(`diagnostics.${k}`, v)
+  at('filerName', r.filerName); at('appName', r.appName)
+  at('who.contact.handle', obj(obj(r.who)?.contact)?.handle)
+  const ctx = obj(r.context)
+  if (ctx) {
+    for (const [list, keys] of [['items', ['label', 'value', 'why']], ['routes', ['route']], ['taps', ['label']], ['errors', ['message', 'frame']]] as const) {
       const v = ctx[list]
-      if (Array.isArray(v)) v.forEach((x, i) => { const t = (x as Record<string, unknown> | null)?.[field]; if (typeof t === 'string') out.push([`context.${list}.${i}.${field}`, t]) })
+      if (Array.isArray(v)) v.forEach((x, i) => { for (const k of keys) at(`context.${list}.${i}.${k}`, obj(x)?.[k]) })
     }
   }
   return out
@@ -67,21 +76,23 @@ const digits = (s: string) => s.replace(/\D/g, '')
 export function privacyCatch(report: Readable, { people = [], secrets = [] }: CatchOptions = {}): { hits: Hit[] } {
   const hits: Hit[] = []
   const seen = new Set<string>()
-  // The sender's own way to be reached is theirs to share: it is never a hit, while anyone else's still is.
+  // The sender's own way to be reached is theirs to share: it is never a hit, while anyone else's still is. An email
+  // or phone inside the contact itself (its handle) is the sender's too; anywhere else it is a hit.
   const own = (report.who as { contact?: { email?: unknown; phone?: unknown } } | undefined)?.contact
-  const ownEmail = typeof own?.email === 'string' ? own.email.toLowerCase() : null
+  const ownEmail = typeof own?.email === 'string' ? normalize(own.email).toLowerCase() : null
   const ownPhone = typeof own?.phone === 'string' && digits(own.phone).length >= 7 ? digits(own.phone) : null
   const add = (kind: HitKind, text: string, field: string) => {
     if (kind === 'email' && ownEmail && text.toLowerCase() === ownEmail) return
     if (kind === 'phone' && ownPhone && digits(text) === ownPhone) return
+    if ((kind === 'email' || kind === 'phone') && field === 'who.contact.handle') return
     const k = `${field}\u0000${text}`
     if (seen.has(k)) return
     // A value already caught as a credential is not caught again as something smaller inside it.
     if (hits.some((h) => h.field === field && h.kind === 'credential' && h.text.includes(text))) return
     seen.add(k); hits.push({ kind, text, field })
   }
-  const keys = secrets.filter((k) => typeof k === 'string' && k.length >= 12)
-  const names = people.flatMap((p) => [p.name, ...(p.aliases ?? [])]).filter((n) => typeof n === 'string' && n.trim().split(/\s+/).length >= 2)
+  const keys = secrets.filter((k) => typeof k === 'string' && k.length >= 12).map(normalize)
+  const names = people.flatMap((p) => [p.name, ...(p.aliases ?? [])]).filter((n) => typeof n === 'string' && n.trim().split(/\s+/).length >= 2).map(normalize)
   for (const [field, text] of fields(report)) {
     for (const re of CREDENTIALS) for (const m of text.matchAll(re)) add('credential', m[0], field)
     for (const m of text.matchAll(ASSIGNED)) if (entropy(m[1]) >= 3) add('credential', m[1], field)
@@ -96,35 +107,22 @@ export function privacyCatch(report: Readable, { people = [], secrets = [] }: Ca
   return { hits }
 }
 
-/** A copy of the report with every hit replaced by `[removed]` in its own field, wherever it appears there. */
+/** A copy of the report with every hit replaced by `[removed]` in its own field, wherever it appears there. A field with a
+ *  hit comes back normalized (the form the catch read), so a hit split by an invisible character is removed too. */
 export function redact<T extends Readable>(report: T, hits: Hit[]): T {
-  const cut = (field: string, text: string) => {
+  const out = JSON.parse(JSON.stringify(report)) as Record<string, unknown>
+  for (const field of [...new Set(hits.map((h) => h.field))]) {
+    const path = field.split('.')
+    let at: unknown = out
+    for (const p of path.slice(0, -1)) at = at && typeof at === 'object' ? (at as Record<string, unknown>)[p] : undefined
+    const last = path[path.length - 1]
+    if (!at || typeof at !== 'object' || typeof (at as Record<string, unknown>)[last] !== 'string') continue
     const mine = hits.filter((h) => h.field === field).map((h) => h.text).sort((a, b) => b.length - a.length)
-    return mine.reduce((t, h) => t.split(h).join('[removed]'), text)
-  }
-  const out: Readable = { ...report }
-  if (typeof report.words === 'string') out.words = cut('words', report.words)
-  if (typeof report.transcript === 'string') out.transcript = cut('transcript', report.transcript)
-  if (Array.isArray(report.followUps)) {
-    out.followUps = report.followUps.map((f, i) => (f && typeof (f as { words?: unknown }).words === 'string' ? { ...(f as object), words: cut(`followUps.${i}.words`, (f as { words: string }).words) } : f))
-  }
-  const ctx = report.context as Record<string, unknown> | undefined
-  if (ctx && typeof ctx === 'object') {
-    const next: Record<string, unknown> = { ...ctx }
-    for (const list of ['items', 'routes', 'taps', 'errors'] as const) {
-      const v = ctx[list]
-      if (!Array.isArray(v)) continue
-      next[list] = v.map((x, i) => {
-        if (!x || typeof x !== 'object') return x
-        const copy: Record<string, unknown> = { ...(x as Record<string, unknown>) }
-        for (const [l, field] of CONTEXT_FIELDS) if (l === list && typeof copy[field] === 'string') copy[field] = cut(`context.${list}.${i}.${field}`, copy[field] as string)
-        return copy
-      })
-    }
-    out.context = next
+    ;(at as Record<string, unknown>)[last] = mine.reduce((t, h) => t.split(h).join('[removed]'), normalize((at as Record<string, string>)[last]))
   }
   return out as T
 }
+
 
 /** No credential among the hits: the owner may file it as it is. A credential only ever files without the flagged part. */
 export const mayFileAsIs = (hits: Hit[]): boolean => !hits.some((h) => h.kind === 'credential')

@@ -7,7 +7,7 @@
 // a report is decided here from the signed-in member and the explicit maintainers list, never from the
 // request. Nothing is uploaded through this server: `uploadUrl` issues a direct-to-storage link with the
 // size and type fixed, and `finalize` checks what actually landed.
-import { END, FLOW, LEGACY, STATUSES, TOLD, currentStatus, isAcceptedMedia, isReportId, mayMove, meaningFor, validIssue, validateReport, wordsFor } from '../contract.mjs'
+import { END, FLOW, LEGACY, STATUSES, TOLD, currentStatus, isAcceptedMedia, isReportId, mayMove, meaningFor, validContact, validIssue, validateReport, wordsFor } from '../contract.mjs'
 import { fileSuggestion, privacyCatch, type AttachmentHost, type Fetch, type Person } from '../github/index.ts'
 import { effectiveLimits, type Limits } from './rate.ts'
 import { ACCEPTED_TYPES, canonicalType, sameType } from './sniff.ts'
@@ -24,7 +24,7 @@ export interface FileState { pending?: { type: string; bytes: number; issuedAt?:
 export interface FollowUp { followId: string; words: string; at: string; by: string; voice: { file: string; ms: number }[] }
 export interface StoredReport {
   id: string
-  who: { member: string; role: string }
+  who: { member: string; role: string; contact?: { email?: string; phone?: string; handle?: string } }
   timeline: TimelineEntry[]
   receivedAt: string
   /** Server-side state per attachment: the upload link that was issued, and what finalize verified. */
@@ -136,6 +136,10 @@ export interface ReportHandlerOptions {
    *  a place the phone claims is dropped. On Vercel: `(req) => ({ city: decodeURIComponent(req.headers.get('x-vercel-ip-city') ?? ''),
    *  region: req.headers.get('x-vercel-ip-country-region') ?? '', country: req.headers.get('x-vercel-ip-country') ?? '' })`. */
   geo?: GeoHook
+  /** How to reach a member, from what the app knows of them. The phone only says whether to share it (by sending
+   *  `who.contact`, which it does while the person leaves it ticked); what it sent there is ignored. Without this, no
+   *  report carries a contact. A contact of the wrong shape is dropped. */
+  contactOf?(member: string): { email?: string; phone?: string; handle?: string } | null | undefined | Promise<{ email?: string; phone?: string; handle?: string } | null | undefined>
   now?: () => number
 }
 
@@ -301,8 +305,11 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
         else return bad('diagnostics values are short text')
       }
     }
-    // The sender's own way to be reached is the one part of `who` the phone may send; the contract checks its shape.
-    const contact = isObj(raw.who) && raw.who.contact !== undefined ? raw.who.contact : undefined
+    // How to reach the sender comes from the host, never the phone: the phone only says whether to share it.
+    const asked = isObj(raw.who) && raw.who.contact !== undefined
+    let contact: unknown
+    try { contact = asked && opts.contactOf ? await opts.contactOf(member) : undefined } catch { contact = undefined }
+    if (contact !== undefined && (contact === null || validContact(contact).length)) contact = undefined
     const context = raw.context === undefined && !opts.geo ? undefined : await withPlace(raw.context, req, opts.geo)
     const report: Record<string, unknown> = {
       id: raw.id, kind: raw.kind, words, media, voice: v.voice,

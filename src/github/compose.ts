@@ -187,7 +187,20 @@ function clip(s: string, max: number): string {
 /** Text that cannot become markup in the issue. */
 const html = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 /** A table cell: no markup, no pipe that ends the cell, on one line. */
-const cell = (s: string) => html(s).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
+const cell = (s: string) => inline(s).replace(/\|/g, '\\|')
+/** One line of report-borne text, made inert: no HTML, no emphasis, code, link or image syntax, no @mention, no #123
+ *  reference, on one line. Every string a report brings that is not inside a fence goes through this. */
+const inline = (s: string) => html(String(s)).replace(/[\\`*_[\]~!]/g, '\\$&').replace(/@(?=[\w-])/g, '@\u200d').replace(/#(?=\d)/g, '#\u200d').replace(/\r?\n/g, ' ')
+/** Text a person wrote, shown as they wrote it inside a fence longer than any backtick run in it, so nothing in it renders. */
+const fence = (s: string) => {
+  const run = Math.max(0, ...[...s.matchAll(/`+/g)].map((m) => m[0].length))
+  const f = '`'.repeat(Math.max(3, run + 1))
+  return `${f}\n${s}\n${f}`
+}
+/** Link text with no markdown of its own (an email address keeps its @: it is not a mention inside link text). */
+const linkText = (s: string) => html(String(s)).replace(/[\\`*_[\]~!]/g, '\\$&').replace(/\r?\n/g, ' ')
+/** Only an https link with nothing that could end or break the link may become one; anything else is not linked. */
+const safeUrl = (u: unknown): string | null => (typeof u === 'string' && /^https:\/\/[^\s()<>"'`]+$/.test(u) ? u : null)
 /** "2026-10-26T17:04:05Z" -> "17:04:05 UTC"; anything else as it is. */
 const clock = (at: string) => { const t = Date.parse(at); return Number.isFinite(t) ? `${new Date(t).toISOString().slice(11, 19)} UTC` : html(at) }
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
@@ -202,7 +215,8 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
   }
   const words = scrub(text(report.words).trim())
   const transcript = scrub(text(opts.transcript).trim())
-  const urls = opts.pending ? {} : (opts.attachmentUrls ?? {})
+  // Only links the host produced, and only plain https ones, become images or links; anything else is still "being added".
+  const urls: Record<string, string> = opts.pending ? {} : Object.fromEntries(Object.entries(opts.attachmentUrls ?? {}).flatMap(([k, u]) => (safeUrl(u) ? [[k, u]] : [])))
   const media = report.media ?? []
   const voice = report.voice ?? []
   const g = report.diagnostics ?? {}
@@ -226,10 +240,10 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
   const shown = (k: keyof TrailCut, cut: TrailCut) => full[k].slice(cut[k])
   const build = (said: string, heard: string, cut: TrailCut = { routes: 0, taps: 0, errors: 0 }): string => {
     const out: string[] = []
-    if (has.has('words')) out.push('## What they said', said, '')
+    if (has.has('words')) out.push('## What they said', fence(said), '')
     if (has.has('voice')) {
-      out.push(transcript ? "## Voice note (transcribed on the owner's Mac)" : '## Voice note', heard || 'Not transcribed.')
-      const links = voice.filter((v) => urls[v.file]).map((v) => `[${v.file}](${urls[v.file]})`)
+      out.push(transcript ? "## Voice note (transcribed on the owner's Mac)" : '## Voice note', heard ? fence(heard) : 'Not transcribed.')
+      const links = voice.filter((v) => urls[v.file]).map((v) => `[${inline(v.file)}](${urls[v.file]})`)
       if (links.length) out.push('', ...links)
       if (coming && !has.has('images') && !has.has('video')) out.push('', coming)
       out.push('')
@@ -239,13 +253,13 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
       for (const m of media) {
         const u = urls[m.file]
         if (!u) continue
-        out.push(isImage(m) ? `![${m.file}](${u})` : `[${m.file}](${u})`)
+        out.push(isImage(m) ? `![${inline(m.file)}](${u})` : `[${inline(m.file)}](${u})`)
       }
       if (coming) out.push(coming)
       out.push('')
     }
     if (has.has('where')) {
-      out.push('## Where', [text(report.where?.screen) && `Screen: ${text(report.where?.screen)}`, text(report.where?.route) && `Route: ${text(report.where?.route)}`].filter(Boolean).join(' · '), '')
+      out.push('## Where', [text(report.where?.screen) && `Screen: ${inline(text(report.where?.screen))}`, text(report.where?.route) && `Route: ${inline(text(report.where?.route))}`].filter(Boolean).join(' · '), '')
     }
     if (hasContext(report)) {
       out.push('## Context (shared so this can be fixed)', '', '| What | Value | Why |', '| --- | --- | --- |')
@@ -259,29 +273,29 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
         if (cut[k]) out.push(`(The ${cut[k]} oldest were cut to fit GitHub's limit.)`, '')
         out.push(...rows.map((x) => line(x as never)), '', '</details>', '')
       }
-      block('routes', (r: { route: string; at: string }) => `- ${clock(r.at)} ${html(r.route)}`)
-      block('taps', (t: { label: string; at: string }) => `- ${clock(t.at)} ${html(t.label)}`)
-      block('errors', (e: { message: string; frame?: string; at: string }) => `- ${clock(e.at)} ${html(e.message)}${e.frame ? `<br>${html(e.frame)}` : ''}`)
+      block('routes', (r: { route: string; at: string }) => `- ${clock(r.at)} ${inline(r.route)}`)
+      block('taps', (t: { label: string; at: string }) => `- ${clock(t.at)} ${inline(t.label)}`)
+      block('errors', (e: { message: string; frame?: string; at: string }) => `- ${clock(e.at)} ${inline(e.message)}${e.frame ? `\n  ${inline(e.frame)}` : ''}`)
     } else if (has.has('app') || has.has('device') || has.has('time')) {
       const about = [
-        has.has('app') ? `App: ${appName ? `${appName} ` : ''}${text(g.appVersion)}` : '',
-        text(g.device) ? `Device: ${text(g.device)}` : '',
-        text(g.screen) ? `Screen ${text(g.screen)}` : '',
+        has.has('app') ? `App: ${inline(`${appName ? `${appName} ` : ''}${text(g.appVersion)}`)}` : '',
+        text(g.device) ? `Device: ${inline(text(g.device))}` : '',
+        text(g.screen) ? `Screen ${inline(text(g.screen))}` : '',
         has.has('time') ? `Sent ${when(text(g.at))}` : '',
       ].filter(Boolean)
       out.push('## About', about.join(' · '), '')
     }
     if (has.has('contact') && contact) {
       const ways = [
-        contact.email ? `[${contact.email}](mailto:${contact.email})` : '',
-        contact.phone ? `[${contact.phone}](tel:${contact.phone.replace(/[^\d+]/g, '')})` : '',
-        contact.handle ? html(contact.handle) : '',
+        contact.email ? `[${linkText(contact.email)}](mailto:${encodeURIComponent(contact.email).replace(/%40/g, '@')})` : '',
+        contact.phone ? `[${linkText(contact.phone)}](tel:${contact.phone.replace(/[^\d+]/g, '')})` : '',
+        contact.handle ? inline(contact.handle) : '',
       ].filter(Boolean)
       out.push('## Reach them', 'To thank them or ask a follow-up question:', '', ...ways.map((w) => `- ${w}`), '')
     }
     const role = opts.filerRole ?? text(report.who?.role) ?? 'member'
     // "Report <id>" is exact on purpose: the attachment relay reads the issue and requires this line before it saves a file.
-    out.push('## Filed by', `${opts.filerName ?? report.filerName ?? 'A member'} (${role || 'member'}), through Suggest a change in the ${appName || 'app'}. Report ${text(report.id)}.`)
+    out.push('## Filed by', `${inline(opts.filerName ?? report.filerName ?? 'A member')} (${inline(role || 'member')}), through Suggest a change in the ${inline(appName || 'app')}. Report ${inline(text(report.id))}.`)
     return out.join('\n')
   }
 
@@ -308,7 +322,8 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
     body = build(said, heard, cut)
   }
 
-  const title = clip(firstSentence(words) || firstSentence(transcript) || `Suggestion from ${appName || 'an app'}`, 70)
+  // A title is plain text on GitHub; it still never pings anyone or links an issue.
+  const title = clip(firstSentence(words) || firstSentence(transcript) || `Suggestion from ${appName || 'an app'}`, 70).replace(/@(?=[\w-])/g, '@‍').replace(/#(?=\d)/g, '#‍')
   const labels = [LABEL[text(report.kind)] ?? 'feedback', ...(appName ? [`app:${slug(appName)}`] : [])]
   return { title, body, labels, carries }
 }

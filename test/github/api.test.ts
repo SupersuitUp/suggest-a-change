@@ -36,6 +36,15 @@ describe('fileIssue, updateIssue, addFollowUp', () => {
     expect(last.headers.accept).toBe('application/vnd.github+json')
   })
 
+  it('sends at most ten labels, and refuses a repo with a dot segment', async () => {
+    const f = fakeFetch((c) => (c.url.endsWith('/labels') ? { status: 201, body: {} } : undefined), issueRoute)
+    await fileIssue(cfg(f), { title: 'T', body: 'B', labels: Array.from({ length: 15 }, (_, i) => `l${i}`) })
+    expect(f.calls.filter((c) => c.url.endsWith('/labels'))).toHaveLength(10)
+    expect(f.calls.at(-1)!.body.labels).toHaveLength(10)
+    await expect(fileIssue({ ...cfg(f), repo: 'acme/..' }, { title: 'T', body: 'B', labels: [] })).rejects.toThrow(/owner\/name/)
+    await expect(fileIssue({ ...cfg(f), repo: '../app' }, { title: 'T', body: 'B', labels: [] })).rejects.toThrow(/owner\/name/)
+  })
+
   it('a refused issue throws with GitHub\'s status', async () => {
     const f = fakeFetch((c) => (c.url.endsWith('/issues') ? { status: 410, body: { message: 'Issues are disabled' } } : undefined))
     await expect(fileIssue(cfg(f), { title: 'T', body: 'B', labels: [] })).rejects.toMatchObject({ status: 410 })

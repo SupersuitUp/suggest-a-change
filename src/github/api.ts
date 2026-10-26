@@ -1,6 +1,9 @@
 // THE GITHUB CALLS. Web-standard fetch only, injectable so tests and any runtime can pass their own. The token is the
 // filer's (`gh auth token` on a Mac) or an app server's own; it is sent to api.github.com and nowhere else.
+import { isRepoName } from '../contract.mjs'
 import { composeIssue, type ComposeOptions, type Draft } from './compose.ts'
+/** An issue carries at most this many labels (the composer writes two). */
+const MAX_LABELS = 10
 import type { AttachmentHost, AttachmentFile } from './hosts.ts'
 import { canFileDirectly, type RelayFiler } from './filer.ts'
 
@@ -14,9 +17,8 @@ export class GitHubError extends Error {
 }
 
 const API = 'https://api.github.com'
-const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 function repoOf(repo: string): string {
-  if (!REPO.test(repo)) throw new Error(`${JSON.stringify(repo)} is not owner/name`)
+  if (!isRepoName(repo)) throw new Error(`${JSON.stringify(repo)} is not owner/name`)
   return repo
 }
 
@@ -46,12 +48,13 @@ const COLORS: Record<string, string> = { bug: 'd73a4a', enhancement: 'a2eeef', f
  *  (403/404: a read-only filer) is skipped, and GitHub then keeps only the labels the filer may set. */
 export async function fileIssue(cfg: GitHubConfig, issue: { title: string; body: string; labels: string[] }): Promise<{ number: number; url: string }> {
   const repo = repoOf(cfg.repo)
-  for (const name of issue.labels) {
+  const labels = issue.labels.filter((l) => typeof l === 'string' && l.length && l.length <= 50).slice(0, MAX_LABELS)
+  for (const name of labels) {
     try { await github(cfg, 'POST', `/repos/${repo}/labels`, { name, color: COLORS[name] ?? 'ededed' }) } catch (e) {
       if (!(e instanceof GitHubError) || ![403, 404, 422].includes(e.status)) throw e
     }
   }
-  const got = await github(cfg, 'POST', `/repos/${repo}/issues`, { title: issue.title, body: issue.body, labels: issue.labels })
+  const got = await github(cfg, 'POST', `/repos/${repo}/issues`, { title: issue.title, body: issue.body, labels })
   return { number: got.body.number, url: got.body.html_url }
 }
 

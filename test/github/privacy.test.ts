@@ -78,6 +78,33 @@ describe('the sender\'s own contact, and the context', () => {
   })
 })
 
+describe('every string that reaches the issue, normalized first', () => {
+  it('sees through zero-width characters and look-alike letters', () => {
+    const split = 'gh​p_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'
+    expect(kinds(privacyCatch(report(`token ${split}`)))).toEqual(['credential'])
+    expect(kinds(privacyCatch(report('ｓａｍ＠ｅｘａｍｐｌｅ．ｃｏｍ')))).toEqual(['email']) // fullwidth letters
+    expect(kinds(privacyCatch(report('ask Dana‍ Whitlock'), { people: [{ name: 'Dana Whitlock' }] }))).toEqual(['person'])
+  })
+
+  it('reads where, every diagnostic, every part of a context item, the names given, and the contact handle', () => {
+    const key = 'AKIA' + 'IOSFODNN7EXAMPLE'
+    const r = report('fine', {
+      where: { screen: 'Inbox of sam@example.com', route: '/u/sam@example.com' },
+      diagnostics: { device: `iPhone ${key}` },
+      context: { items: [{ key: 'app:0', label: 'Owner Dana Whitlock', value: 'v', why: 'call (917) 679-0317' }] },
+      filerName: 'Pat', appName: `App ${key}`,
+      who: { member: 'amy', role: 'member', contact: { handle: `@pat ${key}` } },
+    })
+    const fields = privacyCatch(r, { people: [{ name: 'Dana Whitlock' }] }).hits.map((h) => `${h.kind}:${h.field}`)
+    expect(fields).toEqual(expect.arrayContaining(['email:where.screen', 'email:where.route', 'credential:diagnostics.device', 'person:context.items.0.label', 'phone:context.items.0.why', 'credential:appName', 'credential:who.contact.handle']))
+    const out = redact(r, privacyCatch(r, { people: [{ name: 'Dana Whitlock' }] }).hits) as Record<string, any>
+    expect(out.where.screen).toBe('Inbox of [removed]')
+    expect(out.diagnostics.device).toBe('iPhone [removed]')
+    expect(out.context.items[0].label).toBe('Owner [removed]')
+    expect(out.appName).toBe('App [removed]')
+  })
+})
+
 describe('redact and mayFileAsIs', () => {
   it('replaces each hit with [removed], in its own field, everywhere it appears', () => {
     const r = report('mail a@b.co or a@b.co', { transcript: 'token=9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a', followUps: [{ words: 'a@b.co' }] })

@@ -54,6 +54,48 @@ describe('the trail, kept in memory from the moment the module mounts', () => {
     expect(contextTrail().errors).toHaveLength(10)
   })
 
+  it('never takes text from anything someone types into: contenteditable, text roles, or inside a form field', () => {
+    document.body.innerHTML = `
+      <div id="ce" contenteditable="true"><p id="ce-inner">my private draft</p></div>
+      <div id="tb" role="textbox">typed words</div>
+      <div id="sb" role="searchbox">search terms</div>
+      <div id="cb" role="combobox">chosen thing</div>
+      <select id="sel"><option id="opt">secret choice</option></select>`
+    for (const id of ['ce-inner', 'tb', 'sb', 'cb', 'opt']) document.getElementById(id)!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(contextTrail().taps.map((t) => t.label)).toEqual(['a text field', 'a text field', 'a text field', 'a text field', 'a menu'])
+    expect(JSON.stringify(contextTrail())).not.toMatch(/private draft|typed words|search terms|chosen thing|secret choice/)
+  })
+
+  it('a route\'s id-like segments become :id, so no id, token or address travels in the trail', () => {
+    for (const path of ['/notes/3f2a9c1e-8b7d-4c6e-9f1a-2b3c4d5e6f70/edit', '/share/aB3dE5fG7hJ9kL1mN3pQ', '/users/12345', '/doc/0123456789abcdef0123', '/settings/notifications', '/page-2']) history.pushState({}, '', path)
+    expect(contextTrail().routes.map((r) => r.route).slice(-6)).toEqual(['/notes/:id/edit', '/share/:id', '/users/:id', '/doc/:id', '/settings/notifications', '/page-2'])
+  })
+
+  it('resetting never undoes a wrapper the host put on history after ours', () => {
+    let hostCalls = 0
+    const ours = history.pushState
+    history.pushState = function (...a: Parameters<History['pushState']>) { hostCalls++; return ours.apply(this, a) }
+    const host = history.pushState
+    resetContext()
+    expect(history.pushState).toBe(host)
+    history.pushState({}, '', '/after-reset')
+    expect(hostCalls).toBe(1)
+    history.pushState = ours // leave the page as it was
+  })
+
+  it('installs once across two bundled copies of the module', async () => {
+    vi.resetModules()
+    const other = await import('../../src/client/context.ts')
+    const before = { push: history.pushState, error: console.error }
+    other.installContextListeners()
+    expect(history.pushState).toBe(before.push) // the second copy wraps nothing again
+    expect(console.error).toBe(before.error)
+    document.body.innerHTML = '<button id="b2">Twice?</button>'
+    document.getElementById('b2')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(other.contextTrail().taps.filter((t) => t.label === 'Twice?')).toHaveLength(1)
+    expect(contextTrail().taps.filter((t) => t.label === 'Twice?')).toHaveLength(1) // and both copies see the one trail
+  })
+
   it('installs once, however many screens mount it', () => {
     installContextListeners(); installContextListeners()
     document.body.innerHTML = '<button id="b">Once</button>'

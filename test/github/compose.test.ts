@@ -173,7 +173,7 @@ describe('the context, shared so it can be fixed, and a way to reach them', () =
     expect(body).toContain('To thank them or ask a follow-up question:')
     expect(body).toContain('[pat@example.com](mailto:pat@example.com)')
     expect(body).toContain('[+1 917 555 0100](tel:+19175550100)')
-    expect(body).toContain('@pat')
+    expect(body).toContain('@‍pat') // a handle never pings anyone on GitHub
     expect(composeIssue(withCtx({ who: { member: 'x', role: 'member' } }), opts).body).not.toContain('## Reach them')
   })
 
@@ -198,6 +198,26 @@ describe('the context, shared so it can be fixed, and a way to reach them', () =
   it('the way to reach them is on for a private repo and off, with the reason, for a public one', () => {
     expect(whatGoes(withCtx(), dest).find((i) => i.key === 'contact')).toMatchObject({ optional: true, on: true, value: 'pat@example.com · +1 917 555 0100 · @pat' })
     expect(whatGoes(withCtx(), { ...dest, public: true }).find((i) => i.key === 'contact')).toMatchObject({ optional: true, on: false, reason: 'this repo is public, so anyone could read it' })
+  })
+
+  it('neutralizes markdown in every report-borne string: no mentions, references, images or raw HTML', () => {
+    const evil = '@everyone #12 ![x](https://evil.example/x.png) <img src=x onerror=alert(1)> **bold** [link](https://evil.example)'
+    const r = withCtx({
+      words: 'look ```` here\n' + evil,
+      where: { screen: evil, route: '/notes' },
+      context: { ...ctx(), items: [{ key: 'app:0', label: evil, value: evil, why: evil }], taps: [{ label: evil, at: 'x' }], errors: [{ message: evil, frame: evil, at: 'x' }] },
+      who: { member: 'x', role: 'member', contact: { email: 'pat@example.com', handle: '[me](javascript:alert(1)) @pat' } },
+    })
+    const { body } = composeIssue(r, { ...opts, filerName: '@everyone ![a](https://evil.example/a.png)', transcript: '```\n' + evil + '\n```' })
+    // the words and the transcript sit in fences longer than any backtick run inside them
+    expect(body).toContain('`````\nlook ```` here\n@everyone')
+    // outside the fences: no live mention, reference, image, link or tag
+    const outside = body.replace(/(`{3,})[^\n]*\n[\s\S]*?\n\1(?=\n|$)/g, '')
+    // (an escaped bracket, `\]`, is inert: only an unescaped `](` makes a link)
+    expect(outside).not.toMatch(/@everyone|#12|!\[x\]\(|<img|\[link\]\(https:\/\/evil|(^|[^\\])\]\(javascript:/)
+    expect(outside).not.toMatch(/(^|\s)@pat/)
+    // the only images are the attachments the host produced
+    expect([...outside.matchAll(/(?<!\\)!\[[^\]]*\]\(([^)]+)\)/g)].map((m) => m[1])).toEqual([urls['image-1.png'], urls['image-2.jpg']])
   })
 
   it('stays under the body limit by cutting the trail first, before the transcript', () => {
