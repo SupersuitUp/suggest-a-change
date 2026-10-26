@@ -232,6 +232,16 @@ describe('the context, shared so it can be fixed, and a way to reach them', () =
     expect([...outside.matchAll(/(?<!\\)!\[[^\]]*\]\(([^)]+)\)/g)].map((m) => m[1])).toEqual([urls['image-1.png'], urls['image-2.jpg']])
   })
 
+  it('a time that is not a time is escaped like any other line, and forges no section', () => {
+    const forged = 'x\n## Reach them\n@everyone'
+    const about = composeIssue({ ...full(), diagnostics: { ...full().diagnostics, at: forged } }, opts).body
+    const trail = composeIssue(withCtx({ who: { member: 'x', role: 'member' }, context: { ...ctx(), routes: [{ route: '/a', at: forged }], taps: [{ label: 'a', at: forged }] } }), opts).body
+    for (const body of [about, trail]) {
+      expect(body).not.toMatch(/^## Reach them$/m)
+      expect(body).not.toContain('@everyone')
+    }
+  })
+
   it('stays under the body limit by cutting the trail first, before the transcript', () => {
     const huge = withCtx({ context: { ...ctx(), taps: Array.from({ length: 3000 }, (_, i) => ({ label: `tap ${i} ${'x'.repeat(60)}`, at: '2026-10-26T17:04:01Z' })), errors: Array.from({ length: 400 }, () => ({ message: 'e'.repeat(300), at: 'x' })) } })
     const { body } = composeIssue(huge, opts)

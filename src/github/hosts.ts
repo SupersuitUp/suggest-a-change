@@ -80,7 +80,11 @@ export function branchHost({ repo, token, branch = ATTACHMENTS_BRANCH, fetch, re
       try {
         await github(cfg, 'PUT', `/repos/${repo}/contents/${path}`, { message: `Attach ${file.name} to ${target.reportId}`, content: toBase64(file.bytes), branch })
       } catch (e) {
-        if (!(e instanceof GitHubError) || e.status !== 422) throw e // 422: already there, written once
+        if (!(e instanceof GitHubError) || e.status !== 422) throw e
+        // A 422 means "already there" only if it is there: look, and pass any other refusal on as it came.
+        let there = false
+        try { await github(cfg, 'GET', `/repos/${repo}/contents/${path}?ref=${branch}`); there = true } catch (g) { if (!(g instanceof GitHubError) || g.status !== 404) throw g }
+        if (!there) throw e
         if (refuseExisting) throw new GitHubError(`${path} is already written`, 409, e.body)
       }
       return { url: attachmentUrl(repo, branch, path) }

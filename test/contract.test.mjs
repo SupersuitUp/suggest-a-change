@@ -133,6 +133,27 @@ test("a report may carry its context, and the context's shape is checked", () =>
   ]) assert.ok(C.validateReport(good({ context: bad })).some((e) => /context/.test(e)), what);
 });
 
+test("every time a report carries is a short ISO time, nothing else", () => {
+  const forged = "x\n## Reach them\n@everyone";
+  assert.ok(C.validateReport(good({ diagnostics: { appVersion: "1", at: forged } })).some((e) => /diagnostics\.at/.test(e)));
+  assert.ok(C.validateReport(good({ diagnostics: { at: "2026-10-12T17:45:00Z".repeat(3) } })).some((e) => /diagnostics\.at/.test(e)));
+  assert.deepEqual(C.validateReport(good({ diagnostics: { at: "2026-10-12T17:45:00.123Z" } })), []);
+  assert.deepEqual(C.validateReport(good({ diagnostics: { at: "2026-10-12T12:45:00-05:00" } })), []);
+  for (const list of ["routes", "taps", "errors"]) {
+    const entry = list === "routes" ? { route: "/a" } : list === "taps" ? { label: "a" } : { message: "e" };
+    assert.ok(C.validateReport(good({ context: { [list]: [{ ...entry, at: forged }] } })).some((e) => /context/.test(e)), list);
+    assert.deepEqual(C.validateReport(good({ context: { [list]: [{ ...entry, at: "2026-10-12T17:45:00Z" }] } })), [], list);
+  }
+});
+
+test("a report id's random part comes from the platform's secure random source", () => {
+  const real = globalThis.crypto.getRandomValues.bind(globalThis.crypto);
+  let asked = 0;
+  globalThis.crypto.getRandomValues = (a) => { asked++; return real(a); };
+  try { assert.match(C.newReportId(), /^r-\d{14}-[a-z0-9]{6}$/); } finally { globalThis.crypto.getRandomValues = real; }
+  assert.ok(asked > 0);
+});
+
 test("a report may carry the issue it became, and its shape is checked", () => {
   const issue = { repo: "acme/notes", number: 12, url: "https://github.com/acme/notes/issues/12" };
   assert.deepEqual(C.validateReport(good({ issue })), []);

@@ -62,9 +62,12 @@ function fields(r: Readable): [string, string][] {
   for (const [k, v] of Object.entries(obj(r.diagnostics) ?? {})) at(`diagnostics.${k}`, v)
   at('filerName', r.filerName); at('appName', r.appName)
   at('who.contact.handle', obj(obj(r.who)?.contact)?.handle)
+  // The names of the files, which the issue shows as link text.
+  if (Array.isArray(r.files)) r.files.forEach((f, i) => at(`files.${i}.name`, typeof f === 'string' ? f : obj(f)?.name))
+  if (Array.isArray(r.files)) r.files.forEach((f, i) => at(`files.${i}.name`, typeof f === 'string' ? f : obj(f)?.name))
   const ctx = obj(r.context)
   if (ctx) {
-    for (const [list, keys] of [['items', ['label', 'value', 'why']], ['routes', ['route']], ['taps', ['label']], ['errors', ['message', 'frame']]] as const) {
+    for (const [list, keys] of [['items', ['label', 'value', 'why']], ['routes', ['route', 'at']], ['taps', ['label', 'at']], ['errors', ['message', 'frame', 'at']]] as const) {
       const v = ctx[list]
       if (Array.isArray(v)) v.forEach((x, i) => { for (const k of keys) at(`context.${list}.${i}.${k}`, obj(x)?.[k]) })
     }

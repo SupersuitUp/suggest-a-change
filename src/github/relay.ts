@@ -15,7 +15,7 @@ import { cappedText, json } from '../server/http.ts'
 import { ACCEPTED_TYPES, canonicalType, sameType, sniffType } from '../server/sniff.ts'
 import { withPlace, type GeoHook } from '../server/geo.ts'
 import { addFollowUp, fileIssue, github, GitHubError, issueStates, issueStatus, type Fetch } from './api.ts'
-import { composeIssue } from './compose.ts'
+import { BODY_LIMIT, composeIssue, endsWithFiledBy } from './compose.ts'
 import { ATTACHMENTS_BRANCH, attachmentUrl, branchHost } from './hosts.ts'
 import { privacyCatch, redact, type Person } from './privacy.ts'
 
@@ -65,7 +65,15 @@ export interface RelayUsage {
   /** A report belongs to the first identity that files or attaches for it: 'ok' for that identity, 'taken' for anyone else. */
   bind(repo: string, reportId: string, account: string): Promise<'ok' | 'taken'>
   /** Starts filing a report, first caller wins: 'go', or 'busy' while another filing of it runs, or the record of the issue it already became. */
-  begin(repo: string, reportId: string, account: string): Promise<{ state: 'go' } | { state: 'busy' } | ({ state: 'filed' } & FiledRecord)>
+  /** Starts filing a report under a lease of `leaseMs`, first caller wins: 'go', or 'busy' while another filing of it holds a
+   *  live lease, or the record of the issue it already became. A lease past its time is taken over (its process died). */
+  begin(repo: string, reportId: string, account: string, leaseMs: number): Promise<{ state: 'go' } | { state: 'busy' } | ({ state: 'filed' } & FiledRecord)>
+  /** upload-url issued a link for this staging key, for at most `bytes`: a later read is bounded by it. */
+  stage(key: string, bytes: number): Promise<void>
+  /** The bytes upload-url held for this key, or null when it never issued one. */
+  staged(key: string): Promise<number | null>
+  /** The staged file was written and discarded: forget its key. */
+  unstage(key: string): Promise<void>
   /** The filing that began succeeded: keep the record, by report and by issue number. */
   finish(repo: string, record: FiledRecord): Promise<void>
   /** The filing that began failed: forget it, so a retry can begin again. */
@@ -76,12 +84,13 @@ export interface RelayUsage {
 /** In memory, so ONE SERVER INSTANCE ONLY: a platform that runs several instances (most serverless hosts) needs a store
  *  backed by its database, or the caps, the idempotency and who-filed-what are per instance and lost on restart. Each
  *  method below changes what it checks before it yields, which is what makes it atomic in one process. */
-export function memoryUsage(): RelayUsage {
+export function memoryUsage({ now = () => Date.now() }: { now?: () => number } = {}): RelayUsage {
+  const stagedSizes = new Map<string, number>()
   const days = new Map<string, Set<string>>()
   const bytes = new Map<string, number>()
   const held = new Map<string, { k: string; reportId: string; counted: boolean; bytes: number }>()
   const owners = new Map<string, string>()
-  const filings = new Map<string, { state: 'busy' } | ({ state: 'filed' } & FiledRecord)>()
+  const filings = new Map<string, { state: 'busy'; until: number } | ({ state: 'filed' } & FiledRecord)>()
   const issues = new Map<string, FiledRecord>()
   let n = 0
   return {
@@ -105,7 +114,17 @@ export function memoryUsage(): RelayUsage {
       bytes.set(h.k, Math.max(0, (bytes.get(h.k) ?? 0) - h.bytes))
     },
     async bind(repo, r, a) { const k = `${repo}#${r}`; const had = owners.get(k); if (had === undefined) { owners.set(k, a); return 'ok' } return had === a ? 'ok' : 'taken' },
-    async begin(repo, r) { const k = `${repo}#${r}`; const had = filings.get(k); if (had) return had; filings.set(k, { state: 'busy' }); return { state: 'go' } },
+    async begin(repo, r, _a, leaseMs) {
+      const k = `${repo}#${r}`
+      const had = filings.get(k)
+      if (had?.state === 'filed') return had
+      if (had?.state === 'busy' && had.until > now()) return { state: 'busy' }
+      filings.set(k, { state: 'busy', until: now() + leaseMs })
+      return { state: 'go' }
+    },
+    async stage(k, b) { stagedSizes.set(k, b) },
+    async staged(k) { return stagedSizes.get(k) ?? null },
+    async unstage(k) { stagedSizes.delete(k) },
     async finish(repo, rec) { filings.set(`${repo}#${rec.reportId}`, { state: 'filed', ...rec }); issues.set(`${repo}#${rec.number}`, rec) },
     async abandon(repo, r) { const k = `${repo}#${r}`; if (filings.get(k)?.state === 'busy') filings.delete(k) },
     async filer(repo, num) { return issues.get(`${repo}#${num}`) ?? null },
@@ -119,6 +138,9 @@ export interface RelayIdentity {
   /** The name the issue says it was filed by; "Someone" without one. */
   name?: string
   role?: 'operator' | 'member' | 'maintainer'
+  /** The GitHub login this person files under, when the host knows it: `attach` to an issue the relay did not file
+   *  is accepted only when that issue was opened by this login. */
+  githubLogin?: string
   /** How to reach them, shared only when the request asks (the person left it ticked). */
   contact?: { email?: string; phone?: string; handle?: string }
 }
@@ -162,6 +184,8 @@ export interface StagingAdapter {
   discard(key: string): Promise<void>
 }
 
+/** How long a filing holds its report before another try may take it over (its process is presumed dead). */
+export const FILING_LEASE_MS = 5 * 60_000
 const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 const B64 = /^[A-Za-z0-9+/]+={0,2}$/
 const ACTIONS = ['file', 'follow-up', 'status', 'attach', 'upload-url'] as const
@@ -288,10 +312,14 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
       if (!opts.staging) return bad(`${x.name} is staged, and this relay has no staging`)
       if (x.staged !== true && x.staged !== x.name) return bad(`${x.name} is staged under another name`)
       stagedKey = stageKey(account, reportId, x.name)
+      const heldFor = await usage.staged(stagedKey)
+      if (heldFor === null) return bad(`${x.name} was never uploaded; ask upload-url for a link and put it there first`)
       const got = await opts.staging.read(stagedKey)
       if (!got) return bad(`${x.name} was never uploaded; ask upload-url for a link and put it there first`)
-      bytes = await bytesOf(got, kindCap(kind))
-      if (!bytes) return json(413, { error: `${x.name} is larger than the ${kindCap(kind)} bytes allowed` })
+      // Read with a counter, stopping past what upload-url held for it (and the kind's own cap).
+      const limit = Math.min(heldFor, kindCap(kind))
+      bytes = await bytesOf(got, limit)
+      if (!bytes) return json(413, { error: `${x.name} is larger than the ${limit} bytes it was given a link for` })
     } else {
       bytes = typeof x.bytes === 'string' ? fromBase64(x.bytes) : null
       if (!bytes || !bytes.length) return bad(`${x.name} is not base64`)
@@ -309,7 +337,27 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
   }
   /** The bytes a request still has to hold today: inline files only, since upload-url held a staged file's up front. */
   const inlineBytesOf = (files: Checked[]) => files.reduce((n, f) => n + (f.stagedKey ? 0 : f.bytes.length), 0)
-  const discardStaged = async (files: Checked[]) => { for (const f of files) if (f.stagedKey) { try { await opts.staging?.discard(f.stagedKey) } catch { /* the bucket's own expiry catches it */ } } }
+  const discardStaged = async (files: Checked[]) => {
+    for (const f of files) if (f.stagedKey) { try { await opts.staging?.discard(f.stagedKey); await usage.unstage(f.stagedKey) } catch { /* the bucket's own expiry catches it */ } }
+  }
+  /** One request's files: each name once, and no more of each kind than a report may carry. */
+  const checkMany = async (list: unknown[], declared: (name: unknown) => string | undefined | false, account: string, reportId: string): Promise<Checked[] | Response> => {
+    const seen = new Set<string>()
+    const out: Checked[] = []
+    for (const f of list) {
+      const name = (f as { name?: unknown })?.name
+      if (typeof name === 'string' && seen.has(name)) return bad(`${name} is listed twice`)
+      if (typeof name === 'string') seen.add(name)
+      const want = declared(name)
+      if (want === false) return bad(`${String(name)} is not a file the report declares`)
+      const c = await checkFile(f, want === 'audio/*' ? undefined : want, account, reportId); if (c instanceof Response) return c
+      if (want === 'audio/*' && c.kind !== 'voice') return json(422, { error: `${c.name} is a voice note and is not audio` })
+      out.push(c)
+    }
+    const count = (k: Checked['kind']) => out.filter((c) => c.kind === k).length
+    if (count('image') > limits.images || count('video') > limits.videos || count('voice') > limits.voice) return bad(`a request carries at most ${limits.images} pictures, ${limits.videos} video and ${limits.voice} recordings`)
+    return out
+  }
 
   /** The catch, on the relay, over every string that would reach the issue. A credential refuses by its kind (never its
    *  text). Anything else holds, unless the filer says they redacted: then the relay redacts what it found itself and
@@ -354,14 +402,9 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     if (problems.length) return json(400, { error: 'the report is not valid', problems })
     const reportId = String(report.id)
     const declared = [...((report.media as { file: string; type: string }[]) ?? []).map((m) => [m.file, m.type] as const), ...((report.voice as { file: string }[]) ?? []).map((v) => [v.file, 'audio/*'] as const)]
-    const files: Checked[] = []
-    for (const f of Array.isArray(body.files) ? body.files : []) {
-      const want = declared.find(([n]) => n === (f as { name?: unknown })?.name)
-      if (!want) return bad(`${String((f as { name?: unknown })?.name)} is not a file the report declares`)
-      const c = await checkFile(f, want[1] === 'audio/*' ? undefined : want[1], account, reportId); if (c instanceof Response) return c
-      if (want[1] === 'audio/*' && c.kind !== 'voice') return json(422, { error: `${c.name} is a voice note and is not audio` })
-      files.push(c)
-    }
+    const checked = await checkMany(Array.isArray(body.files) ? body.files : [], (n) => declared.find(([d]) => d === n)?.[1] ?? false, account, reportId)
+    if (checked instanceof Response) return checked
+    const files = checked
     // The app is the host's: a request names one by its id in the host's table, or none.
     const appId = body.app
     if (appId !== undefined && opts.apps && (typeof appId !== 'string' || !Object.prototype.hasOwnProperty.call(opts.apps, appId))) return bad('unknown app')
@@ -373,14 +416,19 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
       words: report.words, followUps: report.followUps, where: report.where, diagnostics: report.diagnostics,
       context: report.context, transcript: typeof body.transcript === 'string' ? body.transcript : undefined,
       filerName: me.name, appName: app?.name, who: { contact },
+      files: files.map((f) => ({ name: f.name })),
     }
+    // A hit in a file name cannot be redacted (the file is named by it): it holds the report whatever the filer said.
+    const nameHits = privacyCatch({ files: readable.files }, { people: opts.privacy?.people ?? [], secrets: [...(opts.privacy?.secrets ?? []), account] }).hits
+    if (nameHits.some((h) => h.kind === 'credential')) return json(422, { error: 'a credential was found in a file name; it is never filed', kinds: ['credential'] })
+    if (nameHits.length) return json(409, { held: true, hits: nameHits.map((h) => ({ kind: h.kind, field: h.field })) })
     const caught = catchIt(readable, account, body.redacted === true); if ('res' in caught) return caught.res
     const clean = caught.clean as typeof readable
     const context = clean.context !== undefined || opts.geo ? await withPlace(clean.context, req, opts.geo) : undefined
 
     if ((await usage.bind(repo, reportId, account)) === 'taken') return json(409, { error: 'that report id is taken; start the suggestion again' })
     // Once per report: a repeat answers the issue it already became.
-    const began = await usage.begin(repo, reportId, account)
+    const began = await usage.begin(repo, reportId, account, FILING_LEASE_MS)
     if (began.state === 'filed') return began.account === account ? json(200, { number: began.number, url: began.url }) : json(409, { error: 'that report id is taken; start the suggestion again' })
     if (began.state === 'busy') return json(409, { error: 'that report is being filed right now; try again in a moment' })
     const held = await reserve(account, reportId, inlineBytesOf(files))
@@ -392,7 +440,10 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
       const attachmentUrls: Record<string, string> = {}
       for (const f of files) attachmentUrls[f.name] = (await host.put({ repo, issue: 0, reportId }, { name: f.name, type: f.type, bytes: f.bytes })).url
       const role = me.role ?? 'member'
-      const issue = composeIssue({ ...report, words: clean.words, where: clean.where, diagnostics: clean.diagnostics, ...(context !== undefined ? { context } : {}), who: { role, ...(clean.who.contact ? { contact: clean.who.contact } : {}) } } as never, {
+      // The report's own app and filer names, if a request put any there, never reach the issue: only the host's do.
+      const { appName: _a, filerName: _f, ...plain } = report
+      void _a; void _f
+      const issue = composeIssue({ ...plain, words: clean.words, where: clean.where, diagnostics: clean.diagnostics, ...(context !== undefined ? { context } : {}), who: { role, ...(clean.who.contact ? { contact: clean.who.contact } : {}) } } as never, {
         appName: typeof clean.appName === 'string' ? clean.appName.slice(0, 100) : undefined,
         appLabel: app ? app.label : null,
         appVersion: appVersion?.slice(0, 50),
@@ -402,8 +453,13 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
         attachmentUrls,
       })
       const made = await fileIssue({ repo, token, fetch: opts.fetch, api: opts.api }, issue)
-      await usage.finish(repo, { account, reportId, number: made.number, url: made.url })
-      await usage.commit(held.token)
+      // The issue exists now. Record it (the store is asked again if it blinks); a filing that made an issue is never
+      // abandoned, so a retry answers this issue, or waits out the lease, and never opens a second one.
+      const record = { account, reportId, number: made.number, url: made.url }
+      for (let attempt = 0; ; attempt++) {
+        try { await usage.finish(repo, record); break } catch (e) { if (attempt >= 2) { void e; break } }
+      }
+      try { await usage.commit(held.token) } catch { /* the day's count is best effort once the issue exists */ }
       await discardStaged(files)
       return json(200, { number: made.number, url: made.url })
     } catch (e) { await usage.abandon(repo, reportId); await usage.release(held.token); return gone(e) }
@@ -418,25 +474,37 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     const refused = await allowed(account, repo); if (refused) return refused
     const rec = await usage.filer(repo, number as number)
     if (!rec || rec.account !== account || rec.reportId !== reportId) return json(403, { error: 'only the person who filed it may add to it' })
-    const files: Checked[] = []
-    for (const f of Array.isArray(body.files) ? body.files : []) { const c = await checkFile(f, undefined, account, reportId); if (c instanceof Response) return c; files.push(c) }
-    const readable = { words: typeof body.words === 'string' ? body.words.slice(0, 20_000) : '', transcript: typeof body.transcript === 'string' ? body.transcript : undefined }
+    const checked = await checkMany(Array.isArray(body.files) ? body.files : [], () => undefined, account, reportId)
+    if (checked instanceof Response) return checked
+    const files = checked
+    const readable = { words: typeof body.words === 'string' ? body.words.slice(0, 20_000) : '', transcript: typeof body.transcript === 'string' ? body.transcript : undefined, files: files.map((f) => ({ name: f.name })) }
     const caught = catchIt(readable, account, body.redacted === true); if ('res' in caught) return caught.res
     const { words, transcript } = caught.clean
     if (!words.trim() && !transcript && !files.length) return bad('a follow-up needs words or a file')
+    // The comment is composed, and measured, BEFORE anything is written: a file's link is known from its path.
+    const folder = `attachments/${reportId}`
+    const links = files.map((f) => { const url = attachmentUrl(repo, ATTACHMENTS_BRANCH, `${folder}/${f.name}`); return f.kind === 'image' ? `![${f.name}](${url})` : `[${f.name}](${url})` })
+    // A follow-up is the person's own words, so it sits in a fence like the words of the report.
+    const fenced = (s: string) => { const run = Math.max(0, ...[...s.matchAll(/`+/g)].map((m) => m[0].length)); const f = '`'.repeat(Math.max(3, run + 1)); return `${f}\n${s}\n${f}` }
+    const text = ['## Added later', words.trim() ? fenced(words.trim()) : '', transcript ? `\n### Voice note\n${fenced(transcript.trim())}` : '', links.length ? `\n${links.join('\n')}` : ''].filter(Boolean).join('\n')
+    if (text.length > BODY_LIMIT) return json(413, { error: `that follow-up is longer than GitHub takes in a comment (${BODY_LIMIT} characters)` })
     const held = await reserve(account, reportId, inlineBytesOf(files))
     if (held instanceof Response) return held
     try {
       const token = await repoToken(repo); if (token instanceof Response) { await usage.release(held.token); return token }
-      const host = branchHost({ repo, token, fetch: opts.fetch })
-      const links: string[] = []
-      for (const f of files) {
-        const { url } = await host.put({ repo, issue: number as number, reportId }, { name: f.name, type: f.type, bytes: f.bytes })
-        links.push(f.kind === 'image' ? `![${f.name}](${url})` : `[${f.name}](${url})`)
+      // The report's own caps hold across follow-ups, as they do for attach.
+      if (files.length) {
+        let names: string[] = []
+        try { names = ((await github({ ...cfgBase, token }, 'GET', `/repos/${repo}/contents/${folder}?ref=${ATTACHMENTS_BRANCH}`)).body as { name: string }[]).map((x) => x.name) }
+        catch (e) { if (!(e instanceof GitHubError) || e.status !== 404) throw e }
+        for (const f of files) if (names.includes(f.name)) { await usage.release(held.token); return json(409, { error: `${folder}/${f.name} is already written` }) }
+        for (const k of ['image', 'video', 'voice'] as const) {
+          const room = k === 'image' ? limits.images : k === 'video' ? limits.videos : limits.voice
+          if (names.filter((n) => kindByName(n) === k).length + files.filter((f) => f.kind === k).length > room) { await usage.release(held.token); return json(422, { error: `this report has all the ${k === 'voice' ? 'recordings' : `${k}s`} it can carry` }) }
+        }
       }
-      // A follow-up is the person's own words, so it sits in a fence like the words of the report.
-      const fenced = (s: string) => { const run = Math.max(0, ...[...s.matchAll(/`+/g)].map((m) => m[0].length)); const f = '`'.repeat(Math.max(3, run + 1)); return `${f}\n${s}\n${f}` }
-      const text = ['## Added later', words.trim() ? fenced(words.trim()) : '', transcript ? `\n### Voice note\n${fenced(transcript.trim())}` : '', links.length ? `\n${links.join('\n')}` : ''].filter(Boolean).join('\n')
+      const host = branchHost({ repo, token, fetch: opts.fetch })
+      for (const f of files) await host.put({ repo, issue: number as number, reportId }, { name: f.name, type: f.type, bytes: f.bytes })
       const got = await addFollowUp({ repo, token, fetch: opts.fetch, api: opts.api }, number as number, text)
       await usage.commit(held.token)
       await discardStaged(files)
@@ -467,13 +535,6 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     } catch (e) { return gone(e) }
   }
 
-  /** The proof an issue carries a report: its body ENDS with the composer's own "## Filed by" line for that report.
-   *  "Report <id>" anywhere else proves nothing. */
-  const carries = (body: string, reportId: string) => {
-    const lines = body.replace(/\s+$/, '').split('\n')
-    const last = lines[lines.length - 1] ?? ''
-    return lines[lines.length - 2]?.trim() === '## Filed by' && / \(.+\), through Suggest a change in the .+\. Report r-\d{14}-[a-z0-9]{6}\.$/.test(last) && last.endsWith(` Report ${reportId}.`)
-  }
 
   async function attach(me: RelayIdentity, body: Record<string, unknown>): Promise<Response> {
     const account = me.account
@@ -483,20 +544,28 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     if (typeof reportId !== 'string' || !isReportId(reportId)) return bad('reportId is not a report id')
     const refused = await allowed(account, repo); if (refused) return refused
     const c = await checkFile(body, undefined, account, reportId); if (c instanceof Response) return c
-    // A report belongs to the first identity that files or attaches for it; nobody else may add files to it.
-    if ((await usage.bind(repo, reportId, account)) === 'taken') return json(403, { error: 'this report belongs to someone else' })
+    // An issue the relay filed belongs to whoever filed it through the relay.
+    const mine = await usage.filer(repo, issue as number)
+    if (mine && (mine.account !== account || mine.reportId !== reportId)) return json(403, { error: 'this report belongs to someone else' })
     const held = await reserve(account, reportId, inlineBytesOf([c])); if (held instanceof Response) return held
     const fail = async (res: Response) => { await usage.release(held.token); return res }
     try {
       const token = await repoToken(repo); if (token instanceof Response) return fail(token)
       const cfg = { ...cfgBase, token }
       // Proof the caller could file here: the issue exists, is an issue, is open or recently closed, and ends with this report's line.
-      let found: { body?: string; pull_request?: unknown; state?: string; closed_at?: string | null }
+      let found: { body?: string; pull_request?: unknown; state?: string; closed_at?: string | null; user?: { login?: string } }
       try { found = (await github(cfg, 'GET', `/repos/${repo}/issues/${issue}`)).body }
       catch (e) { if (e instanceof GitHubError && e.status === 404) return fail(json(404, { error: `there is no issue #${issue} on ${repo}` })); throw e }
       if (found.pull_request) return fail(json(403, { error: `#${issue} is a pull request, not an issue` }))
-      if (!carries(String(found.body ?? ''), reportId)) return fail(json(403, { error: `issue #${issue} does not carry Report ${reportId}` }))
+      if (!endsWithFiledBy(String(found.body ?? ''), reportId)) return fail(json(403, { error: `issue #${issue} does not carry Report ${reportId}` }))
       if (found.state === 'closed' && found.closed_at && now() - Date.parse(found.closed_at) > limits.closedGraceMs) return fail(json(403, { error: `issue #${issue} closed too long ago to add to` }))
+      // An issue someone opened themselves takes files only from them: the login that opened it must be one this
+      // identity vouches for. Nothing is claimed until that proof holds, so a stranger's failed try blocks nobody.
+      if (!mine) {
+        const opener = String(found.user?.login ?? '').toLowerCase()
+        if (!opener || !me.githubLogin || me.githubLogin.toLowerCase() !== opener) return fail(json(403, { error: `only the person who opened issue #${issue} may attach to it` }))
+      }
+      if ((await usage.bind(repo, reportId, account)) === 'taken') return fail(json(403, { error: 'this report belongs to someone else' }))
       // What the report already holds: never the same path twice, never past its caps.
       const folder = `attachments/${reportId}`
       let names: string[] = []
@@ -531,7 +600,9 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     if ((await usage.bind(repo, reportId, account)) === 'taken') return json(403, { error: 'this report belongs to someone else' })
     const held = await reserve(account, reportId, bytes as number); if (held instanceof Response) return held
     try {
-      const link = await opts.staging!.uploadUrl(stageKey(account, reportId, name), { type: canonicalType(type), bytes: bytes as number })
+      const key = stageKey(account, reportId, name)
+      const link = await opts.staging!.uploadUrl(key, { type: canonicalType(type), bytes: bytes as number })
+      await usage.stage(key, bytes as number)
       await usage.commit(held.token)
       return json(200, { url: link.url, headers: link.headers ?? {}, staged: name })
     } catch (e) { await usage.release(held.token); return gone(e) }

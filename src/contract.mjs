@@ -85,6 +85,9 @@ export function validContact(c) {
 // THE CONTEXT a report carries so it can be fixed: labelled items, each with why it is shared, and the trail that led here.
 export const CONTEXT_CEILINGS = { items: 40, routes: 10, taps: 20, errors: 10 };
 const shortText = (v, max) => typeof v === "string" && v.length <= max;
+/** A time as the module writes one: ISO 8601 with a zone, at most 40 characters, so a time field can never carry text. */
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+export const isIsoTime = (v) => typeof v === "string" && v.length <= 40 && ISO_TIME.test(v);
 export function validContext(ctx) {
   if (!ctx || typeof ctx !== "object" || Array.isArray(ctx)) return ["context is not an object"];
   const errs = [];
@@ -100,9 +103,9 @@ export function validContext(ctx) {
       : !shortText(x.label, 80) || !x.label ? "has no short label"
       : !shortText(x.value, 500) ? "has no value of at most 500 characters"
       : !shortText(x.why, 200) || !x.why.trim() ? "does not say why it is shared" : null);
-  list("routes", CONTEXT_CEILINGS.routes, (x) => (!shortText(x.route, 300) || /[?#]/.test(x.route) ? "is not a route without its query" : !shortText(x.at, 40) ? "has no time" : null));
-  list("taps", CONTEXT_CEILINGS.taps, (x) => (!shortText(x.label, 80) ? "has no label of at most 80 characters" : !shortText(x.at, 40) ? "has no time" : null));
-  list("errors", CONTEXT_CEILINGS.errors, (x) => (!shortText(x.message, 300) ? "has no message of at most 300 characters" : x.frame !== undefined && !shortText(x.frame, 200) ? "has a frame over 200 characters" : !shortText(x.at, 40) ? "has no time" : null));
+  list("routes", CONTEXT_CEILINGS.routes, (x) => (!shortText(x.route, 300) || /[?#]/.test(x.route) ? "is not a route without its query" : !isIsoTime(x.at) ? "has no ISO time" : null));
+  list("taps", CONTEXT_CEILINGS.taps, (x) => (!shortText(x.label, 80) ? "has no label of at most 80 characters" : !isIsoTime(x.at) ? "has no ISO time" : null));
+  list("errors", CONTEXT_CEILINGS.errors, (x) => (!shortText(x.message, 300) ? "has no message of at most 300 characters" : x.frame !== undefined && !shortText(x.frame, 200) ? "has a frame over 200 characters" : !isIsoTime(x.at) ? "has no ISO time" : null));
   return errs;
 }
 
@@ -121,9 +124,12 @@ export function validIssue(issue) {
 }
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+// The platform's secure random source where there is one (every browser and Node 19+), Math.random only where there is not.
 const randomSix = () => {
+  const c = globalThis.crypto;
+  const bytes = typeof c?.getRandomValues === "function" ? c.getRandomValues(new Uint8Array(6)) : Uint8Array.from({ length: 6 }, () => Math.floor(Math.random() * 256));
   let s = "";
-  for (let i = 0; i < 6; i++) s += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+  for (const b of bytes) s += ALPHABET[b % ALPHABET.length];
   return s;
 };
 export function newReportId(now = new Date(), rand = randomSix) {
@@ -160,6 +166,7 @@ export function validateReport(raw, { ceilings = CEILINGS } = {}) {
   // The one place an email may sit is the sender's own way to be reached, who.contact.email, and only there.
   for (const p of findKey(raw, "email")) if (p !== "report.who.contact.email") errs.push(`${p}: a report never carries an email`);
   if (raw.who?.contact !== undefined) errs.push(...validContact(raw.who.contact));
+  if (raw.diagnostics?.at !== undefined && !isIsoTime(raw.diagnostics.at)) errs.push("diagnostics.at is not an ISO time");
   if (raw.context !== undefined) errs.push(...validContext(raw.context));
   if (String(raw.where?.route ?? "").includes("?")) errs.push("where.route keeps a query string");
   if (raw.issue !== undefined) errs.push(...validIssue(raw.issue));

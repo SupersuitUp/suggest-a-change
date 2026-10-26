@@ -96,6 +96,8 @@ describe('every string that reaches the issue, normalized first', () => {
       who: { member: 'amy', role: 'member', contact: { handle: `@pat ${key}` } },
     })
     const fields = privacyCatch(r, { people: [{ name: 'Dana Whitlock' }] }).hits.map((h) => `${h.kind}:${h.field}`)
+    const timed = report('fine', { context: { taps: [{ label: 'a', at: 'mail sam@example.com' }] } })
+    expect(privacyCatch(timed).hits.map((h) => h.field)).toEqual(['context.taps.0.at'])
     expect(fields).toEqual(expect.arrayContaining(['email:where.screen', 'email:where.route', 'credential:diagnostics.device', 'person:context.items.0.label', 'phone:context.items.0.why', 'credential:appName', 'credential:who.contact.handle']))
     const out = redact(r, privacyCatch(r, { people: [{ name: 'Dana Whitlock' }] }).hits) as Record<string, any>
     expect(out.where.screen).toBe('Inbox of [removed]')

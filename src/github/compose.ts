@@ -179,7 +179,7 @@ export function destinationWords(d: Destination): { headline: string; privacy: s
 /** "2026-10-26T17:04:12Z" -> "2026-10-26 17:04 UTC"; anything unreadable as it is. */
 function when(at: string): string {
   const t = Date.parse(at)
-  if (!Number.isFinite(t)) return at
+  if (!Number.isFinite(t)) return inline(at) // not a time: shown, escaped, as any other line
   const iso = new Date(t).toISOString()
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`
 }
@@ -212,8 +212,21 @@ const fence = (s: string) => {
 const linkText = (s: string) => html(String(s)).replace(/[\\`*_[\]~!]/g, '\\$&').replace(/\r?\n/g, ' ')
 /** Only an https link with nothing that could end or break the link may become one; anything else is not linked. */
 const safeUrl = (u: unknown): string | null => (typeof u === 'string' && /^https:\/\/[^\s()<>"'`]+$/.test(u) ? u : null)
+/** THE LAST LINE OF EVERY ISSUE, written and recognized by these two and nothing else: a relay accepts an attachment for
+ *  a report only on an issue that ends with this line for it, so the writer and the reader must never drift apart. */
+export const FILED_BY = '## Filed by'
+export function filedByLine(filer: string, role: string, appName: string | undefined, reportId: string): string {
+  return `${inline(filer)} (${inline(role)}), through Suggest a change in ${appName ? `the ${inline(appName)}` : 'an app'}. Report ${inline(reportId)}.`
+}
+/** Whether an issue's body ends with the composer's own Filed by line for this report, in either of its forms. */
+export function endsWithFiledBy(body: string, reportId: string): boolean {
+  if (!/^r-\d{14}-[a-z0-9]{6}$/.test(reportId)) return false
+  const lines = String(body).replace(/\s+$/, '').split('\n')
+  const last = lines[lines.length - 1] ?? ''
+  return lines[lines.length - 2]?.trim() === FILED_BY && new RegExp(`^\\S.* \\(.+\\), through Suggest a change in (the .+|an app)\\. Report ${reportId}\\.$`).test(last)
+}
 /** "2026-10-26T17:04:05Z" -> "17:04:05 UTC"; anything else as it is. */
-const clock = (at: string) => { const t = Date.parse(at); return Number.isFinite(t) ? `${new Date(t).toISOString().slice(11, 19)} UTC` : html(at) }
+const clock = (at: string) => { const t = Date.parse(at); return Number.isFinite(t) ? `${new Date(t).toISOString().slice(11, 19)} UTC` : inline(String(at)) }
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
 
 export function composeIssue(report: Draft, opts: ComposeOptions = {}): ComposedIssue {
@@ -306,7 +319,7 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
     }
     const role = opts.filerRole ?? text(report.who?.role) ?? 'member'
     // "Report <id>" is exact on purpose: the attachment relay reads the issue and requires this line before it saves a file.
-    out.push('## Filed by', `${inline(opts.filerName ?? report.filerName ?? 'A member')} (${inline(role || 'member')}), through Suggest a change in ${appName ? `the ${inline(appName)}` : 'an app'}. Report ${inline(text(report.id))}.`)
+    out.push(FILED_BY, filedByLine(opts.filerName ?? report.filerName ?? 'A member', role || 'member', appName, text(report.id)))
     return out.join('\n')
   }
 
