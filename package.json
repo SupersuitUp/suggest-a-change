@@ -1,6 +1,6 @@
 {
   "name": "@supersuit/suggest-a-change",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The report format and flow behind a Suggest a change button: what a report is, who acts at each step, the screens, and the check every app runs. The contract has zero dependencies.",
   "type": "module",
   "bin": {
@@ -8,7 +8,10 @@
     "suggest-a-change-check": "bin/check.mjs"
   },
   "exports": {
-    ".": "./src/contract.mjs",
+    ".": {
+      "types": "./dist/contract.d.mts",
+      "default": "./src/contract.mjs"
+    },
     "./client": {
       "types": "./dist/client/index.d.ts",
       "import": "./dist/client/index.js"

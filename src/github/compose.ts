@@ -28,6 +28,11 @@ export interface Destination {
   transcribes?: boolean
   /** The largest file this destination takes; a larger one is named in the list as staying on the phone. */
   maxInlineBytes?: number
+  /** How the issue is opened: `direct` from `account`, or `relay` by a relay's GitHub App (createSuggestionRelay), which names the
+   *  sender in the issue. With `relay` the sheet's account line says the app opens it and whose it is, not `account`. */
+  via?: 'direct' | 'relay'
+  /** The relay's app name as people see it ("Acme Suggestions"), for that line. */
+  relayApp?: string
 }
 /** What composeIssue and whatGoes read: a report in the contract's shape, plus two optional names for the list. */
 export interface Draft {
@@ -167,12 +172,15 @@ function basicGoes(draft: Draft, destination: Destination): GoesItem[] {
 }
 
 /** The lines around the list: where it files, who can read it there, and whose account files it. */
-export function destinationWords(d: Destination): { headline: string; privacy: string; danger: boolean; account: string } {
+export function destinationWords(d: Destination & { name?: string }): { headline: string; privacy: string; danger: boolean; account: string } {
+  // Through a relay the issue is opened by the relay's GitHub App, not by the sender's account: say so, and say whose it is.
+  const sender = typeof d.name === 'string' && d.name.trim() ? d.name.trim() : 'you'
+  const app = typeof d.relayApp === 'string' && d.relayApp.trim() ? `the ${d.relayApp.trim()} app` : 'a suggestions app'
   return {
     headline: `Sending this files an issue on ${d.repo}`,
     privacy: d.public ? 'public: anyone on the internet can read this' : `private: people with access to ${d.repo}'s code can read it`,
     danger: Boolean(d.public),
-    account: `Filed from ${d.account}'s GitHub account.`,
+    account: d.via === 'relay' ? `Opened by ${app} on GitHub, which says it came from ${sender}.` : `Filed from ${d.account}'s GitHub account.`,
   }
 }
 

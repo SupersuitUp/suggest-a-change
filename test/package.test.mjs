@@ -37,7 +37,8 @@ test('"./client" ships types and ESM', () => {
 });
 
 test('the "." export is the contract and the package has no runtime dependencies', () => {
-  assert.equal(pkg.exports["."], "./src/contract.mjs");
+  // Typed for TypeScript hosts (a Helm server imports validContext from here), and plain ESM for everyone else.
+  assert.deepEqual(pkg.exports["."], { types: "./dist/contract.d.mts", default: "./src/contract.mjs" });
   assert.deepEqual(pkg.dependencies, {});
 });
 
@@ -130,9 +131,9 @@ test('"./github" ships types and ESM, imports nothing from react, the client or 
   for (const name of ["privacyCatch", "redact", "mayFileAsIs", "composeIssue", "whatGoes", "fileIssue", "updateIssue", "addFollowUp", "issueStates", "issueStatus", "fileSuggestion", "attachPending", "branchHost", "relayHost", "createAttachRelay", "createSuggestionRelay", "relayFiler", "canFileDirectly", "memoryUsage"]) assert.equal(typeof mod[name], "function", name);
 });
 
-test("the version is 0.2.0 and the changelog says why", () => {
-  assert.equal(pkg.version, "0.2.0");
-  assert.match(readFileSync(join(ROOT, "CHANGELOG.md"), "utf8"), /^## 0\.2\.0 \(/m);
+test("the changelog has an entry for the version being published", () => {
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
+  assert.ok(readFileSync(join(ROOT, "CHANGELOG.md"), "utf8").includes(`\n## ${pkg.version} (`), `CHANGELOG.md has no "## ${pkg.version} (" entry`);
 });
 
 test("importing the server entry needs no react", async () => {

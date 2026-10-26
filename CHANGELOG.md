@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 (2026-10-26)
+
+- **The sheet says when a relay opens the issue.** `Destination` takes `via: 'direct' | 'relay'` and `relayApp` (the relay's app name as people see it). With `via: 'relay'`, `destinationWords` says "Opened by the Supersuit Suggestions app on GitHub, which says it came from <name>." instead of naming a GitHub account that does not open it ("Filed from <account>'s GitHub account."); without a name it says "came from you", without an app name "a suggestions app". The Helm is the first user: its own Mac's account usually cannot push to the repo, so Supersuit files through the relay.
+- **The contract export is typed.** `"."` is now `{ types: "./dist/contract.d.mts", default: "./src/contract.mjs" }`, so a TypeScript host (the Helm's server, which checks a report's context with `validContext`) imports it with its types instead of an implicit any. Plain ESM imports are unchanged.
+
 ## 0.2.0 (2026-10-26)
 
 A suggestion now becomes one ordinary GitHub issue, with everything it was sent with, in the repo that owns the app. A minor version because the statuses changed: apps on `^0.1` stay on 0.1 until they take this one.
