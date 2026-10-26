@@ -275,6 +275,23 @@ describe('createSuggestionRelay: file', () => {
   })
 })
 
+describe('createSuggestionRelay: context, contact and roughly where', () => {
+  it('passes the contact and the context into the issue, adds the place from geo, and does not hold the sender\'s own email', async () => {
+    const g = fakeGitHub()
+    const geo = (req: Request) => (req.headers.get('x-country') ? { city: 'Lagos', region: 'LA', country: req.headers.get('x-country')! } : null)
+    const r = suggestions(g, { geo })
+    const req = act('file', filing({ report: report({ words: 'email me at pat@example.com', who: { member: 'amy', role: 'member', contact: { email: 'pat@example.com' } }, context: { items: [{ key: 'device', label: 'Your device', value: 'Android phone, Android 14, Chrome 129', why: 'so it can be tried on the same phone' }] } }) }))
+    req.headers.set('x-country', 'NG')
+    expect((await r(req)).status).toBe(200)
+    const body = g.opened[0].body
+    expect(body).toContain('## Reach them')
+    expect(body).toContain('[pat@example.com](mailto:pat@example.com)')
+    expect(body).toContain('| Roughly where they were | Lagos, LA, NG |')
+    expect(body).toContain('| Your device | Android phone, Android 14, Chrome 129 |')
+    expect(body).not.toContain('amy')
+  })
+})
+
 describe('createSuggestionRelay: follow-up and status, for the one who filed it', () => {
   it('adds a comment for the identity that filed it, and refuses anyone else', async () => {
     const g = fakeGitHub()

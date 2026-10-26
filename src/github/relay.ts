@@ -13,6 +13,7 @@
 import { CEILINGS, isReportId, validateReport } from '../contract.mjs'
 import { cappedText, json } from '../server/http.ts'
 import { ACCEPTED_TYPES, sameType, sniffType } from '../server/sniff.ts'
+import { withPlace, type GeoHook } from '../server/geo.ts'
 import { addFollowUp, fileIssue, github, GitHubError, issueStates, issueStatus, type Fetch } from './api.ts'
 import { composeIssue } from './compose.ts'
 import { ATTACHMENTS_BRANCH, attachmentUrl, branchHost } from './hosts.ts'
@@ -92,6 +93,8 @@ export interface SuggestionRelayOptions {
   repos?(account: string): string[] | null | Promise<string[] | null>
   /** What the privacy catch looks for besides credentials, emails and phones: third parties, and secrets the host knows. */
   privacy?: { people?: Person[]; secrets?: string[] }
+  /** Roughly where the filer was, from the request (see the server half's geo hooks); added to the issue's context. */
+  geo?: GeoHook
   /** May lower any limit, never raise one. */
   limits?: Partial<RelayLimits>
   usage?: RelayUsage
@@ -232,7 +235,7 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     return null
   }
 
-  async function file(account: string, body: Record<string, unknown>): Promise<Response> {
+  async function file(account: string, body: Record<string, unknown>, req: Request): Promise<Response> {
     const repo = body.repo
     if (typeof repo !== 'string' || !REPO.test(repo)) return bad('repo is not owner/name')
     const refused = await allowed(account, repo); if (refused) return refused
@@ -251,7 +254,9 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
       files.push(c)
     }
     const transcript = typeof body.transcript === 'string' ? body.transcript : undefined
-    const held = catchIt({ words: report.words, transcript, followUps: report.followUps }, account, body.redacted === true); if (held) return held
+    // The catch reads the context too, and knows the sender's own contact is theirs to share.
+    const held = catchIt({ words: report.words, transcript, followUps: report.followUps, context: report.context, who: { contact: (report.who as { contact?: unknown } | undefined)?.contact } }, account, body.redacted === true); if (held) return held
+    if (report.context !== undefined || opts.geo) report.context = await withPlace(report.context, req, opts.geo)
 
     // Once per report: a repeat answers the issue it already became; nobody else may use the id.
     const began = await usage.begin(repo, reportId, account)
@@ -265,8 +270,9 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
       const host = branchHost({ repo, token, fetch: opts.fetch })
       const attachmentUrls: Record<string, string> = {}
       for (const f of files) attachmentUrls[f.name] = (await host.put({ repo, issue: 0, reportId }, { name: f.name, type: f.type, bytes: f.bytes })).url
-      const who = (report.who ?? {}) as { role?: string }
-      const issue = composeIssue({ ...report, who: { role: who.role } } as never, {
+      // The account id never reaches the issue; the sender's own contact does, because they chose to share it.
+      const who = (report.who ?? {}) as { role?: string; contact?: unknown }
+      const issue = composeIssue({ ...report, who: { role: who.role, ...(who.contact ? { contact: who.contact } : {}) } } as never, {
         appName: typeof body.appName === 'string' ? body.appName.slice(0, 100) : undefined,
         appVersion: typeof body.appVersion === 'string' ? body.appVersion.slice(0, 50) : undefined,
         filerName: typeof body.filerName === 'string' && body.filerName.trim() ? body.filerName.trim().slice(0, 100) : 'Someone',
@@ -371,7 +377,7 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     } catch (e) { return gone(e) }
   }
 
-  const run: Record<Action, (account: string, body: Record<string, unknown>) => Promise<Response>> = { file, 'follow-up': followUp, status, attach }
+  const run: Record<Action, (account: string, body: Record<string, unknown>, req: Request) => Promise<Response>> = { file, 'follow-up': followUp, status, attach }
 
   return async function relay(req: Request): Promise<Response> {
     // The action is the last segment of the path the handler is mounted on: .../file, .../follow-up, .../status, .../attach.
@@ -383,7 +389,7 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     if (!me || typeof me.account !== 'string' || !me.account) return json(401, { error: 'sign in first' })
     const body = await readJson(req, action === 'file' ? reportCap : oneCap)
     if (body instanceof Response) return body
-    return run[action](me.account, body)
+    return run[action](me.account, body, req)
   }
 }
 

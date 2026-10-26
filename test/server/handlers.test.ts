@@ -13,7 +13,7 @@ const settle = async (agent: string, id: string) => lastSetup.h.agentSettle(last
 const newId = () => `r-20261012090000-${String(100000 + ++n).slice(1).padStart(6, 'a')}`
 const rid = () => `r-20261012090000-a${String(++n).padStart(5, '0')}`
 
-function setup(extra: { limits?: Record<string, number>; tell?: (e: TellEvent) => void; tellSubmitter?: ((e: SubmitterNews) => void | Promise<void>) | { none: string }; app?: Record<string, string>; maintainersSince?: Record<string, number | string>; github?: ReportHandlerOptions['github'] } = {}) {
+function setup(extra: { limits?: Record<string, number>; tell?: (e: TellEvent) => void; tellSubmitter?: ((e: SubmitterNews) => void | Promise<void>) | { none: string }; app?: Record<string, string>; maintainersSince?: Record<string, number | string>; github?: ReportHandlerOptions['github']; geo?: ReportHandlerOptions['geo'] } = {}) {
   const mem = makeMemoryStore()
   const h = createReportHandlers({
     store: mem.store,
@@ -977,5 +977,53 @@ describe('filing straight from the app\'s server (the github option)', () => {
     const both = await Promise.all([1, 2].map(() => t.h.finalize(t.call('POST', 'f', { user: 'amy' }, { file: 'a.png' }), id)))
     expect(both.map((r) => r.status)).toEqual([200, 200])
     expect(issues(g)).toHaveLength(1)
+  })
+
+  it('the issue carries the context table and how to reach them, and the sender\'s own email is not held', async () => {
+    const g = gh()
+    const t = setup({ github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch } })
+    const { id } = await t.send('amy', { words: 'write to me at pat@example.com', who: { member: 'x', role: 'member', contact: { email: 'pat@example.com' } }, context: CONTEXT })
+    expect(t.mem.reports.get(id)!.timeline.at(-1)!.status).toBe('open')
+    const body = issues(g)[0].body.body as string
+    expect(body).toContain('[pat@example.com](mailto:pat@example.com)')
+    expect(body).toContain('| Your device | iPhone, iOS 18.1, Safari 18.1 |')
+  })
+})
+
+const CONTEXT = { items: [{ key: 'device', label: 'Your device', value: 'iPhone, iOS 18.1, Safari 18.1', why: 'so the fixer can try it on the same kind of phone' }], taps: [{ label: 'Save note', at: '2026-10-26T17:04:05Z' }] }
+
+describe('context, a way to reach them, and roughly where they were', () => {
+  it('keeps the context and the sender\'s contact, and shows both back to them', async () => {
+    const { h, call, send, mem } = setup()
+    const { id, res } = await send('amy', { who: { member: 'x', role: 'member', contact: { email: 'pat@example.com', handle: '@pat' } }, context: CONTEXT })
+    expect(res.status).toBe(200)
+    expect(mem.reports.get(id)!.who).toEqual({ member: 'amy', role: 'member', contact: { email: 'pat@example.com', handle: '@pat' } })
+    expect(mem.reports.get(id)!.context).toEqual(CONTEXT)
+    const view = (await (await h.one(call('GET', 'x', { user: 'amy' }), id)).json()) as Record<string, unknown>
+    expect(view.context).toEqual(CONTEXT)
+    expect((view.who as Record<string, unknown>).contact).toEqual({ email: 'pat@example.com', handle: '@pat' })
+  })
+
+  it('refuses a contact of the wrong shape, and an email anywhere but the contact', async () => {
+    const { send } = setup()
+    expect((await send('amy', { who: { member: 'x', role: 'member', contact: { email: 'not an email' } } })).res.status).toBe(422)
+    expect((await send('amy', { who: { member: 'x', role: 'member', contact: { address: 'here' } } })).res.status).toBe(422)
+    expect((await send('amy', { context: { items: [{ key: 'k', label: 'l', value: 'v', why: 'w' }], email: 'a@example.com' } })).res.status).toBe(422)
+  })
+
+  it('adds roughly where they were from the request, through geo, and never takes a place the phone claims', async () => {
+    const geo = (req: Request) => (req.headers.get('x-city') ? { city: req.headers.get('x-city')!, region: 'IL', country: 'US' } : null)
+    const { h, call, draft, mem } = setup({ geo })
+    const body = draft({ context: { items: [...CONTEXT.items, { key: 'place', label: 'Where', value: 'Somewhere I made up', why: 'x' }] } })
+    const req = call('POST', '/api/reports', { user: 'amy' }, body)
+    req.headers.set('x-city', 'Chicago')
+    expect((await h.submit(req)).status).toBe(200)
+    const items = (mem.reports.get(body.id as string)!.context as { items: { key: string; value: string; why: string }[] }).items
+    expect(items.filter((i) => i.key === 'place')).toEqual([{ key: 'place', label: 'Roughly where they were', value: 'Chicago, IL, US', why: expect.stringMatching(/connection/) }])
+    // no geo answer: no place at all, and the phone's own claim is still dropped
+    const plain = setup()
+    const b2 = plain.draft({ context: { items: [{ key: 'place', label: 'Where', value: 'made up', why: 'x' }] } })
+    await plain.h.submit(plain.call('POST', '/api/reports', { user: 'amy' }, b2))
+    expect(JSON.stringify(plain.mem.reports.get(b2.id as string)!.context ?? {})).not.toContain('made up')
   })
 })

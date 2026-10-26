@@ -3,7 +3,18 @@
 // the body, both from that one decision, so the sheet can never promise less than the issue carries. No model is
 // involved: the body is the person's own words and the facts the app stamped, laid out the same way every time.
 
-export type Piece = 'words' | 'voice' | 'images' | 'video' | 'where' | 'app' | 'device' | 'time' | 'filer'
+/** A piece the report carries. `ctx:<key>` is one context item; routes, taps and errors are the trail; contact is how to reach them. */
+export type Piece = 'words' | 'voice' | 'images' | 'video' | 'where' | 'app' | 'device' | 'time' | 'routes' | 'taps' | 'errors' | 'contact' | 'filer' | `ctx:${string}`
+export interface ContextItem { key: string; label: string; value: string; why: string }
+export interface DraftContext {
+  items?: ContextItem[]
+  routes?: { route: string; at: string }[]
+  taps?: { label: string; at: string }[]
+  errors?: { message: string; frame?: string; at: string }[]
+}
+export interface Contact { email?: string; phone?: string; handle?: string }
+/** One line of the sheet's list. `optional` rows can be left out; `on` is whether they go by default, `reason` why not. */
+export interface GoesItem { key: Piece; text: string; value?: string; why?: string; optional?: boolean; on?: boolean; reason?: string }
 export interface Destination {
   /** owner/name of the repo the issue files on. */
   repo: string
@@ -21,7 +32,9 @@ export interface Draft {
   id?: string
   kind?: string
   words?: string
-  who?: { member?: string; role?: string }
+  who?: { member?: string; role?: string; contact?: Contact }
+  /** Everything else shared so it can be fixed (the module's `collectContext`, and the app's own items). */
+  context?: DraftContext
   voice?: { file: string; ms?: number }[]
   media?: { file: string; type: string; bytes?: number; ms?: number }[]
   where?: { screen?: string; route?: string }
@@ -57,6 +70,13 @@ const text = (v: unknown) => (typeof v === 'string' ? v : '')
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 const list = (parts: string[]) => (parts.length <= 1 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`)
 
+const contactOf = (d: Draft): Contact | null => {
+  const c = d.who?.contact
+  return c && (c.email || c.phone || c.handle) ? c : null
+}
+/** Whether a report carries context; with it, the context table stands in for the About line. */
+const hasContext = (d: Draft) => Boolean(d.context && ((d.context.items ?? []).length || (d.context.routes ?? []).length || (d.context.taps ?? []).length || (d.context.errors ?? []).length))
+
 /** Which pieces a report carries, in the order the issue and the list both use. */
 export function pieces(d: Draft): Piece[] {
   const media = d.media ?? []
@@ -68,21 +88,58 @@ export function pieces(d: Draft): Piece[] {
   if (media.some(isVideo)) out.push('video')
   if (text(d.where?.screen) || text(d.where?.route)) out.push('where')
   if (text(g.appVersion)) out.push('app')
-  if (text(g.device) || text(g.screen)) out.push('device')
-  if (text(g.at)) out.push('time')
+  if (hasContext(d)) {
+    for (const i of d.context!.items ?? []) out.push(`ctx:${i.key}`)
+    if ((d.context!.routes ?? []).length) out.push('routes')
+    if ((d.context!.taps ?? []).length) out.push('taps')
+    if ((d.context!.errors ?? []).length) out.push('errors')
+  } else {
+    if (text(g.device) || text(g.screen)) out.push('device')
+    if (text(g.at)) out.push('time')
+  }
+  if (contactOf(d)) out.push('contact')
   out.push('filer')
   return out
 }
 
-/** The sheet's list, in plain words, one item per piece the issue will carry. */
-export function whatGoes(draft: Draft, destination: Destination): { key: Piece; text: string }[] {
+export const TRAIL_WORDS = {
+  routes: { label: 'Pages you visited before this', heading: 'Pages visited before this', why: 'so the fixer can retrace how you got here' },
+  taps: { label: 'Your last taps', heading: 'Last taps', why: 'so the fixer can repeat what you did, by what the buttons are called; never what you typed' },
+  errors: { label: 'Errors the page hit', heading: 'Errors on the page', why: 'the error the app hit is often the fastest way to the cause' },
+}
+export const CONTACT_WHY = 'so whoever fixes it can thank you or ask a follow-up question'
+export const PUBLIC_CONTACT_REASON = 'this repo is public, so anyone could read it'
+const contactValue = (c: Contact) => [c.email, c.phone, c.handle].filter(Boolean).join(' · ')
+
+/** The sheet's list, in plain words, one item per piece the issue will carry, with the value and why for each piece
+ *  of context. Anything but what the person added, the app's version and their name can be left out (`optional`). */
+export function whatGoes(draft: Draft, destination: Destination): GoesItem[] {
+  const ctxItems = new Map((draft.context?.items ?? []).map((i) => [`ctx:${i.key}`, i]))
+  const contact = contactOf(draft)
+  const trailCount = (k: 'routes' | 'taps' | 'errors') => (draft.context?.[k] ?? []).length
+  const trailUnit = { routes: 'page', taps: 'tap', errors: 'error' } as const
+  return basicGoes(draft, destination).map((g) => {
+    const c = ctxItems.get(g.key)
+    if (c) return { key: g.key, text: c.label, value: c.value, why: c.why, optional: true, on: true }
+    if (g.key === 'routes' || g.key === 'taps' || g.key === 'errors') {
+      const w = TRAIL_WORDS[g.key]
+      return { key: g.key, text: w.label, value: plural(trailCount(g.key), trailUnit[g.key]), why: w.why, optional: true, on: true }
+    }
+    if (g.key === 'contact' && contact) {
+      return { key: g.key, text: 'How to reach you', value: contactValue(contact), why: CONTACT_WHY, optional: true, on: !destination.public, ...(destination.public ? { reason: PUBLIC_CONTACT_REASON } : {}) }
+    }
+    return g
+  })
+}
+
+function basicGoes(draft: Draft, destination: Destination): GoesItem[] {
   const media = draft.media ?? []
   const g = draft.diagnostics ?? {}
   const kept = destination.attaches
     ? `saved to the suggestion-attachments branch of ${destination.repo}`
     : `added once ${destination.repo} can take attachments`
   const voices = (draft.voice ?? []).length
-  const say: Record<Piece, () => string> = {
+  const say: Record<string, () => string> = {
     words: () => 'your words',
     voice: () => destination.transcribes === false
       ? (voices === 1 ? 'your voice note' : `your ${voices} voice notes`)
@@ -95,7 +152,7 @@ export function whatGoes(draft: Draft, destination: Destination): { key: Piece; 
     time: () => 'the time',
     filer: () => (draft.filerName ? `your name, ${draft.filerName}` : 'that it came from you'),
   }
-  return pieces(draft).map((key) => ({ key, text: say[key]() }))
+  return pieces(draft).map((key) => ({ key, text: say[key]?.() ?? key }))
 }
 
 /** The lines around the list: where it files, who can read it there, and whose account files it. */
@@ -127,6 +184,12 @@ function clip(s: string, max: number): string {
   if (space > max / 2) cut = cut.slice(0, space)
   return `${cut.trimEnd()}…`
 }
+/** Text that cannot become markup in the issue. */
+const html = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+/** A table cell: no markup, no pipe that ends the cell, on one line. */
+const cell = (s: string) => html(s).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
+/** "2026-10-26T17:04:05Z" -> "17:04:05 UTC"; anything else as it is. */
+const clock = (at: string) => { const t = Date.parse(at); return Number.isFinite(t) ? `${new Date(t).toISOString().slice(11, 19)} UTC` : html(at) }
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
 
 export function composeIssue(report: Draft, opts: ComposeOptions = {}): ComposedIssue {
@@ -156,7 +219,12 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
     ? `${list([waitImages ? plural(waitImages, 'screenshot') : '', waitVideos ? plural(waitVideos, 'video') : '', waitVoice ? plural(waitVoice, 'voice recording') : ''].filter(Boolean))} ${missing.length === 1 ? 'is' : 'are'} being added.`
     : ''
 
-  const build = (said: string, heard: string): string => {
+  type TrailCut = { routes: number; taps: number; errors: number }
+  const full = { routes: report.context?.routes ?? [], taps: report.context?.taps ?? [], errors: report.context?.errors ?? [] }
+  const contact = contactOf(report)
+  // The trail is kept newest-last; a cut keeps the newest.
+  const shown = (k: keyof TrailCut, cut: TrailCut) => full[k].slice(cut[k])
+  const build = (said: string, heard: string, cut: TrailCut = { routes: 0, taps: 0, errors: 0 }): string => {
     const out: string[] = []
     if (has.has('words')) out.push('## What they said', said, '')
     if (has.has('voice')) {
@@ -179,7 +247,22 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
     if (has.has('where')) {
       out.push('## Where', [text(report.where?.screen) && `Screen: ${text(report.where?.screen)}`, text(report.where?.route) && `Route: ${text(report.where?.route)}`].filter(Boolean).join(' · '), '')
     }
-    if (has.has('app') || has.has('device') || has.has('time')) {
+    if (hasContext(report)) {
+      out.push('## Context (shared so this can be fixed)', '', '| What | Value | Why |', '| --- | --- | --- |')
+      if (has.has('app')) out.push(`| App | ${cell(`${appName ? `${appName} ` : ''}${text(g.appVersion)}`)} | so the fixer works on the same version you have |`)
+      for (const i of report.context!.items ?? []) out.push(`| ${cell(i.label)} | ${cell(i.value)} | ${cell(i.why)} |`)
+      out.push('')
+      const block = (k: keyof TrailCut, line: (x: never) => string) => {
+        if (!has.has(k)) return
+        const rows = shown(k, cut)
+        out.push(`<details><summary>${TRAIL_WORDS[k].heading} (${full[k].length})</summary>`, '')
+        if (cut[k]) out.push(`(The ${cut[k]} oldest were cut to fit GitHub's limit.)`, '')
+        out.push(...rows.map((x) => line(x as never)), '', '</details>', '')
+      }
+      block('routes', (r: { route: string; at: string }) => `- ${clock(r.at)} ${html(r.route)}`)
+      block('taps', (t: { label: string; at: string }) => `- ${clock(t.at)} ${html(t.label)}`)
+      block('errors', (e: { message: string; frame?: string; at: string }) => `- ${clock(e.at)} ${html(e.message)}${e.frame ? `<br>${html(e.frame)}` : ''}`)
+    } else if (has.has('app') || has.has('device') || has.has('time')) {
       const about = [
         has.has('app') ? `App: ${appName ? `${appName} ` : ''}${text(g.appVersion)}` : '',
         text(g.device) ? `Device: ${text(g.device)}` : '',
@@ -187,6 +270,14 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
         has.has('time') ? `Sent ${when(text(g.at))}` : '',
       ].filter(Boolean)
       out.push('## About', about.join(' · '), '')
+    }
+    if (has.has('contact') && contact) {
+      const ways = [
+        contact.email ? `[${contact.email}](mailto:${contact.email})` : '',
+        contact.phone ? `[${contact.phone}](tel:${contact.phone.replace(/[^\d+]/g, '')})` : '',
+        contact.handle ? html(contact.handle) : '',
+      ].filter(Boolean)
+      out.push('## Reach them', 'To thank them or ask a follow-up question:', '', ...ways.map((w) => `- ${w}`), '')
     }
     const role = opts.filerRole ?? text(report.who?.role) ?? 'member'
     // "Report <id>" is exact on purpose: the attachment relay reads the issue and requires this line before it saves a file.
@@ -196,17 +287,25 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
 
   let said = words
   let heard = transcript
-  let body = build(said, heard)
-  // Too long for GitHub: the transcript gives way first, then the words, each with a note saying where it was cut.
+  const cut: TrailCut = { routes: 0, taps: 0, errors: 0 }
+  let body = build(said, heard, cut)
+  // Too long for GitHub: the trail gives way first (taps, then pages, then errors, oldest first), then the transcript,
+  // then the words, each with a note saying it was cut to fit.
+  for (const k of ['taps', 'routes', 'errors'] as const) {
+    while (body.length > BODY_LIMIT && cut[k] < full[k].length) {
+      cut[k] += Math.max(1, Math.ceil((full[k].length - cut[k]) / 2))
+      body = build(said, heard, cut)
+    }
+  }
   if (body.length > BODY_LIMIT && heard) {
     const keep = Math.max(0, heard.length - (body.length - BODY_LIMIT) - 200)
     heard = `${heard.slice(0, keep)}\n\n(The transcript was cut here at ${keep} characters to fit GitHub's limit; the recording itself is attached.)`
-    body = build(said, heard)
+    body = build(said, heard, cut)
   }
   if (body.length > BODY_LIMIT && said) {
     const keep = Math.max(0, said.length - (body.length - BODY_LIMIT) - 200)
     said = `${said.slice(0, keep)}\n\n(Their words were cut here at ${keep} characters to fit GitHub's limit.)`
-    body = build(said, heard)
+    body = build(said, heard, cut)
   }
 
   const title = clip(firstSentence(words) || firstSentence(transcript) || `Suggestion from ${appName || 'an app'}`, 70)

@@ -74,6 +74,29 @@ Styling: structure only, class names prefixed `sac-`. `@supersuit/suggest-a-chan
 
 The four diagnostics are the app's version, the time, the screen size and the phone type. All four go with every report, with the screen's name and address, and the sheet says so in one small line above Send rather than a section of switches.
 
+**Every piece of context that helps fix it, shared by default, each saying why.** With no app code, the module collects at send time, and the sheet lists every item with its value and a one-line why, each with a tick box so the person can leave it out (what they added themselves, the app's version and their name always go). Anything unticked is dropped before the report leaves the phone, diagnostics included.
+
+| Item | Value, for example | Why it is shared (the sheet's words) |
+| --- | --- | --- |
+| Your name in the app | `identity().name` or `.username`; never the account id | so whoever fixes it knows who to thank, and can look at your account if the problem is in it |
+| Your local time | `2026-10-26 12:04 (America/Chicago, UTC-05:00)` | so the fixer can line it up with what the app logged at that moment |
+| Your languages | `en-US, es` | some problems only happen in one language or date format |
+| Your device | `iPhone, iOS 18.1, Safari 18.1` (User-Agent Client Hints when the browser has them, else the user agent, in plain words) | so the fixer can try it on the same kind of device and browser |
+| Screen and window | `390x844 screen, 390x664 window, 3x pixels` | how things are laid out depends on the size of the screen and window |
+| Appearance | `dark mode, reduced motion` | some problems only show in dark mode or with animations turned down |
+| Connection | `online, wifi, 4g speed` | a slow or dropped connection explains many problems |
+| How long the page was open | `12 minutes` | some problems only start after a page has been open a while |
+| Pages you visited before this | the last 10, with times, never a query string | so the fixer can retrace how you got here |
+| Your last taps | the last 20, by what the button or link is called; never what was typed | so the fixer can repeat what you did |
+| Errors the page hit | the last 10 errors and unhandled rejections, message and first stack frame, no query strings | the error the app hit is often the fastest way to the cause |
+
+The trail (pages, taps, errors) is kept from the moment any of the module's screens first mounts (the entry, `<KeepSending>`, `<SuggestNews>`), in memory only, in small ring buffers. Never captured: an input's value, cookies, storage, query strings. `collectContext()` and `installContextListeners()` are exported from `"./client"` for a host that wants them elsewhere.
+
+- **The app's own context.** `context: async () => [{ label: "Plan", value: "Pro, yearly", why: "some features only exist on Pro" }]` adds anything app-specific; an item without a `why` is dropped. Or `context: { items, precise: true }` to also ask the browser for a precise location (its permission prompt); without that, location is only the time zone, plus roughly where from the receiver (below).
+- **A way to reach them.** `contact: async () => ({ email, phone, handle })` gives what the app already knows, so whoever fixes it can say thanks or ask a question. It goes by default to a private repo and is off, with the reason ("this repo is public, so anyone could read it"), for a public one. It travels as `who.contact`, the one place a report may carry an email.
+
+The issue carries it all in a "Context (shared so this can be fixed)" table of what, value and why (in place of the About line), the trail in collapsible blocks, and a "Reach them" section with `mailto:` and `tel:` links "To thank them or ask a follow-up question". When the body would pass GitHub's limit, the trail is cut first (oldest taps, then pages, then errors), then the transcript.
+
 **Where it files.** With the optional `destination()` adapter, answering `{ repo, public, account, attaches, name? }`, that line becomes the list of exactly what the issue will carry ("your words · your voice note and its transcript · 2 screenshots, saved to the suggestion-attachments branch of acme/notes · this screen (Photos, /photos) · notes 1.2.3 · iPhone, 390x844 · the time · your name, Alex Kim"), the repo it files on, who can read it there (a public repo says so in `--sac-danger`), and whose GitHub account files it. The list follows the draft as things are added or removed, and it is built by `whatGoes` from `./github`, the same pieces `composeIssue` writes the body from, so the sheet and the issue cannot drift. `attaches: false` says files wait until the repo can take them. Sending is the consent. Without the adapter (or when it answers null) the sheet keeps the one line. My suggestions and the detail view link the issue a report became ("Issue #7"); a member who cannot read the repo still sees the number and the state.
 
 **Identity.** Every screen asks `adapters.identity()` when it mounts, whenever it is handed a different `adapters` object, and whenever the host calls `refreshIdentity()` (exported from `"./client"`; call it after a sign-in, sign-out or account switch). When the account differs, the old account's rows leave the screen and its waiting reports stay on the phone, to be sent only while that account is signed in; every send re-confirms the account first. Keep `adapters` stable where you can; a parent that rebuilds it every render is safe, only slower (one `identity()` call per render).
@@ -199,6 +222,17 @@ const h = createReportHandlers({
 ```
 
 **Telling the person who suggested it is required.** `tellSubmitter` is called once when a report becomes an issue (`open`) and once each time it closes or reopens (`done`, `not-planned`, `open`; the list is exported as `TOLD`), with `{ member, reportId, status, words, meaning, ended, note?, issue? }`. `words` and `meaning` are the module's own words for the status (`wordsFor`/`meaningFor`, with `app.owner` as the owner's name when given), never the report's text, so a lock screen never shows what someone wrote; `note` is the one-line reason and comes with `not-planned` only; `issue` is `{ repo, number, url }` once there is one. Being held tells nobody, a repeat of a status tells nobody, a move the store refused tells nobody, and a maintainer is not told that the issue they just filed from their own report exists (its close is still told).
+
+**Roughly where they were, with no prompt.** `geo: (req) => ({ city, region, country })` adds one context item ("Roughly where they were") from the request, on the server half and on a suggestion relay alike; a place the phone claims is dropped. The host already puts it in headers:
+
+```ts
+// Vercel
+geo: (req) => ({ city: decodeURIComponent(req.headers.get("x-vercel-ip-city") ?? ""), region: req.headers.get("x-vercel-ip-country-region") ?? "", country: req.headers.get("x-vercel-ip-country") ?? "" }),
+// Cloudflare (cf-ipcity and cf-region need the "Add visitor location headers" managed transform)
+geo: (req) => ({ city: req.headers.get("cf-ipcity") ?? "", region: req.headers.get("cf-region") ?? "", country: req.headers.get("cf-ipcountry") ?? "" }),
+```
+
+The handlers keep a report's `context` and `who.contact` (the contract checks both shapes) and show them back to the member who sent it.
 
 **Filing from the app's server.** With `github: { repo, token, attachments?, people?, nameOf?, fetch? }` the handlers file each report as an issue the moment it is complete: at submit when it has no files, else when its last file is verified. One caller files it (the approval is taken under a one-time name and the report read again under it). The privacy catch runs first; a hit moves the report to `held` with the kinds found (`flags`, never the words, never in the member's view) for the owner to decide. The files are read back through the store's own read links and saved with `attachments` (a `branchHost` with a token that can push, usually); the issue is opened first, then the files saved, then their links edited in. GitHub failing leaves the report `received` and the approval free, so a maintainer's Mac can file it. `nameOf(member)` gives the name the issue says; the member key never appears in an issue. Send it on the app's own channel (push, email, an activity row) to that member only. A failure never fails the move. `createReportHandlers` throws at startup when `tellSubmitter` is missing; an app that genuinely has nobody to tell passes `tellSubmitter: { none: "only the maintainer uses this app" }`, and an empty reason throws too. The `tell` event for a status move now also carries `member` and `status`.
 

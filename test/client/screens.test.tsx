@@ -188,8 +188,11 @@ describe('the sheet', () => {
     expect(goes.textContent).toContain("private: people with access to acme/app's code can read it")
     expect(goes.querySelector('.sac-danger')).toBeNull()
     expect(goes.textContent).toContain("Filed from sam-gh's GitHub account.")
-    const items = () => [...goes.querySelectorAll('li')].map((li) => li.textContent)
-    expect(items()).toEqual(['this screen (Photos, /photos)', 'notes 1.2.3', expect.stringMatching(/^iPhone, \d+x\d+$/), 'the time', 'your name, Sam Lee'])
+    const items = () => [...goes.querySelectorAll('.sac-goes-list > li')].map((li) => li.textContent)
+    // What always goes, in order; the context rows (device, time and the rest) follow as tick boxes.
+    await waitFor(() => expect(goes.querySelector('[data-goes="ctx:device"]')).toBeTruthy())
+    expect(items()).toEqual(['this screen (Photos, /photos)', 'notes 1.2.3', 'your name, Sam Lee'])
+    expect(goes.querySelector('[data-goes="ctx:device"]')!.textContent).toMatch(/^ ?Your device: .+\(so the fixer can try it on the same kind of device and browser\)$/)
     fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'bigger please' } })
     fireEvent.change(images(), { target: { files: [png('a.png'), png('b.png')] } })
     await waitFor(() => expect(items().slice(0, 2)).toEqual(['your words', '2 screenshots, saved to the suggestion-attachments branch of acme/app']))
@@ -202,6 +205,82 @@ describe('the sheet', () => {
     expect(danger.textContent).toBe('public: anyone on the internet can read this')
     fireEvent.change(images(), { target: { files: [png('a.png')] } })
     await screen.findByText('1 screenshot, added once acme/open can take attachments')
+  })
+
+  it('every piece of context is listed with its value and why, on by default, and one left out never leaves the phone', async () => {
+    const { adapters, submitted } = await setup({ destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }) })
+    await sheet(adapters)
+    const device = await screen.findByRole('checkbox', { name: /Your device/ }) as HTMLInputElement
+    expect(device.checked).toBe(true)
+    expect(device.closest('label')!.textContent).toMatch(/so the fixer can/)
+    expect(screen.getByRole('checkbox', { name: /Your local time/ })).toBeTruthy()
+    // what the person added, and the app's version, are not things to leave out
+    expect(document.querySelector('[data-goes="words"] input, [data-goes="app"] input, [data-goes="filer"] input')).toBeNull()
+    fireEvent.click(device)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'bigger please' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(submitted).toHaveLength(1))
+    const ctx = submitted[0].context as { items: { key: string }[] }
+    expect(ctx.items.map((i) => i.key)).not.toContain('device')
+    expect(ctx.items.map((i) => i.key)).toContain('time')
+    expect((submitted[0].diagnostics as Record<string, string>).device).toBeUndefined() // left out means left out everywhere
+  })
+
+  it('with no destination, the context is still listed and can be left out', async () => {
+    const { adapters, submitted } = await setup()
+    await sheet(adapters)
+    fireEvent.click(await screen.findByRole('checkbox', { name: /Your local time/ }))
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(submitted).toHaveLength(1))
+    expect((submitted[0].context as { items: { key: string }[] }).items.map((i) => i.key)).not.toContain('time')
+    expect((submitted[0].diagnostics as Record<string, string>).at).toBeUndefined()
+  })
+
+  it('what the app adds through context() is listed with its own why', async () => {
+    const { adapters, submitted } = await setup({ context: async () => [{ label: 'Plan', value: 'Pro, yearly', why: 'some features only exist on Pro' }] })
+    await sheet(adapters)
+    const plan = await screen.findByRole('checkbox', { name: /Plan/ })
+    expect(plan.closest('label')!.textContent).toContain('some features only exist on Pro')
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(submitted).toHaveLength(1))
+    expect((submitted[0].context as { items: { key: string; value: string }[] }).items.find((i) => i.key === 'app:0')!.value).toBe('Pro, yearly')
+  })
+
+  it('how to reach them goes by default to a private repo, and is off with the reason for a public one', async () => {
+    const contact = async () => ({ email: 'sam@example.com', handle: '@sam' })
+    const priv = await setup({ contact, destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }) })
+    await sheet(priv.adapters)
+    expect(((await screen.findByRole('checkbox', { name: /How to reach you/ })) as HTMLInputElement).checked).toBe(true)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(priv.submitted).toHaveLength(1))
+    expect((priv.submitted[0].who as Record<string, unknown>).contact).toEqual({ email: 'sam@example.com', handle: '@sam' })
+    cleanup()
+    const pub = await setup({ contact, destination: async () => ({ repo: 'acme/open', public: true, account: 'sam-gh', attaches: true }) })
+    await sheet(pub.adapters)
+    const box = await screen.findByRole('checkbox', { name: /How to reach you/ }) as HTMLInputElement
+    expect(box.checked).toBe(false)
+    expect(box.closest('label')!.textContent).toContain('this repo is public, so anyone could read it')
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(pub.submitted).toHaveLength(1))
+    expect((pub.submitted[0].who as Record<string, unknown>).contact).toBeUndefined()
+  })
+
+  it('never sends what someone typed into the page, even after they tapped it', async () => {
+    const { adapters, submitted } = await setup()
+    const outside = document.createElement('input'); outside.value = 'hunter2'; document.body.appendChild(outside)
+    render(<KeepSending adapters={adapters} />) // the module's listeners start on its first mount
+    outside.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await sheet(adapters)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(submitted).toHaveLength(1))
+    expect(JSON.stringify(submitted[0].context)).toContain('a text field')
+    expect(JSON.stringify(submitted[0])).not.toContain('hunter2')
+    outside.remove()
   })
 
   it('a destination that answers nothing keeps today\'s line', async () => {

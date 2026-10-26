@@ -12,6 +12,7 @@ import { fileSuggestion, privacyCatch, type AttachmentHost, type Fetch, type Per
 import { effectiveLimits, type Limits } from './rate.ts'
 import { ACCEPTED_TYPES, canonicalType, sameType } from './sniff.ts'
 import { json, notFound, signIn, cappedText } from './http.ts'
+import { withPlace, type GeoHook } from './geo.ts'
 
 export interface IssueRef { repo: string; number: number; url: string }
 /** `by` is the actor (contract FLOW). `holder` is the maintainer whose Mac filed or closed the issue, written on that
@@ -131,6 +132,10 @@ export interface ReportHandlerOptions {
   /** When given, a report is filed as an issue the moment it is complete: at submit when it has no files, else when its
    *  last file is verified. A privacy hit holds it for the owner instead; GitHub failing leaves it received for a Mac. */
   github?: GitHubFiling
+  /** Roughly where the sender was, from the request (never a browser prompt). Added to the report's context as one item;
+   *  a place the phone claims is dropped. On Vercel: `(req) => ({ city: decodeURIComponent(req.headers.get('x-vercel-ip-city') ?? ''),
+   *  region: req.headers.get('x-vercel-ip-country-region') ?? '', country: req.headers.get('x-vercel-ip-country') ?? '' })`. */
+  geo?: GeoHook
   now?: () => number
 }
 
@@ -239,6 +244,7 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     ...(r.app !== undefined ? { app: r.app } : {}),
     where: r.where, diagnostics: r.diagnostics, media: r.media ?? [], voice: r.voice ?? [],
     ...(issueOf(r) ? { issue: issueOf(r) } : {}),
+    ...(r.context !== undefined ? { context: r.context } : {}),
     timeline: (r.timeline ?? []).map((t) => ({ status: t.status, by: t.by, at: t.at, ...(t.step ? { step: t.step } : {}), ...(t.note ? { note: t.note } : {}) })),
     followUps: (r.followUps ?? []).map((f) => ({ followId: f.followId, words: f.words, at: f.at, by: f.by, voice: f.voice })),
   })
@@ -295,9 +301,13 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
         else return bad('diagnostics values are short text')
       }
     }
+    // The sender's own way to be reached is the one part of `who` the phone may send; the contract checks its shape.
+    const contact = isObj(raw.who) && raw.who.contact !== undefined ? raw.who.contact : undefined
+    const context = raw.context === undefined && !opts.geo ? undefined : await withPlace(raw.context, req, opts.geo)
     const report: Record<string, unknown> = {
       id: raw.id, kind: raw.kind, words, media, voice: v.voice,
-      who: { member, role: roleOf(member) },
+      who: { member, role: roleOf(member), ...(contact !== undefined ? { contact } : {}) },
+      ...(context !== undefined ? { context } : {}),
       ...(answers ? { answers } : {}),
       app: { ...(opts.app ?? {}) },
       where, diagnostics,
@@ -588,7 +598,7 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     try {
       const r = await store.get(id)
       if (!r || cur(r) !== 'received' || !complete(r)) return
-      const report = { id: r.id, kind: r.kind as string, words: (r.words as string) ?? '', who: r.who, voice: (r.voice as { file: string; ms: number }[]) ?? [], media: (r.media as { file: string; type: string; bytes: number }[]) ?? [], where: r.where as Record<string, string>, diagnostics: r.diagnostics as Record<string, string>, followUps: r.followUps ?? [] }
+      const report = { id: r.id, kind: r.kind as string, words: (r.words as string) ?? '', who: r.who, voice: (r.voice as { file: string; ms: number }[]) ?? [], media: (r.media as { file: string; type: string; bytes: number }[]) ?? [], where: r.where as Record<string, string>, diagnostics: r.diagnostics as Record<string, string>, followUps: r.followUps ?? [], ...(r.context ? { context: r.context as never } : {}) }
       const { hits } = privacyCatch(report, { people: g.people ?? [], secrets: [r.who.member, ...maintainers] })
       if (hits.length) {
         const flags = [...new Set(hits.map((h) => h.kind))]

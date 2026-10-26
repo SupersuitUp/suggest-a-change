@@ -107,6 +107,8 @@ export interface Strings {
   movedToast: (words: string, note?: string) => string
   /** The link to the issue a report became. */
   issueLink: (n: number) => string
+  /** The accessible name of the list of context, each row a tick box. */
+  contextLegend: string
 }
 
 export const DEFAULT_STRINGS: Strings = {
@@ -196,6 +198,7 @@ export const DEFAULT_STRINGS: Strings = {
   entryMoved: 'One of your suggestions has news',
   movedToast: (words, note) => (note ? `Your suggestion: ${words}. ${note}` : `Your suggestion: ${words}`),
   issueLink: (n) => `Issue #${n}`,
+  contextLegend: 'Also shared, so it can be fixed (untick anything to leave it out)',
 }
 
 export function stringsFor(words: Words): Strings {

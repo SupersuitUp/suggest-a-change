@@ -138,3 +138,74 @@ describe('whatGoes: the sheet and the issue cannot drift', () => {
     expect(destinationWords({ ...dest, public: true })).toMatchObject({ privacy: 'public: anyone on the internet can read this', danger: true })
   })
 })
+
+describe('the context, shared so it can be fixed, and a way to reach them', () => {
+  const ctx = () => ({
+    items: [
+      { key: 'time', label: 'Your local time', value: '2026-10-26 12:04 (America/Chicago, UTC-05:00)', why: 'so the fixer can line it up with the logs from that moment' },
+      { key: 'device', label: 'Your device', value: 'iPhone, iOS 18.1, Safari 18.1', why: 'so the fixer can try it on the same kind of phone' },
+      { key: 'app:0', label: 'Plan | tier', value: 'Pro <b>yearly</b>', why: 'some features only exist on Pro' },
+    ],
+    routes: [{ route: '/home', at: '2026-10-26T17:03:00Z' }, { route: '/notes', at: '2026-10-26T17:04:00Z' }],
+    taps: [{ label: 'New note', at: '2026-10-26T17:04:01Z' }, { label: 'Save note', at: '2026-10-26T17:04:05Z' }],
+    errors: [{ message: 'TypeError: save is not a function', frame: 'at click (https://app.test/app.js:10:4)', at: '2026-10-26T17:04:05Z' }],
+  })
+  const withCtx = (over: Record<string, unknown> = {}) => ({ ...full(), context: ctx(), who: { member: 'x', role: 'member', contact: { email: 'pat@example.com', phone: '+1 917 555 0100', handle: '@pat' } }, ...over })
+
+  it('writes the context as a table of what, value and why, with the trail in collapsible blocks, instead of About', () => {
+    const { body } = composeIssue(withCtx(), opts)
+    expect(body).toContain('## Context (shared so this can be fixed)')
+    expect(body).toContain('| What | Value | Why |')
+    expect(body).toMatch(/\| App \| Helm 2\.14\.0 \| .+ \|/)
+    expect(body).toContain('| Your device | iPhone, iOS 18.1, Safari 18.1 | so the fixer can try it on the same kind of phone |')
+    expect(body).toContain('| Plan \\| tier | Pro &lt;b&gt;yearly&lt;/b&gt; | some features only exist on Pro |') // a cell cannot break the table or inject markup
+    expect(body).not.toContain('## About')
+    expect(body).toContain('<details><summary>Pages visited before this (2)</summary>')
+    expect(body).toContain('<details><summary>Last taps (2)</summary>')
+    expect(body).toContain('<details><summary>Errors on the page (1)</summary>')
+    expect(body).toContain('TypeError: save is not a function')
+    expect(body.indexOf('## Context')).toBeLessThan(body.indexOf('## Filed by'))
+  })
+
+  it('says how to reach them, as links, to thank them or ask a question', () => {
+    const { body } = composeIssue(withCtx(), opts)
+    expect(body).toContain('## Reach them')
+    expect(body).toContain('To thank them or ask a follow-up question:')
+    expect(body).toContain('[pat@example.com](mailto:pat@example.com)')
+    expect(body).toContain('[+1 917 555 0100](tel:+19175550100)')
+    expect(body).toContain('@pat')
+    expect(composeIssue(withCtx({ who: { member: 'x', role: 'member' } }), opts).body).not.toContain('## Reach them')
+  })
+
+  it('the sheet lists exactly what the body carries, with each value and why; leaving one out leaves it out of both', () => {
+    const items = whatGoes(withCtx(), dest)
+    const composed = composeIssue(withCtx(), opts)
+    expect(items.map((i) => i.key)).toEqual(composed.carries)
+    expect(items.map((i) => i.key)).toEqual(['words', 'voice', 'images', 'video', 'where', 'app', 'ctx:time', 'ctx:device', 'ctx:app:0', 'routes', 'taps', 'errors', 'contact', 'filer'])
+    const device = items.find((i) => i.key === 'ctx:device')!
+    expect(device).toMatchObject({ text: 'Your device', value: 'iPhone, iOS 18.1, Safari 18.1', why: 'so the fixer can try it on the same kind of phone', optional: true, on: true })
+    for (const fixed of ['words', 'voice', 'images', 'video', 'app', 'filer']) expect(items.find((i) => i.key === fixed)!.optional, fixed).toBeFalsy()
+    for (const it of items.filter((i) => i.key.startsWith('ctx:') || i.key === 'contact')) expect(composed.body, it.key).toContain(it.value!.split(' · ')[0].replace(/</g, '&lt;').replace(/>/g, '&gt;'))
+    // leave the device and the taps out
+    const less = withCtx({ context: { ...ctx(), items: ctx().items.filter((i) => i.key !== 'device'), taps: [] } })
+    const fewer = whatGoes(less, dest)
+    expect(fewer.map((i) => i.key)).toEqual(composeIssue(less, opts).carries)
+    expect(fewer.map((i) => i.key)).not.toContain('ctx:device')
+    expect(fewer.map((i) => i.key)).not.toContain('taps')
+    expect(composeIssue(less, opts).body).not.toMatch(/iPhone, iOS|Last taps/)
+  })
+
+  it('the way to reach them is on for a private repo and off, with the reason, for a public one', () => {
+    expect(whatGoes(withCtx(), dest).find((i) => i.key === 'contact')).toMatchObject({ optional: true, on: true, value: 'pat@example.com · +1 917 555 0100 · @pat' })
+    expect(whatGoes(withCtx(), { ...dest, public: true }).find((i) => i.key === 'contact')).toMatchObject({ optional: true, on: false, reason: 'this repo is public, so anyone could read it' })
+  })
+
+  it('stays under the body limit by cutting the trail first, before the transcript', () => {
+    const huge = withCtx({ context: { ...ctx(), taps: Array.from({ length: 3000 }, (_, i) => ({ label: `tap ${i} ${'x'.repeat(60)}`, at: '2026-10-26T17:04:01Z' })), errors: Array.from({ length: 400 }, () => ({ message: 'e'.repeat(300), at: 'x' })) } })
+    const { body } = composeIssue(huge, opts)
+    expect(body.length).toBeLessThanOrEqual(BODY_LIMIT)
+    expect(body).toContain(opts.transcript) // the transcript survives whole
+    expect(body).toMatch(/cut to fit/)
+    expect(body).toContain(`Report ${ID}.`)
+  })
+})

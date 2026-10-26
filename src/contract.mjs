@@ -69,6 +69,43 @@ const row = (status) => {
 export const wordsFor = (status, { owner } = {}) => row(status)[0](owner);
 export const meaningFor = (status, { owner, issue } = {}) => row(status)[1](owner, issue);
 
+// HOW TO REACH THE SENDER: what the app already knows of them, so whoever fixes it can say thanks or ask a question.
+const CONTACT_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const CONTACT_PHONE = /^\+?[0-9][0-9 ().-]{5,24}$/;
+export function validContact(c) {
+  if (!c || typeof c !== "object" || Array.isArray(c)) return ["who.contact is not an object"];
+  const errs = [];
+  for (const k of Object.keys(c)) if (!["email", "phone", "handle"].includes(k)) errs.push(`who.contact.${k} is not one of email, phone, handle`);
+  if (c.email !== undefined && (typeof c.email !== "string" || c.email.length > 254 || !CONTACT_EMAIL.test(c.email))) errs.push("who.contact.email is not an email address");
+  if (c.phone !== undefined && (typeof c.phone !== "string" || !CONTACT_PHONE.test(c.phone))) errs.push("who.contact.phone is not a phone number");
+  if (c.handle !== undefined && (typeof c.handle !== "string" || !c.handle.trim() || c.handle.length > 100 || /[\r\n]/.test(c.handle))) errs.push("who.contact.handle is not a short one-line handle");
+  return errs;
+}
+
+// THE CONTEXT a report carries so it can be fixed: labelled items, each with why it is shared, and the trail that led here.
+export const CONTEXT_CEILINGS = { items: 40, routes: 10, taps: 20, errors: 10 };
+const shortText = (v, max) => typeof v === "string" && v.length <= max;
+export function validContext(ctx) {
+  if (!ctx || typeof ctx !== "object" || Array.isArray(ctx)) return ["context is not an object"];
+  const errs = [];
+  const list = (name, max, check) => {
+    const v = ctx[name];
+    if (v === undefined) return;
+    if (!Array.isArray(v)) { errs.push(`context.${name} is not a list`); return; }
+    if (v.length > max) errs.push(`context.${name} has ${v.length} entries; the ceiling is ${max}`);
+    v.forEach((x, i) => { const e = x && typeof x === "object" ? check(x) : "is not an object"; if (e) errs.push(`context.${name}.${i} ${e}`); });
+  };
+  list("items", CONTEXT_CEILINGS.items, (x) =>
+    !shortText(x.key, 40) || !/^[A-Za-z0-9:_-]+$/.test(x.key) ? "has no plain key"
+      : !shortText(x.label, 80) || !x.label ? "has no short label"
+      : !shortText(x.value, 500) ? "has no value of at most 500 characters"
+      : !shortText(x.why, 200) || !x.why.trim() ? "does not say why it is shared" : null);
+  list("routes", CONTEXT_CEILINGS.routes, (x) => (!shortText(x.route, 300) || /[?#]/.test(x.route) ? "is not a route without its query" : !shortText(x.at, 40) ? "has no time" : null));
+  list("taps", CONTEXT_CEILINGS.taps, (x) => (!shortText(x.label, 80) ? "has no label of at most 80 characters" : !shortText(x.at, 40) ? "has no time" : null));
+  list("errors", CONTEXT_CEILINGS.errors, (x) => (!shortText(x.message, 300) ? "has no message of at most 300 characters" : x.frame !== undefined && !shortText(x.frame, 200) ? "has a frame over 200 characters" : !shortText(x.at, 40) ? "has no time" : null));
+  return errs;
+}
+
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 /** The issue a report became: `{ repo: "owner/name", number, url }`, the url on github.com. Problems as a list. */
 export function validIssue(issue) {
@@ -117,7 +154,10 @@ export function validateReport(raw, { ceilings = CEILINGS } = {}) {
   if (!ID.test(String(raw.id ?? ""))) errs.push("the id is not a report id");
   if (!KINDS.includes(raw.kind)) errs.push(`kind ${JSON.stringify(raw.kind)} is not one of ${KINDS.join(", ")}`);
   if (!ROLES.includes(raw.who?.role)) errs.push(`role ${JSON.stringify(raw.who?.role)} is not one of ${ROLES.join(", ")}`);
-  for (const p of findKey(raw, "email")) errs.push(`${p}: a report never carries an email`);
+  // The one place an email may sit is the sender's own way to be reached, who.contact.email, and only there.
+  for (const p of findKey(raw, "email")) if (p !== "report.who.contact.email") errs.push(`${p}: a report never carries an email`);
+  if (raw.who?.contact !== undefined) errs.push(...validContact(raw.who.contact));
+  if (raw.context !== undefined) errs.push(...validContext(raw.context));
   if (String(raw.where?.route ?? "").includes("?")) errs.push("where.route keeps a query string");
   if (raw.issue !== undefined) errs.push(...validIssue(raw.issue));
   for (const k of Object.keys(raw.diagnostics ?? {})) {

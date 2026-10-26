@@ -96,6 +96,43 @@ test("wordsFor carries the design's table, with the owner's name and the issue n
   assert.throws(() => C.wordsFor("bogus", { owner: "Alex" }), /not a status/);
 });
 
+test("a report may carry a way to reach its sender, in exactly who.contact, and its shape is checked", () => {
+  const contact = { email: "alex@example.com", phone: "+1 917 555 0100", handle: "@alex" };
+  assert.deepEqual(C.validateReport(good({ who: { member: "alex", role: "operator", contact } })), []);
+  assert.deepEqual(C.validateReport(good({ who: { member: "alex", role: "operator", contact: { phone: "+447700900123" } } })), []);
+  for (const bad of [{ email: "nope" }, { phone: "call me" }, { handle: "x".repeat(101) }, { handle: "two\nlines" }, { address: "1 Main St" }, "alex@example.com", []]) {
+    assert.ok(C.validateReport(good({ who: { member: "alex", role: "operator", contact: bad } })).some((e) => /contact/.test(e)), JSON.stringify(bad));
+  }
+  // an email anywhere else is still refused
+  assert.ok(C.validateReport(good({ email: "a@example.com" })).some((e) => /email/.test(e)));
+  assert.ok(C.validateReport(good({ who: { member: "alex", role: "operator", email: "a@example.com" } })).some((e) => /email/.test(e)));
+  assert.ok(C.validateReport(good({ context: { email: "a@example.com" } })).some((e) => /email/.test(e)));
+  assert.ok(C.validateReport(good({ who: { member: "alex", role: "operator", contact: { email: "a@example.com", nested: { email: "b@example.com" } } } })).some((e) => /email|contact/.test(e)));
+});
+
+test("a report may carry its context, and the context's shape is checked", () => {
+  const context = {
+    items: [{ key: "device", label: "Your device", value: "iPhone, iOS 18.1, Safari 18.1", why: "so the fixer can try it on the same kind of phone" }],
+    routes: [{ route: "/notes", at: "2026-10-26T17:00:00Z" }],
+    taps: [{ label: "Save note", at: "2026-10-26T17:01:00Z" }],
+    errors: [{ message: "TypeError: x is undefined", frame: "at save (app.js:10:4)", at: "2026-10-26T17:01:01Z" }],
+  };
+  assert.deepEqual(C.validateReport(good({ context })), []);
+  const item = context.items[0];
+  for (const [what, bad] of [
+    ["an item with no why", { ...context, items: [{ ...item, why: "" }] }],
+    ["an item with a long value", { ...context, items: [{ ...item, value: "x".repeat(501) }] }],
+    ["an item with a bad key", { ...context, items: [{ ...item, key: "has space" }] }],
+    ["41 items", { ...context, items: Array.from({ length: 41 }, (_, i) => ({ ...item, key: `k${i}` })) }],
+    ["a route with a query", { ...context, routes: [{ route: "/a?token=1", at: "x" }] }],
+    ["11 routes", { ...context, routes: Array.from({ length: 11 }, () => ({ route: "/a", at: "x" })) }],
+    ["21 taps", { ...context, taps: Array.from({ length: 21 }, () => ({ label: "a", at: "x" })) }],
+    ["a long tap label", { ...context, taps: [{ label: "x".repeat(81), at: "x" }] }],
+    ["11 errors", { ...context, errors: Array.from({ length: 11 }, () => ({ message: "e", at: "x" })) }],
+    ["a context that is not an object", "everything"],
+  ]) assert.ok(C.validateReport(good({ context: bad })).some((e) => /context/.test(e)), what);
+});
+
 test("a report may carry the issue it became, and its shape is checked", () => {
   const issue = { repo: "acme/notes", number: 12, url: "https://github.com/acme/notes/issues/12" };
   assert.deepEqual(C.validateReport(good({ issue })), []);

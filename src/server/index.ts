@@ -2,6 +2,8 @@
 export { createReportHandlers, reportRevision, TOLD, VOICE_BYTES_PER_SECOND, LEASE_MS, BODY_CAP, APPROVAL_LEASE_MS, HELD_MS, READ_TTL_MS, INCOMPLETE_GRACE_MS, VOICE_FILE_BYTES } from './handlers.ts'
 export type { HostedStore, StoredReport, TimelineEntry, FileState, FollowUp, TellEvent, SubmitterNews, ReportHandlerOptions, GitHubFiling, IssueRef } from './handlers.ts'
 export { json, signIn, notFound, cappedText, peek } from './http.ts'
+export { placeItem, withPlace, PLACE_LABEL, PLACE_WHY } from './geo.ts'
+export type { Geo, GeoHook } from './geo.ts'
 export { sniffType, sameType, canonicalType, ACCEPTED_TYPES } from './sniff.ts'
 export { effectiveLimits } from './rate.ts'
 export type { Limits } from './rate.ts'

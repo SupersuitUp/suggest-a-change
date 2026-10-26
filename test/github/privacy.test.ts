@@ -60,6 +60,24 @@ describe('privacyCatch', () => {
   })
 })
 
+describe('the sender\'s own contact, and the context', () => {
+  it('never flags the sender\'s own email or phone, and still flags anyone else\'s', () => {
+    const r = report('mail me at pat@example.com or call +1 917 555 0100; or ask sam@example.com', { who: { member: 'amy', role: 'member', contact: { email: 'pat@example.com', phone: '+1 917 555 0100' } } })
+    expect(privacyCatch(r).hits).toEqual([{ kind: 'email', text: 'sam@example.com', field: 'words' }])
+  })
+
+  it('reads the context too: the app\'s items, the taps and the errors, and redacts there', () => {
+    const key = 'ghp_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'
+    const r = report('fine', { context: { items: [{ key: 'app:0', label: 'Team', value: 'ask dana whitlock', why: 'x' }], taps: [{ label: 'Call (917) 679-0317', at: 'x' }], errors: [{ message: `401 with ${key}`, at: 'x' }] } })
+    const { hits } = privacyCatch(r, { people: [{ name: 'Dana Whitlock' }] })
+    expect(hits.map((h) => [h.kind, h.field])).toEqual([['person', 'context.items.0.value'], ['phone', 'context.taps.0.label'], ['credential', 'context.errors.0.message']])
+    const out = redact(r, hits) as { context: { items: { value: string }[]; taps: { label: string }[]; errors: { message: string }[] } }
+    expect(out.context.items[0].value).toBe('ask [removed]')
+    expect(out.context.taps[0].label).toBe('Call [removed]')
+    expect(out.context.errors[0].message).toBe('401 with [removed]')
+  })
+})
+
 describe('redact and mayFileAsIs', () => {
   it('replaces each hit with [removed], in its own field, everywhere it appears', () => {
     const r = report('mail a@b.co or a@b.co', { transcript: 'token=9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a', followUps: [{ words: 'a@b.co' }] })
