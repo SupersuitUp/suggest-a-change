@@ -118,7 +118,9 @@ test("init on a fixture app makes the check green", () => {
   const after = run("check.mjs", ["--repo", d]);
   assert.equal(after.status, 0, after.stdout + after.stderr);
   const pkg = JSON.parse(readFileSync(join(d, "package.json"), "utf8"));
-  assert.match(pkg.dependencies["@supersuit/suggest-a-change"], /^\^0\.1\./);
+  // init pins the package's own minor line, whatever version this is.
+  const own = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")).version;
+  assert.equal(pkg.dependencies["@supersuit/suggest-a-change"], `^${own}`);
   assert.equal(pkg.scripts.check, "tsc --noEmit && suggest-a-change-check");
   assert.ok(existsSync(join(d, "tailor/suggest-a-change.ts")));
   const stub = readFileSync(join(d, "tailor/suggest-a-change.ts"), "utf8");
