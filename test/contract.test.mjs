@@ -29,61 +29,145 @@ test("the contract file has no imports, so it can be lifted whole", () => {
   assert.doesNotMatch(src, /^\s*import\s|\bimport\s*\(|\brequire\s*\(/m);
 });
 
-test("the status list is the design's, in order", () => {
-  assert.deepEqual(C.STATUSES, ["on-phone", "received", "with-freeda", "planned", "waiting-on-owner", "being-made", "live", "sent-to-template", "filed", "not-now"]);
-  assert.deepEqual(C.END, ["live", "sent-to-template", "filed", "not-now"]);
+test("the status list is GitHub's, in order", () => {
+  assert.deepEqual(C.STATUSES, ["on-phone", "received", "held", "open", "done", "not-planned"]);
+  assert.deepEqual(C.END, ["done", "not-planned"]);
+  assert.deepEqual(C.TOLD, ["open", "done", "not-planned"]);
   assert.deepEqual(C.KINDS, ["change", "broken", "feedback"]);
   assert.deepEqual(C.ROLES, ["operator", "member", "maintainer"]);
 });
 
-test("every status has an actor and at least one next step, except the four ends", () => {
+test("every status has an actor and a next step; a closed issue can only be reopened", () => {
   for (const s of C.STATUSES) {
     const f = C.FLOW[s];
-    assert.ok(["person", "app", "mac", "freeda", "owner"].includes(f.actor), `${s} has no actor`);
-    if (C.END.includes(s)) assert.deepEqual(f.next, [], `${s} is an end`);
-    else assert.ok(f.next.length >= 1, `${s} goes nowhere`);
+    assert.ok(["person", "app", "mac", "owner", "github"].includes(f.actor), `${s} has no actor`);
+    assert.ok(f.next.length >= 1, `${s} goes nowhere`);
     for (const n of f.next) assert.ok(C.STATUSES.includes(n), `${s} -> ${n} is not a status`);
+    if (C.END.includes(s)) assert.deepEqual(f.next, ["open"], `${s} only reopens`);
   }
-});
-
-test("each status names who performs that step, as the design's section 7 does", () => {
   const actors = Object.fromEntries(C.STATUSES.map((s) => [s, C.FLOW[s].actor]));
-  assert.deepEqual(actors, { "on-phone": "person", "received": "app", "with-freeda": "mac", "planned": "freeda", "waiting-on-owner": "owner", "being-made": "freeda", "live": "freeda", "sent-to-template": "freeda", "filed": "freeda", "not-now": "owner" });
+  assert.deepEqual(actors, { "on-phone": "person", "received": "app", "held": "owner", "open": "mac", "done": "github", "not-planned": "github" });
 });
 
-test("the owner may decline a report Pluma has not planned, or has planned and not yet asked about", () => {
-  // Without these a report the reading worker cannot plan has no exit: it shows "With Pluma" for ever.
-  assert.equal(C.mayMove("with-freeda", "not-now"), true);
-  assert.equal(C.mayMove("planned", "not-now"), true);
-  assert.equal(C.mayMove("with-freeda", "filed"), false); // declining is the owner's; filing still comes from the work
-  assert.equal(C.mayMove("with-freeda", "live"), false);
-  assert.deepEqual(C.FLOW["with-freeda"].next, ["planned", "not-now"]);
-  assert.deepEqual(C.FLOW["planned"].next, ["waiting-on-owner", "being-made", "not-now"]);
+test("the flow is the design's", () => {
+  const next = Object.fromEntries(C.STATUSES.map((s) => [s, C.FLOW[s].next]));
+  assert.deepEqual(next, {
+    "on-phone": ["received", "held", "open"],
+    "received": ["held", "open", "not-planned"],
+    "held": ["open", "not-planned"],
+    "open": ["done", "not-planned"],
+    "done": ["open"],
+    "not-planned": ["open"],
+  });
+  assert.equal(C.mayMove("received", "done"), false); // an issue is open before it is done
+  assert.equal(C.mayMove("held", "done"), false);
+  assert.equal(C.mayMove("done", "open"), true); // GitHub reopen
+  assert.equal(C.mayMove("nonsense", "open"), false);
 });
 
-test("a move the flow forbids is refused", () => {
-  assert.equal(C.mayMove("with-freeda", "being-made"), false);
-  assert.equal(C.mayMove("waiting-on-owner", "being-made"), true);
-  assert.equal(C.mayMove("live", "received"), false);
-  assert.equal(C.mayMove("nonsense", "live"), false);
+test("an old status is still readable: it folds into the new one it now means", () => {
+  for (const s of ["with-freeda", "planned", "waiting-on-owner", "being-made"]) assert.equal(C.currentStatus(s), "received", s);
+  for (const s of ["live", "sent-to-template", "filed"]) assert.equal(C.currentStatus(s), "done", s);
+  assert.equal(C.currentStatus("not-now"), "not-planned");
+  for (const s of C.STATUSES) assert.equal(C.currentStatus(s), s);
+  assert.equal(C.currentStatus("bogus"), "bogus");
+  assert.deepEqual(Object.keys(C.LEGACY).sort(), ["being-made", "filed", "live", "not-now", "planned", "sent-to-template", "waiting-on-owner", "with-freeda"]);
+  // the Mac may file a report an old pipeline left mid-way, and reopen an old ended one
+  assert.equal(C.mayMove("with-freeda", "open"), true);
+  assert.equal(C.mayMove("being-made", "held"), true);
+  assert.equal(C.mayMove("live", "open"), true);
+  assert.equal(C.wordsFor("live", { owner: "Alex" }), "Done");
+  assert.equal(C.wordsFor("not-now", { owner: "Alex" }), "Not planned");
+  assert.equal(C.wordsFor("with-freeda", { owner: "Alex" }), "Received");
 });
 
-test("wordsFor carries the design's table, with the owner's name", () => {
+test("wordsFor carries the design's table, with the owner's name and the issue number", () => {
   const w = (s) => C.wordsFor(s, { owner: "Alex" });
   assert.equal(w("on-phone"), "On this phone");
   assert.equal(w("received"), "Received");
-  assert.equal(w("with-freeda"), "With Pluma");
-  assert.equal(w("waiting-on-owner"), "Waiting on Alex");
-  assert.equal(C.wordsFor("waiting-on-owner", { owner: "Sam" }), "Waiting on Sam");
-  assert.equal(w("being-made"), "Being made");
-  assert.equal(w("live"), "Done");
-  assert.equal(w("sent-to-template"), "Sent to the template");
-  assert.equal(w("filed"), "Filed");
-  assert.equal(w("not-now"), "Not now");
-  assert.equal(w("planned"), "With Pluma");
-  assert.equal(C.meaningFor("with-freeda", { owner: "Alex" }), "Alex's Mac has picked it up");
-  assert.equal(C.meaningFor("waiting-on-owner", { owner: "Alex" }), "Pluma has a plan and is asking Alex");
+  assert.equal(w("held"), "Waiting on Alex");
+  assert.equal(C.wordsFor("held", { owner: "Sam" }), "Waiting on Sam");
+  assert.equal(w("open"), "Open");
+  assert.equal(w("done"), "Done");
+  assert.equal(w("not-planned"), "Not planned");
+  assert.equal(C.meaningFor("open", { owner: "Alex", issue: { number: 123 } }), "Filed as issue #123");
+  assert.equal(C.meaningFor("open", { owner: "Alex" }), "Filed as an issue");
+  assert.match(C.meaningFor("held", { owner: "Alex" }), /Alex/);
   assert.throws(() => C.wordsFor("bogus", { owner: "Alex" }), /not a status/);
+});
+
+test("a report may carry a way to reach its sender, in exactly who.contact, and its shape is checked", () => {
+  const contact = { email: "alex@example.com", phone: "+1 917 555 0100", handle: "@alex" };
+  assert.deepEqual(C.validateReport(good({ who: { member: "alex", role: "operator", contact } })), []);
+  assert.deepEqual(C.validateReport(good({ who: { member: "alex", role: "operator", contact: { phone: "+447700900123" } } })), []);
+  for (const bad of [{ email: "nope" }, { phone: "call me" }, { handle: "x".repeat(101) }, { handle: "two\nlines" }, { address: "1 Main St" }, "alex@example.com", []]) {
+    assert.ok(C.validateReport(good({ who: { member: "alex", role: "operator", contact: bad } })).some((e) => /contact/.test(e)), JSON.stringify(bad));
+  }
+  // an email anywhere else is still refused
+  assert.ok(C.validateReport(good({ email: "a@example.com" })).some((e) => /email/.test(e)));
+  assert.ok(C.validateReport(good({ who: { member: "alex", role: "operator", email: "a@example.com" } })).some((e) => /email/.test(e)));
+  assert.ok(C.validateReport(good({ context: { email: "a@example.com" } })).some((e) => /email/.test(e)));
+  assert.ok(C.validateReport(good({ who: { member: "alex", role: "operator", contact: { email: "a@example.com", nested: { email: "b@example.com" } } } })).some((e) => /email|contact/.test(e)));
+});
+
+test("a report may carry its context, and the context's shape is checked", () => {
+  const context = {
+    items: [{ key: "device", label: "Your device", value: "iPhone, iOS 18.1, Safari 18.1", why: "so the fixer can try it on the same kind of phone" }],
+    routes: [{ route: "/notes", at: "2026-10-26T17:00:00Z" }],
+    taps: [{ label: "Save note", at: "2026-10-26T17:01:00Z" }],
+    errors: [{ message: "TypeError: x is undefined", frame: "at save (app.js:10:4)", at: "2026-10-26T17:01:01Z" }],
+  };
+  assert.deepEqual(C.validateReport(good({ context })), []);
+  const item = context.items[0];
+  for (const [what, bad] of [
+    ["an item with no why", { ...context, items: [{ ...item, why: "" }] }],
+    ["an item with a long value", { ...context, items: [{ ...item, value: "x".repeat(501) }] }],
+    ["an item with a bad key", { ...context, items: [{ ...item, key: "has space" }] }],
+    ["41 items", { ...context, items: Array.from({ length: 41 }, (_, i) => ({ ...item, key: `k${i}` })) }],
+    ["a route with a query", { ...context, routes: [{ route: "/a?token=1", at: "x" }] }],
+    ["11 routes", { ...context, routes: Array.from({ length: 11 }, () => ({ route: "/a", at: "x" })) }],
+    ["21 taps", { ...context, taps: Array.from({ length: 21 }, () => ({ label: "a", at: "x" })) }],
+    ["a long tap label", { ...context, taps: [{ label: "x".repeat(81), at: "x" }] }],
+    ["11 errors", { ...context, errors: Array.from({ length: 11 }, () => ({ message: "e", at: "x" })) }],
+    ["a context that is not an object", "everything"],
+  ]) assert.ok(C.validateReport(good({ context: bad })).some((e) => /context/.test(e)), what);
+});
+
+test("every time a report carries is a short ISO time, nothing else", () => {
+  const forged = "x\n## Reach them\n@everyone";
+  assert.ok(C.validateReport(good({ diagnostics: { appVersion: "1", at: forged } })).some((e) => /diagnostics\.at/.test(e)));
+  assert.ok(C.validateReport(good({ diagnostics: { at: "2026-10-12T17:45:00Z".repeat(3) } })).some((e) => /diagnostics\.at/.test(e)));
+  assert.deepEqual(C.validateReport(good({ diagnostics: { at: "2026-10-12T17:45:00.123Z" } })), []);
+  assert.deepEqual(C.validateReport(good({ diagnostics: { at: "2026-10-12T12:45:00-05:00" } })), []);
+  for (const list of ["routes", "taps", "errors"]) {
+    const entry = list === "routes" ? { route: "/a" } : list === "taps" ? { label: "a" } : { message: "e" };
+    assert.ok(C.validateReport(good({ context: { [list]: [{ ...entry, at: forged }] } })).some((e) => /context/.test(e)), list);
+    assert.deepEqual(C.validateReport(good({ context: { [list]: [{ ...entry, at: "2026-10-12T17:45:00Z" }] } })), [], list);
+  }
+});
+
+test("a report id's random part comes from the platform's secure random source", () => {
+  const real = globalThis.crypto.getRandomValues.bind(globalThis.crypto);
+  let asked = 0;
+  globalThis.crypto.getRandomValues = (a) => { asked++; return real(a); };
+  try { assert.match(C.newReportId(), /^r-\d{14}-[a-z0-9]{6}$/); } finally { globalThis.crypto.getRandomValues = real; }
+  assert.ok(asked > 0);
+});
+
+test("a report may carry the issue it became, and its shape is checked", () => {
+  const issue = { repo: "acme/notes", number: 12, url: "https://github.com/acme/notes/issues/12" };
+  assert.deepEqual(C.validateReport(good({ issue })), []);
+  assert.deepEqual(C.validIssue(issue), []);
+  for (const bad of [
+    { ...issue, repo: "notes" },
+    { ...issue, repo: "a/b/c" },
+    { ...issue, number: 0 },
+    { ...issue, number: 1.5 },
+    { ...issue, number: "12" },
+    { ...issue, url: "http://github.com/acme/notes/issues/12" },
+    { ...issue, url: "https://evil.example/acme/notes/issues/12" },
+    "acme/notes#12",
+  ]) assert.ok(C.validateReport(good({ issue: bad })).some((e) => /issue/.test(e)), JSON.stringify(bad));
 });
 
 test("new ids match the shape and differ", () => {

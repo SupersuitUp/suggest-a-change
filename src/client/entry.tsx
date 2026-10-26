@@ -3,6 +3,7 @@
 // Signed out, it opens nothing and says why. Signed in, it hands over to the host (`onOpen`), which
 // shows the sheet. `<ReportProblem>` is the same control for an error screen, already filled in.
 import { useEffect, useState, type AriaRole, type ReactNode } from 'react'
+import { currentStatus } from '../contract.mjs'
 import type { Adapters } from './adapters.ts'
 import { useRuntime, type Runtime } from './runtime.ts'
 import { firstToastThisOpen, fresh, moved, onSeen } from './seen.ts'
@@ -50,7 +51,7 @@ function useNews(adapters: Adapters, rt: Runtime | null): { moved: number; toast
       if (!f.length || !firstToastThisOpen(id)) return
       const at = (x: string) => rows!.find((r) => r.id === x)?.at ?? 0
       const top = [...f].sort((a, b) => at(b.id) - at(a.id))[0]
-      const note = top.status === 'not-now' ? rows.find((r) => r.id === top.id)?.note : undefined
+      const note = currentStatus(top.status) === 'not-planned' ? rows.find((r) => r.id === top.id)?.note : undefined
       setToasted(true)
       toast({ id: `sac-moved-${top.id}`, text: S.movedToast(statusWords(top.status, adapters.words.owner), typeof note === 'string' && note ? note : undefined), ms: 6000 })
     })()

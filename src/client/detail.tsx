@@ -3,7 +3,7 @@
 // it has an end status. A report's words are data: they are rendered as text, never as markup. A report
 // that is still only on this phone is shown from the phone's own copy, with the app's refusal if it gave one.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { END, STATUSES } from '../contract.mjs'
+import { END, STATUSES, currentStatus } from '../contract.mjs'
 import type { Adapters, FieldProps } from './adapters.ts'
 import { DefaultField } from './default-field.tsx'
 import { draftKey } from './drafts.ts'
@@ -13,7 +13,7 @@ import { useRuntime, useTick, type FollowUp } from './runtime.ts'
 import { markSeen } from './seen.ts'
 import { Toasts } from './toast.tsx'
 import { dropCache, isRefusal, oneCacheKey, readCache, useClearOnSignOut, writeCache } from './view-cache.ts'
-import { effectiveCeilings, lengthWords, sizeWords, statusMeaning, statusWords, stringsFor } from './words.ts'
+import { effectiveCeilings, linkableIssue, lengthWords, sizeWords, statusMeaning, statusWords, stringsFor } from './words.ts'
 
 export function statusOf(r: Record<string, unknown>): string {
   if (typeof r.status === 'string') return r.status
@@ -22,7 +22,7 @@ export function statusOf(r: Record<string, unknown>): string {
   return 'received'
 }
 
-/** The step shown under "Being made". The timeline entry is the truth (that is where the receiving side puts it); a top-level `step` is read only when there is no timeline. */
+/** The step shown under the current status. The timeline entry is the truth (that is where the receiving side puts it); a top-level `step` is read only when there is no timeline. */
 export function stepOf(r: Record<string, unknown>): string | undefined {
   const t = r.timeline
   if (Array.isArray(t) && t.length) { const s = (t[t.length - 1] as { step?: unknown })?.step; return typeof s === 'string' && s ? s : undefined }
@@ -33,7 +33,10 @@ const timelineOf = (r?: Record<string, unknown>): string[] | undefined =>
 
 /** The strip is made from the contract's own statuses, one step per distinct word ("planned" reads as "With Pluma"),
  *  and a step is marked from the report's timeline: reached, skipped (the report went past it), or still ahead. */
-export function StatusStrip({ status, owner, step, timeline, label }: { status: string; owner: string; step?: string; timeline?: string[]; /** The list's accessible name; the screens pass the app's own (words.text.stepLabel). */ label?: string }) {
+export function StatusStrip({ status: given, owner, step, timeline: givenTimeline, label }: { status: string; owner: string; step?: string; timeline?: string[]; /** The list's accessible name; the screens pass the app's own (words.text.stepLabel). */ label?: string }) {
+  // An old (0.1.x) status reads as the new one it means, on the strip and in the timeline it is marked from.
+  const status = currentStatus(given)
+  const timeline = givenTimeline?.map((s) => currentStatus(s))
   const nodes = useMemo(() => {
     const out: { words: string; ids: string[] }[] = []
     for (const id of STATUSES.filter((s: string) => !END.includes(s))) {
@@ -46,7 +49,7 @@ export function StatusStrip({ status, owner, step, timeline, label }: { status: 
   const ended = END.includes(status)
   const here = nodes.findIndex((n) => n.ids.includes(status))
   const at = ended ? nodes.length : Math.max(0, here)
-  const items = [...nodes, { words: statusWords(ended ? status : 'live', owner), ids: [ended ? status : 'end'] }]
+  const items = [...nodes, { words: statusWords(ended ? status : 'done', owner), ids: [ended ? status : 'end'] }]
   const reached = new Set(timeline ?? [])
   return (
     <ol className="sac-strip" aria-label={label ?? stringsFor({ app: 'x', owner }).stepLabel} data-status={status}>
@@ -60,7 +63,7 @@ export function StatusStrip({ status, owner, step, timeline, label }: { status: 
         return (
           <li key={it.words + i} className="sac-step" data-state={state} aria-current={i === at ? 'step' : undefined}>
             <span>{it.words}</span>
-            {i === at && it.ids.includes('being-made') && step ? <span className="sac-step-detail">{step}</span> : null}
+            {i === at && step ? <span className="sac-step-detail">{step}</span> : null}
           </li>
         )
       })}
@@ -188,9 +191,10 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
   if (who === null) return <p role="alert">{S.signedOutMine}</p>
   if (report === undefined) return <p>{S.loading}</p>
   if (report === null) return <p role="alert">{S.couldNotOpen}</p>
-  const status = statusOf(report)
+  const status = currentStatus(statusOf(report))
   const owner = adapters.words.owner
   const open = !END.includes(status) && status !== 'on-phone'
+  const issue = linkableIssue(report.issue)
   const answers = (report.answers ?? {}) as Record<string, string>
   const voice = Array.isArray(report.voice) ? (report.voice as { file: string; ms: number }[]) : []
   const media = Array.isArray(report.media) ? (report.media as { file: string; type: string; bytes: number }[]) : []
@@ -229,7 +233,8 @@ export function SuggestionDetail({ adapters, id }: { adapters: Adapters; id: str
   return (
     <article className="sac-detail" data-report={id}>
       <h3 className="sac-status" data-status={status}>{statusWords(status, owner)}</h3>
-      <p className="sac-muted">{statusMeaning(status, owner)}{status === 'live' && typeof report.liveAt === 'string' ? ` (${new Date(report.liveAt).toLocaleDateString()})` : ''}</p>
+      <p className="sac-muted">{statusMeaning(status, owner, report.issue)}</p>
+      {issue ? <p><a className="sac-issue-link" href={issue.url} target="_blank" rel="noopener noreferrer">{S.issueLink(issue.number)}</a></p> : null}
       {refusal ? (
         <>
           <p role="alert" className="sac-error">{refusal}</p>

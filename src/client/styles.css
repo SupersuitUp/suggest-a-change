@@ -56,6 +56,11 @@
 .sac-muted { color: var(--sac-muted); font-size: 0.9rem; }
 .sac-fyi { font-size: 0.8rem; margin: 0; }
 .sac-error { color: var(--sac-danger); margin: 0; }
+.sac-danger { color: var(--sac-danger); font-weight: 600; }
+.sac-goes p { margin: 0; }
+.sac-goes-list { margin: 2px 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 2px 0; }
+.sac-goes-list li:not(:last-child)::after { content: " \00b7 "; white-space: pre; color: var(--sac-muted); }
+.sac-issue-link { color: var(--sac-accent); font-size: 0.9rem; }
 .sac-receipt-line { font-weight: 600; margin: 0; }
 .sac-strip { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .sac-step { border: 1px solid var(--sac-border); border-radius: 999px; padding: 4px 10px; color: var(--sac-muted); }

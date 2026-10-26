@@ -176,6 +176,126 @@ describe('the sheet', () => {
     expect(line).toBe("Goes to Alex and Pluma. Includes this screen (Photos, /photos), the app's version, the time, your screen size and your phone type.")
     expect(line).not.toContain('x=1')
     expect(screen.queryAllByRole('switch')).toHaveLength(0)
+    expect(document.querySelector('[data-sac-goes]')).toBeNull() // no destination adapter: today's line
+  })
+
+  it('with a destination, the line becomes the list of exactly what files, and where, and it follows the draft', async () => {
+    const { adapters } = await setup({ destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true, name: 'Sam Lee' }) })
+    await sheet(adapters)
+    const goes = await waitFor(() => { const g = document.querySelector('[data-sac-goes]'); expect(g).toBeTruthy(); return g as HTMLElement })
+    expect(document.querySelector('[data-sac-summary]')).toBeNull()
+    expect(goes.textContent).toContain('Sending this files an issue on acme/app')
+    expect(goes.textContent).toContain("private: people with access to acme/app's code can read it")
+    expect(goes.querySelector('.sac-danger')).toBeNull()
+    expect(goes.textContent).toContain("Filed from sam-gh's GitHub account.")
+    const items = () => [...goes.querySelectorAll('.sac-goes-list > li')].map((li) => li.textContent)
+    // What always goes, in order; the context rows (device, time and the rest) follow as tick boxes.
+    await waitFor(() => expect(goes.querySelector('[data-goes="ctx:device"]')).toBeTruthy())
+    expect(items()).toEqual(['this screen (Photos, /photos)', 'notes 1.2.3', 'your name, Sam Lee'])
+    expect(goes.querySelector('[data-goes="ctx:device"]')!.textContent).toMatch(/^ ?Your device: .+\(so the fixer can try it on the same kind of device and browser\)$/)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'bigger please' } })
+    fireEvent.change(images(), { target: { files: [png('a.png'), png('b.png')] } })
+    await waitFor(() => expect(items().slice(0, 2)).toEqual(['your words', '2 screenshots, saved to the suggestion-attachments branch of acme/app']))
+  })
+
+  it('a public destination says so in the danger colour; one that cannot take files yet says they wait', async () => {
+    const { adapters } = await setup({ destination: async () => ({ repo: 'acme/open', public: true, account: 'sam-gh', attaches: false }) })
+    await sheet(adapters)
+    const danger = await waitFor(() => { const d = document.querySelector('[data-sac-goes] .sac-danger'); expect(d).toBeTruthy(); return d! })
+    expect(danger.textContent).toBe('public: anyone on the internet can read this')
+    fireEvent.change(images(), { target: { files: [png('a.png')] } })
+    await screen.findByText('1 screenshot, added once acme/open can take attachments')
+  })
+
+  it('every piece of context is listed with its value and why, on by default, and one left out never leaves the phone', async () => {
+    const { adapters, submitted } = await setup({ destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }) })
+    await sheet(adapters)
+    const device = await screen.findByRole('checkbox', { name: /Your device/ }) as HTMLInputElement
+    expect(device.checked).toBe(true)
+    expect(device.closest('label')!.textContent).toMatch(/so the fixer can/)
+    expect(screen.getByRole('checkbox', { name: /Your local time/ })).toBeTruthy()
+    // what the person added, and the app's version, are not things to leave out
+    expect(document.querySelector('[data-goes="words"] input, [data-goes="app"] input, [data-goes="filer"] input')).toBeNull()
+    fireEvent.click(device)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'bigger please' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(submitted).toHaveLength(1))
+    const ctx = submitted[0].context as { items: { key: string }[] }
+    expect(ctx.items.map((i) => i.key)).not.toContain('device')
+    expect(ctx.items.map((i) => i.key)).toContain('time')
+    expect((submitted[0].diagnostics as Record<string, string>).device).toBeUndefined() // left out means left out everywhere
+  })
+
+  it('with no destination, the context is still listed and can be left out', async () => {
+    const { adapters, submitted } = await setup()
+    await sheet(adapters)
+    fireEvent.click(await screen.findByRole('checkbox', { name: /Your local time/ }))
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(submitted).toHaveLength(1))
+    expect((submitted[0].context as { items: { key: string }[] }).items.map((i) => i.key)).not.toContain('time')
+    expect((submitted[0].diagnostics as Record<string, string>).at).toBeUndefined()
+  })
+
+  it('what the app adds through context() is listed with its own why', async () => {
+    const { adapters, submitted } = await setup({ context: async () => [{ label: 'Plan', value: 'Pro, yearly', why: 'some features only exist on Pro' }] })
+    await sheet(adapters)
+    const plan = await screen.findByRole('checkbox', { name: /Plan/ })
+    expect(plan.closest('label')!.textContent).toContain('some features only exist on Pro')
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(submitted).toHaveLength(1))
+    expect((submitted[0].context as { items: { key: string; value: string }[] }).items.find((i) => i.key === 'app:0')!.value).toBe('Pro, yearly')
+  })
+
+  it('how to reach them goes by default to a private repo, and is off with the reason for a public one', async () => {
+    const contact = async () => ({ email: 'sam@example.com', handle: '@sam' })
+    const priv = await setup({ contact, destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }) })
+    await sheet(priv.adapters)
+    expect(((await screen.findByRole('checkbox', { name: /How to reach you/ })) as HTMLInputElement).checked).toBe(true)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(priv.submitted).toHaveLength(1))
+    expect((priv.submitted[0].who as Record<string, unknown>).contact).toEqual({ email: 'sam@example.com', handle: '@sam' })
+    cleanup()
+    const pub = await setup({ contact, destination: async () => ({ repo: 'acme/open', public: true, account: 'sam-gh', attaches: true }) })
+    await sheet(pub.adapters)
+    const box = await screen.findByRole('checkbox', { name: /How to reach you/ }) as HTMLInputElement
+    expect(box.checked).toBe(false)
+    expect(box.closest('label')!.textContent).toContain('this repo is public, so anyone could read it')
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(pub.submitted).toHaveLength(1))
+    expect((pub.submitted[0].who as Record<string, unknown>).contact).toBeUndefined()
+  })
+
+  it('never sends what someone typed into the page, even after they tapped it', async () => {
+    const { adapters, submitted } = await setup()
+    const outside = document.createElement('input'); outside.value = 'hunter2'; document.body.appendChild(outside)
+    render(<KeepSending adapters={adapters} />) // the module's listeners start on its first mount
+    outside.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await sheet(adapters)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(submitted).toHaveLength(1))
+    expect(JSON.stringify(submitted[0].context)).toContain('a text field')
+    expect(JSON.stringify(submitted[0])).not.toContain('hunter2')
+    outside.remove()
+  })
+
+  it('says before Send when a file is larger than the destination can take', async () => {
+    const { adapters } = await setup({ destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true, maxInlineBytes: 1000 }) })
+    await sheet(adapters)
+    fireEvent.change(images(), { target: { files: [png('big.png', 2048)] } })
+    await screen.findByText(/image-1\.png is over the 1 KB acme\/app can take, so it does not reach the issue/)
+  })
+
+  it('a destination that answers nothing keeps today\'s line', async () => {
+    const { adapters } = await setup({ destination: async () => null })
+    await sheet(adapters)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(document.querySelector('[data-sac-summary]')).toBeTruthy()
+    expect(document.querySelector('[data-sac-goes]')).toBeNull()
   })
 
   it('diagnostics are always the contract\'s four with their real meanings: the screen is its size, the phone type is short', async () => {
@@ -500,17 +620,15 @@ describe('the entry', () => {
 const DESIGN_TABLE: [string, string, string][] = [
   ['on-phone', 'On this phone', 'Not sent yet; it will send when there is a connection'],
   ['received', 'Received', 'The app has it, safely stored'],
-  ['with-freeda', 'With Pluma', "Alex's Mac has picked it up"],
-  ['waiting-on-owner', 'Waiting on Alex', 'Pluma has a plan and is asking Alex'],
-  ['being-made', 'Being made', 'A session is working on it; the current step shows underneath'],
-  ['live', 'Done', 'Shipped in the app, with the date it went live'],
-  ['sent-to-template', 'Sent to the template', 'It became a change to the template every copy of this app uses; it reaches this app once merged'],
-  ['filed', 'Filed', 'It was passed to whoever owns the problem'],
-  ['not-now', 'Not now', 'Alex decided against it, with the one-line reason if given'],
+  ['held', 'Waiting on Alex', 'Alex looks at it before it is filed'],
+  ['open', 'Open', 'Filed as an issue'],
+  ['done', 'Done', 'Closed as completed'],
+  ['not-planned', 'Not planned', 'Closed as not planned, with the reason if one was given'],
 ]
+const ISSUE = { repo: 'acme/app', number: 7, url: 'https://github.com/acme/app/issues/7' }
 
 describe('My suggestions and the detail view', () => {
-  it('the status words are the design\'s table (the Not now row keeps the contract\'s neutral wording)', async () => {
+  it('the status words are the design\'s table', async () => {
     const rows: Summary[] = STATUSES.map((status, i) => ({ id: `r-${i}`, status, at: i }))
     const { adapters } = await setup({}, SAM, { mine: async () => rows })
     render(<MySuggestions adapters={adapters} />)
@@ -521,8 +639,31 @@ describe('My suggestions and the detail view', () => {
       expect(within(row).getByText(word)).toBeTruthy()
       expect(within(row).getByText(meaning)).toBeTruthy()
     }
-    const planned = document.querySelector('[data-status="planned"]') as HTMLElement
-    expect(within(planned).getByText('With Pluma')).toBeTruthy()
+  })
+
+  it('an app still on the old statuses reads in the new words', async () => {
+    const { adapters } = await setup({}, SAM, { mine: async () => [{ id: 'a', status: 'live', at: 2 }, { id: 'b', status: 'with-freeda', at: 1 }, { id: 'c', status: 'not-now', at: 0 }] })
+    render(<MySuggestions adapters={adapters} />)
+    await screen.findAllByRole('button')
+    expect([...document.querySelectorAll('.sac-row')].map((r) => [r.getAttribute('data-status'), r.querySelector('.sac-row-status')!.textContent])).toEqual([['done', 'Done'], ['received', 'Received'], ['not-planned', 'Not planned']])
+  })
+
+  it('a row and the detail link to the issue it became, by number', async () => {
+    const { adapters } = await setup({}, SAM, { mine: async () => [{ id: 'r-20261012120000-abcdef', status: 'open', at: 1, issue: ISSUE }], one: async (id) => ({ id, status: 'open', words: 'w', issue: ISSUE }) })
+    const { unmount } = render(<MySuggestions adapters={adapters} />)
+    const link = await screen.findByRole('link', { name: 'Issue #7' })
+    expect(link.getAttribute('href')).toBe(ISSUE.url)
+    expect(screen.getByText('Filed as issue #7')).toBeTruthy()
+    unmount()
+    render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
+    expect((await screen.findByRole('link', { name: 'Issue #7' })).getAttribute('href')).toBe(ISSUE.url)
+    expect(screen.getByText('Filed as issue #7')).toBeTruthy()
+    // a link that is not to github.com is never drawn
+    cleanup()
+    const bad = await setup({}, SAM, { mine: async () => [{ id: 'r-1', status: 'open', at: 1, issue: { ...ISSUE, url: 'javascript:alert(1)' } }] })
+    render(<MySuggestions adapters={bad.adapters} />)
+    await screen.findAllByRole('button')
+    expect(screen.queryByRole('link')).toBeNull()
   })
 
   it('a status the contract does not know shows as itself and does not take the list down', async () => {
@@ -533,7 +674,7 @@ describe('My suggestions and the detail view', () => {
   })
 
   it('lists newest first, and a report still on the phone shows as on this phone', async () => {
-    const { adapters } = await setup({}, SAM, { mine: async () => [{ id: 'old', status: 'received', at: 1 }, { id: 'new', status: 'being-made', at: 9 }], submit: async () => new Promise(() => {}) })
+    const { adapters } = await setup({}, SAM, { mine: async () => [{ id: 'old', status: 'received', at: 1 }, { id: 'new', status: 'open', at: 9 }], submit: async () => new Promise(() => {}) })
     const { container } = render(<><SuggestSheet adapters={adapters} where={where} /><MySuggestions adapters={adapters} /></>)
     await screen.findByRole('combobox', { name: 'What kind?' })
     fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
@@ -541,7 +682,7 @@ describe('My suggestions and the detail view', () => {
     await waitFor(() => expect(container.querySelectorAll('.sac-row').length).toBe(3))
     const order = [...container.querySelectorAll('.sac-row')].map((r) => r.getAttribute('data-status'))
     expect(order[0]).toBe('on-phone')
-    expect(order.slice(1)).toEqual(['being-made', 'received'])
+    expect(order.slice(1)).toEqual(['open', 'received'])
   })
 
   it('a refused report shows the app\'s reason and a Try again on its row, and opens from the phone\'s own copy', async () => {
@@ -621,7 +762,7 @@ describe('My suggestions and the detail view', () => {
   })
 
   it('the detail shows the step the receiving side puts on the latest timeline entry', async () => {
-    const one = vi.fn(async (id: string) => ({ id, words: 'w', media: [], voice: [], timeline: [{ status: 'received', by: 'app', at: 'x' }, { status: 'being-made', by: 'freeda', at: 'y', step: 'Checking the button on a small phone' }] }))
+    const one = vi.fn(async (id: string) => ({ id, words: 'w', media: [], voice: [], timeline: [{ status: 'received', by: 'app', at: 'x' }, { status: 'held', by: 'owner', at: 'y', step: 'Checking the button on a small phone' }] }))
     const { adapters } = await setup({}, SAM, { one })
     render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
     expect(await screen.findByText('Checking the button on a small phone')).toBeTruthy()
@@ -629,14 +770,14 @@ describe('My suggestions and the detail view', () => {
 
   it('the detail shows words, attachments and the strip, lets the person add to it, and stops at an end status', async () => {
     const appended: Record<string, unknown>[] = []
-    const one = vi.fn(async (id: string) => ({ id, status: 'being-made', step: 'Pluma is testing the change', words: 'bigger photos <b>please</b>', media: [{ file: 'image-1.png', type: 'image/png', bytes: 2048 }], voice: [{ file: 'voice-1.webm', ms: 12000 }] }))
+    const one = vi.fn(async (id: string) => ({ id, status: 'open', step: 'Pluma is testing the change', words: 'bigger photos <b>please</b>', media: [{ file: 'image-1.png', type: 'image/png', bytes: 2048 }], voice: [{ file: 'voice-1.webm', ms: 12000 }] }))
     const { adapters } = await setup({}, SAM, { one, append: async (_id, more) => { appended.push(more); return 'done' } })
     render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
     expect(await screen.findByText('bigger photos <b>please</b>')).toBeTruthy()
     expect(screen.getByText('image-1.png, 2.0 KB')).toBeTruthy()
     expect(screen.getByText('Voice note 1, 0:12')).toBeTruthy()
     expect(screen.getByText('Pluma is testing the change')).toBeTruthy()
-    expect(document.querySelector('[aria-current="step"]')!.textContent).toContain('Being made')
+    expect(document.querySelector('[aria-current="step"]')!.textContent).toContain('Open')
     fireEvent.change(screen.getByLabelText('Add to it'), { target: { value: 'also the button is too small' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add' }))
     await screen.findByText('Added.')
@@ -782,20 +923,24 @@ describe('My suggestions and the detail view', () => {
   })
 
   it('offers no way to add once the suggestion has an end status', async () => {
-    const { adapters } = await setup({}, SAM, { one: async (id) => ({ id, status: 'live', words: 'done' }) })
-    render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
-    await screen.findAllByText('Done')
-    expect(screen.queryByLabelText('Add to it')).toBeNull()
+    for (const status of ['done', 'live']) { // an old app's "live" is closed too
+      cleanup()
+      const { adapters } = await setup({}, SAM, { one: async (id) => ({ id, status, words: 'done' }) })
+      render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
+      await screen.findAllByText('Done')
+      expect(screen.queryByLabelText('Add to it'), status).toBeNull()
+    }
   })
 
-  it('the strip is the contract\'s statuses and is marked from the report\'s own timeline', () => {
-    const { container, rerender } = render(<StatusStrip status="not-now" owner="Alex" timeline={['on-phone', 'received', 'with-freeda', 'waiting-on-owner', 'not-now']} />)
+  it('the strip is the contract\'s statuses and is marked from the report\'s own timeline, old statuses folded', () => {
+    const { container, rerender } = render(<StatusStrip status="not-planned" owner="Alex" timeline={['on-phone', 'received', 'held', 'not-planned']} />)
     const words = () => [...container.querySelectorAll('li')].map((li) => li.querySelector('span')!.textContent)
     const states = () => [...container.querySelectorAll('li')].map((li) => li.getAttribute('data-state'))
-    expect(words()).toEqual(['On this phone', 'Received', 'With Pluma', 'Waiting on Alex', 'Being made', 'Not now'])
-    expect(states()).toEqual(['past', 'past', 'past', 'past', 'skipped', 'now'])
+    expect(words()).toEqual(['On this phone', 'Received', 'Waiting on Alex', 'Open', 'Not planned'])
+    expect(states()).toEqual(['past', 'past', 'past', 'skipped', 'now'])
     rerender(<StatusStrip status="live" owner="Alex" timeline={['received', 'with-freeda', 'planned', 'being-made', 'live']} />)
-    expect(states()).toEqual(['skipped', 'past', 'past', 'skipped', 'past', 'now'])
+    expect(words()).toEqual(['On this phone', 'Received', 'Waiting on Alex', 'Open', 'Done'])
+    expect(states()).toEqual(['skipped', 'past', 'skipped', 'skipped', 'now'])
   })
 })
 
@@ -997,29 +1142,38 @@ describe('the person hears that their suggestion moved', () => {
     expect(document.querySelector('.sac-toast')).toBeNull()
   })
 
-  it('a burst is one toast naming the newest move; the rest are only the dot; not-now carries its note', async () => {
+  it('a burst is one toast naming the newest move; the rest are only the dot; not-planned carries its note', async () => {
     const t = await setup()
     await firstSight(t, [{ id: 'a', status: 'received', at: 1 }, { id: 'b', status: 'received', at: 5 }, { id: 'c', status: 'received', at: 3 }])
-    t.store.mine = async () => [{ id: 'b', status: 'not-now', at: 5, note: 'too big for now' }, { id: 'c', status: 'filed', at: 3 }, { id: 'a', status: 'being-made', at: 1 }]
+    t.store.mine = async () => [{ id: 'b', status: 'not-planned', at: 5, note: 'too big for now' }, { id: 'c', status: 'done', at: 3 }, { id: 'a', status: 'open', at: 1 }]
     render(<SuggestEntry adapters={t.adapters} onOpen={() => {}} />)
     await waitFor(() => expect(document.querySelectorAll('.sac-toast')).toHaveLength(1))
-    expect(document.querySelector('.sac-toast')!.textContent).toBe('Your suggestion: Not now. too big for now')
+    expect(document.querySelector('.sac-toast')!.textContent).toBe('Your suggestion: Not planned. too big for now')
+  })
+
+  it('an old app\'s not-now still carries its note, in the new words', async () => {
+    const t = await setup()
+    await firstSight(t, [{ id: 'b', status: 'received', at: 5 }])
+    t.store.mine = async () => [{ id: 'b', status: 'not-now', at: 5, note: 'later' }]
+    render(<SuggestEntry adapters={t.adapters} onOpen={() => {}} />)
+    await waitFor(() => expect(document.querySelectorAll('.sac-toast')).toHaveLength(1))
+    expect(document.querySelector('.sac-toast')!.textContent).toBe('Your suggestion: Not planned. later')
   })
 
   it('My suggestions marks the moved row New, and opening it clears the mark and the dot', async () => {
     const t = await setup()
-    await firstSight(t, [{ id: 'r-20261012120000-abcdef', status: 'being-made', at: 1, words: 'bigger photos' }, { id: 'r-20261012120000-bbbbbb', status: 'received', at: 2, words: 'a quiet one' }])
-    t.store.mine = async () => [{ id: 'r-20261012120000-abcdef', status: 'sent-to-template', at: 1, words: 'bigger photos' }, { id: 'r-20261012120000-bbbbbb', status: 'received', at: 2, words: 'a quiet one' }]
-    t.store.one = async (id) => ({ id, words: 'bigger photos', media: [], voice: [], timeline: [{ status: 'sent-to-template', by: 'freeda', at: 'x' }] })
+    await firstSight(t, [{ id: 'r-20261012120000-abcdef', status: 'open', at: 1, words: 'bigger photos' }, { id: 'r-20261012120000-bbbbbb', status: 'received', at: 2, words: 'a quiet one' }])
+    t.store.mine = async () => [{ id: 'r-20261012120000-abcdef', status: 'done', at: 1, words: 'bigger photos' }, { id: 'r-20261012120000-bbbbbb', status: 'received', at: 2, words: 'a quiet one' }]
+    t.store.one = async (id) => ({ id, words: 'bigger photos', media: [], voice: [], timeline: [{ status: 'done', by: 'github', at: 'x' }] })
     render(<><SuggestEntry adapters={t.adapters} onOpen={() => {}} /><MySuggestions adapters={t.adapters} /></>)
-    const row = () => document.querySelector('[data-status="sent-to-template"]') as HTMLElement
+    const row = () => document.querySelector('[data-status="done"]') as HTMLElement
     await waitFor(() => expect(row()?.querySelector('[data-new]')?.textContent).toBe('New'))
     expect((document.querySelector('[data-status="received"]') as HTMLElement).querySelector('[data-new]')).toBeNull()
     await waitFor(() => expect(document.querySelector('[data-sac-moved]')).toBeTruthy())
     fireEvent.click(within(row()).getByRole('button'))
     await screen.findByText('bigger photos')
     await waitFor(() => expect(document.querySelector('[data-sac-moved]')).toBeNull())
-    expect(await t.db.get('kv', seenKey(t.adapters.words.app))).toMatchObject({ 'r-20261012120000-abcdef': 'sent-to-template' })
+    expect(await t.db.get('kv', seenKey(t.adapters.words.app))).toMatchObject({ 'r-20261012120000-abcdef': 'done' })
   })
 
   it('a move an earlier page load already saw keeps the dot and is not toasted again', async () => {
@@ -1073,10 +1227,10 @@ describe('when the entry sits in a menu', () => {
   it('SuggestNews at the root toasts with no entry mounted, and hands back the count', async () => {
     const t = await setup()
     await prime(t, [{ id: 'a', status: 'received', at: 1 }, { id: 'b', status: 'received', at: 2 }])
-    t.store.mine = async () => [{ id: 'a', status: 'live', at: 1 }, { id: 'b', status: 'being-made', at: 2 }]
+    t.store.mine = async () => [{ id: 'a', status: 'live', at: 1 }, { id: 'b', status: 'open', at: 2 }]
     render(<SuggestNews adapters={t.adapters}>{(n) => <span data-count="">{n.moved}</span>}</SuggestNews>)
     await waitFor(() => expect(document.querySelectorAll('.sac-toast')).toHaveLength(1))
-    expect(document.querySelector('.sac-toast')!.textContent).toBe('Your suggestion: Being made')
+    expect(document.querySelector('.sac-toast')!.textContent).toBe('Your suggestion: Open')
     await waitFor(() => expect(document.querySelector('[data-count]')!.textContent).toBe('2'))
     expect(document.querySelector('[data-suggest-entry]')).toBeNull()
   })

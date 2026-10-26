@@ -105,6 +105,10 @@ export interface Strings {
   entryMoved: string
   /** The one toast per open. `words` is the status's own word (wordsFor); `note` is the not-now reason, when there is one. */
   movedToast: (words: string, note?: string) => string
+  /** The link to the issue a report became. */
+  issueLink: (n: number) => string
+  /** The accessible name of the list of context, each row a tick box. */
+  contextLegend: string
 }
 
 export const DEFAULT_STRINGS: Strings = {
@@ -193,6 +197,8 @@ export const DEFAULT_STRINGS: Strings = {
   newMark: 'New',
   entryMoved: 'One of your suggestions has news',
   movedToast: (words, note) => (note ? `Your suggestion: ${words}. ${note}` : `Your suggestion: ${words}`),
+  issueLink: (n) => `Issue #${n}`,
+  contextLegend: 'Also shared, so it can be fixed (untick anything to leave it out)',
 }
 
 export function stringsFor(words: Words): Strings {
@@ -208,8 +214,15 @@ function list(parts: string[]): string {
 export function statusWords(status: string, owner: string): string {
   try { return wordsFor(status, { owner }) } catch { return String(status) }
 }
-export function statusMeaning(status: string, owner: string): string {
-  try { return meaningFor(status, { owner }) } catch { return '' }
+export function statusMeaning(status: string, owner: string, issue?: unknown): string {
+  try { return meaningFor(status, { owner, issue }) } catch { return '' }
+}
+
+/** The issue a report became, when it is one this module will link: a github.com address and a whole number. */
+export function linkableIssue(issue: unknown): { number: number; url: string } | null {
+  const i = issue as { number?: unknown; url?: unknown } | null | undefined
+  if (!i || typeof i !== 'object' || !Number.isInteger(i.number) || typeof i.url !== 'string' || !i.url.startsWith('https://github.com/')) return null
+  return { number: i.number as number, url: i.url }
 }
 
 export type ReceiptState = 'on-phone' | 'received' | 'on-mac'

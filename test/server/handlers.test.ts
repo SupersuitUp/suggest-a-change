@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { createReportHandlers, reportRevision, TOLD, type SubmitterNews, type TellEvent } from '../../src/server/index.ts'
+import { createReportHandlers, reportRevision, TOLD, type ReportHandlerOptions, type SubmitterNews, type TellEvent } from '../../src/server/index.ts'
 import { makeMemoryStore } from './memory-store.ts'
 
 const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 73, 72, 68, 82])
 const sha = async (b: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', b as BufferSource))].map((x) => x.toString(16).padStart(2, '0')).join('')
 
+const ISSUE = { repo: 'acme/app', number: 7, url: 'https://github.com/acme/app/issues/7' }
 let n = 0
 let lastSetup: { h: ReturnType<typeof createReportHandlers>; mem: ReturnType<typeof makeMemoryStore>; call: (m: string, p: string, w: { user?: string; agent?: string } | null, b?: unknown) => Request }
 /** The settle a Mac makes: it carries the revision of what it was shown (the stored report as it stands). */
@@ -12,7 +13,7 @@ const settle = async (agent: string, id: string) => lastSetup.h.agentSettle(last
 const newId = () => `r-20261012090000-${String(100000 + ++n).slice(1).padStart(6, 'a')}`
 const rid = () => `r-20261012090000-a${String(++n).padStart(5, '0')}`
 
-function setup(extra: { limits?: Record<string, number>; tell?: (e: TellEvent) => void; tellSubmitter?: ((e: SubmitterNews) => void | Promise<void>) | { none: string }; app?: Record<string, string>; maintainersSince?: Record<string, number | string> } = {}) {
+function setup(extra: { limits?: Record<string, number>; tell?: (e: TellEvent) => void; tellSubmitter?: ((e: SubmitterNews) => void | Promise<void>) | { none: string }; app?: Record<string, string>; maintainersSince?: Record<string, number | string>; github?: ReportHandlerOptions['github']; geo?: ReportHandlerOptions['geo']; contactOf?: ReportHandlerOptions['contactOf'] } = {}) {
   const mem = makeMemoryStore()
   const h = createReportHandlers({
     store: mem.store,
@@ -101,10 +102,11 @@ describe('hosted report handlers', () => {
     expect((await h.agentList(call('GET', 'x', { agent: 'mo' }))).status).toBe(200)
   })
 
-  it('a report that carries a timeline, status, plan or decision is refused', async () => {
+  it('a report that carries a timeline, status, plan, decision or issue is refused', async () => {
     const { h, call, draft, mem } = setup()
-    for (const field of ['timeline', 'status', 'plan', 'decision']) {
-      const res = await h.submit(call('POST', 'x', { user: 'amy' }, draft({ [field]: field === 'timeline' ? [{ status: 'live' }] : 'live' })))
+    for (const field of ['timeline', 'status', 'plan', 'decision', 'issue']) {
+      const value = field === 'timeline' ? [{ status: 'done' }] : field === 'issue' ? { repo: 'a/b', number: 1, url: 'https://github.com/a/b/issues/1' } : 'done'
+      const res = await h.submit(call('POST', 'x', { user: 'amy' }, draft({ [field]: value })))
       expect(res.status, field).toBe(400)
     }
     expect(mem.reports.size).toBe(0)
@@ -224,7 +226,7 @@ describe('hosted report handlers', () => {
     expect((await h.agentClaimApproval(call('POST', 'x', { agent: 'ben' }, {}), id)).status).toBe(401)
   })
 
-  it('settle sets With Pluma and moves attachments under collected/', async () => {
+  it('settle leaves the report received and moves attachments under collected/', async () => {
     const { h, call, mem, withPhoto } = setup()
     const id = await withPhoto()
     expect(await mem.collectedKeys(id)).toEqual([])
@@ -233,16 +235,18 @@ describe('hosted report handlers', () => {
     expect((await settle('lee', id)).status).toBe(409) // lee never claimed it
     const res = await settle('mo', id)
     expect(res.status).toBe(200)
-    expect(mem.reports.get(id)!.timeline.map((t) => t.status)).toEqual(['received', 'with-freeda'])
+    // Collecting is not filing: it stays received until the Mac files the issue (or holds it).
+    expect(mem.reports.get(id)!.timeline.map((t) => t.status)).toEqual(['received'])
+    expect(((await res.json()) as { status: string }).status).toBe('received')
     expect(await mem.collectedKeys(id)).toEqual([`collected/reports/${id}/a.png`])
     // the member sees it, and can still be collected by the other maintainer
     const mine = (await (await h.mine(call('GET', 'x', { user: 'amy' }))).json()) as { status: string }[]
-    expect(mine[0].status).toBe('with-freeda')
+    expect(mine[0].status).toBe('received')
     const file = await h.agentFile(call('GET', 'x', { agent: 'mo' }), id, 'a.png')
     expect(file.status).toBe(200)
     expect(((await file.json()) as { sha256: string }).sha256).toBe(await sha(PNG))
     expect((await settle('mo', id)).status).toBe(200) // twice is fine
-    expect(mem.reports.get(id)!.timeline).toHaveLength(2)
+    expect(mem.reports.get(id)!.timeline).toHaveLength(1)
   })
 
   it('nothing is ever uploaded through the app\'s own server', async () => {
@@ -271,18 +275,45 @@ describe('hosted report handlers', () => {
     const { h, call, send, mem } = setup()
     const { id } = await send('amy')
     const status = (agent: string, body: unknown) => h.agentStatus(call('POST', 'x', { agent }, body), id)
-    expect((await status('mo', { status: 'being-made' })).status).toBe(409) // received cannot jump to being made
-    expect((await status('mo', { status: 'live' })).status).toBe(409)
+    expect((await status('mo', { status: 'done' })).status).toBe(409) // an issue is open before it is done
     expect((await status('mo', { status: 'nonsense' })).status).toBe(400)
-    expect((await status('ben', { status: 'with-freeda' })).status).toBe(401)
-    expect((await h.agentStatus(call('POST', 'x', { user: 'amy' }, { status: 'with-freeda' }), id)).status).toBe(401) // a member's own session is not an agent
-    expect((await status('mo', { status: 'with-freeda' })).status).toBe(200)
-    expect((await status('mo', { status: 'with-freeda' })).status).toBe(200) // a retry
-    expect((await status('mo', { status: 'planned' })).status).toBe(200)
-    expect((await status('mo', { status: 'waiting-on-owner', step: 'Reading the plan' })).status).toBe(200)
+    expect((await status('mo', { status: 'with-freeda' })).status).toBe(400) // an old status is readable, never written
+    expect((await status('ben', { status: 'held' })).status).toBe(401)
+    expect((await h.agentStatus(call('POST', 'x', { user: 'amy' }, { status: 'held' }), id)).status).toBe(401) // a member's own session is not an agent
+    expect((await status('mo', { status: 'held', step: 'Checking for private details' })).status).toBe(200)
+    expect((await status('mo', { status: 'held' })).status).toBe(200) // a retry
     const last = mem.reports.get(id)!.timeline.at(-1)!
-    expect(last).toMatchObject({ status: 'waiting-on-owner', by: 'owner', step: 'Reading the plan' })
+    expect(last).toMatchObject({ status: 'held', by: 'owner', step: 'Checking for private details' })
     expect(JSON.stringify(mem.reports.get(id)!.timeline)).not.toContain('mo"')
+  })
+
+  it('a move to open carries the issue it became, and the issue is checked', async () => {
+    const { h, call, send, mem } = setup()
+    const { id } = await send('amy')
+    const status = (body: unknown) => h.agentStatus(call('POST', 'x', { agent: 'mo' }, body), id)
+    expect((await status({ status: 'open' })).status).toBe(400) // filed as what?
+    expect((await status({ status: 'open', issue: { repo: 'acme/app', number: 7, url: 'https://evil.example/7' } })).status).toBe(400)
+    expect((await status({ status: 'open', issue: ISSUE })).status).toBe(200)
+    expect(mem.reports.get(id)!.timeline.at(-1)).toMatchObject({ status: 'open', by: 'mac', issue: ISSUE })
+    const view = (await (await h.one(call('GET', 'x', { user: 'amy' }), id)).json()) as Record<string, unknown>
+    expect(view.issue).toEqual(ISSUE)
+    const rows = (await (await h.mine(call('GET', 'x', { user: 'amy' }))).json()) as Record<string, unknown>[]
+    expect(rows[0]).toMatchObject({ status: 'open', issue: ISSUE })
+    // closed, then reopened on GitHub: the issue it already is stays its issue
+    expect((await status({ status: 'done' })).status).toBe(200)
+    expect((await status({ status: 'open' })).status).toBe(200)
+    expect(((await (await h.one(call('GET', 'x', { user: 'amy' }), id)).json()) as Record<string, unknown>).issue).toEqual(ISSUE)
+  })
+
+  it('a report the old pipeline left mid-way is filed from where it stands, and an old closed one reads as closed', async () => {
+    const { h, call, send, mem } = setup()
+    const { id } = await send('amy')
+    mem.reports.get(id)!.timeline.push({ status: 'with-freeda', by: 'mac', at: 'x' }, { status: 'being-made', by: 'freeda', at: 'y', holder: 'mo' })
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status: 'open', issue: ISSUE }), id)).status).toBe(200)
+    const old = await send('amy')
+    mem.reports.get(old.id)!.timeline.push({ status: 'live', by: 'freeda', at: 'z', holder: 'mo' })
+    expect((await h.append(call('POST', 'a', { user: 'amy' }, { followId: 'late', words: 'wait' }), old.id)).status).toBe(409)
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status: 'not-planned' }), old.id)).status).toBe(409) // done cannot become not planned without reopening
   })
 
   it('a report with attachments still on their way is held back from the Mac, then offered after an hour', async () => {
@@ -495,35 +526,30 @@ describe('what is added after the Mac collected it reaches the Mac', () => {
 
 describe('who holds the approval', () => {
   const walk = async (h: ReturnType<typeof setup>['h'], call: ReturnType<typeof setup>['call'], id: string, to: string[]) => {
-    for (const status of to) expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status }), id)).status, status).toBe(200)
+    for (const status of to) expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status, ...(status === 'open' ? { issue: ISSUE } : {}) }), id)).status, status).toBe(200)
   }
 
-  it('moves before the approval need no claim; leaving waiting-on-owner, being-made and an end status need the holder', async () => {
+  it('holding needs no claim; leaving held, filing and closing need the holder', async () => {
     const { h, call, send } = setup()
     const { id } = await send('amy')
-    const st = (agent: string, status: string) => h.agentStatus(call('POST', 'x', { agent }, { status }), id)
-    await walk(h, call, id, ['with-freeda', 'planned', 'waiting-on-owner']) // mo made these without holding anything
+    const st = (agent: string, status: string) => h.agentStatus(call('POST', 'x', { agent }, { status, ...(status === 'open' ? { issue: ISSUE } : {}) }), id)
+    await walk(h, call, id, ['held']) // mo held it without holding anything
     expect((await h.agentClaimApproval(call('POST', 'x', { agent: 'lee' }, {}), id)).status).toBe(200) // lee takes the approval
-    const blocked = await st('mo', 'being-made')
+    const blocked = await st('mo', 'open')
     expect(blocked.status).toBe(409)
     expect(await blocked.json()).toMatchObject({ claimedBy: 'lee' })
-    expect((await st('mo', 'not-now')).status).toBe(409)
-    expect((await st('lee', 'being-made')).status).toBe(200)
-    expect((await st('mo', 'live')).status).toBe(409)
-    expect((await st('mo', 'filed')).status).toBe(409)
-    expect((await st('lee', 'live')).status).toBe(200)
+    expect((await st('mo', 'not-planned')).status).toBe(409)
+    expect((await st('lee', 'open')).status).toBe(200)
+    expect((await st('mo', 'done')).status).toBe(409)
+    expect((await st('lee', 'done')).status).toBe(200)
   })
 
-  it('planned to being-made takes the claim when nobody holds it, and then the other Mac is blocked', async () => {
+  it('filing takes the claim when nobody holds it, and then the other Mac is blocked', async () => {
     const { h, call, send } = setup()
     const { id } = await send('amy')
-    await walk(h, call, id, ['with-freeda', 'planned', 'waiting-on-owner'])
-    expect((await h.agentStatus(call('POST', 'x', { agent: 'lee' }, { status: 'being-made' }), id)).status).toBe(200)
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'lee' }, { status: 'open', issue: ISSUE }), id)).status).toBe(200)
     expect(await (await h.agentClaimApproval(call('POST', 'x', { agent: 'mo' }, {}), id)).json()).toEqual({ claimedBy: 'lee' })
-    const direct = await send('amy')
-    await walk(h, call, direct.id, ['with-freeda', 'planned'])
-    expect((await h.agentStatus(call('POST', 'x', { agent: 'lee' }, { status: 'being-made' }), direct.id)).status).toBe(200) // planned -> being-made also needs, and takes, the claim
-    expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status: 'live' }), direct.id)).status).toBe(409)
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status: 'done' }), id)).status).toBe(409)
   })
 
   it('the holder can release the approval, and after a week another Mac may take it', async () => {
@@ -544,33 +570,33 @@ describe('who holds the approval', () => {
 describe('a closed or held report', () => {
   const WEEK = 7 * 24 * 3600_000
   const walk = async (h: ReturnType<typeof setup>['h'], call: ReturnType<typeof setup>['call'], id: string, agent: string, to: string[]) => {
-    for (const status of to) expect((await h.agentStatus(call('POST', 'x', { agent }, { status }), id)).status, status).toBe(200)
+    for (const status of to) expect((await h.agentStatus(call('POST', 'x', { agent }, { status, ...(status === 'open' ? { issue: ISSUE } : {}) }), id)).status, status).toBe(200)
   }
 
-  it('the owner may decline a report Pluma has not planned yet, or has planned', async () => {
+  it('the owner may decline a report before it is filed, held or not', async () => {
     const { h, call, send, mem } = setup()
-    const unplanned = await send('amy')
-    await walk(h, call, unplanned.id, 'mo', ['with-freeda', 'not-now'])
-    expect(mem.reports.get(unplanned.id)!.timeline.map((t) => [t.status, t.by])).toEqual([['received', 'app'], ['with-freeda', 'mac'], ['not-now', 'owner']])
-    const planned = await send('amy')
-    await walk(h, call, planned.id, 'mo', ['with-freeda', 'planned', 'not-now'])
+    const unheld = await send('amy')
+    await walk(h, call, unheld.id, 'mo', ['not-planned'])
+    expect(mem.reports.get(unheld.id)!.timeline.map((t) => [t.status, t.by])).toEqual([['received', 'app'], ['not-planned', 'owner']]) // declined before filing: the owner did it, not GitHub
+    const held = await send('amy')
+    await walk(h, call, held.id, 'mo', ['held', 'not-planned'])
     const mine = (await (await h.mine(call('GET', 'x', { user: 'amy' }))).json()) as { id: string; status: string }[]
-    expect(mine.map((r) => r.status).sort()).toEqual(['not-now', 'not-now'])
+    expect(mine.map((r) => r.status).sort()).toEqual(['not-planned', 'not-planned'])
   })
 
-  it('a claim on a shipped or declined report answers 409 with the holder, however long after', async () => {
+  it('a claim on a closed report answers 409 with the holder, however long after', async () => {
     const { h, call, send } = setup()
     const claim = (agent: string, id: string) => h.agentClaimApproval(call('POST', 'x', { agent }, {}), id)
     const shipped = await send('amy')
-    await walk(h, call, shipped.id, 'mo', ['with-freeda', 'planned', 'waiting-on-owner', 'being-made', 'live'])
+    await walk(h, call, shipped.id, 'mo', ['open', 'done'])
     const declined = await send('amy')
-    await walk(h, call, declined.id, 'mo', ['with-freeda', 'planned', 'waiting-on-owner', 'not-now'])
+    await walk(h, call, declined.id, 'mo', ['held', 'not-planned'])
     for (const id of [shipped.id, declined.id]) {
       const now = await claim('lee', id)
       expect(now.status).toBe(409)
       expect(await now.json()).toMatchObject({ claimedBy: 'mo', closed: true })
     }
-    lastSetup.mem.advance(WEEK + 24 * 3600_000) // eight days: the old seven-day lease would have lapsed
+    lastSetup.mem.advance(WEEK + 24 * 3600_000) // eight days: the seven-day lease would have lapsed
     for (const id of [shipped.id, declined.id]) {
       const later = await claim('lee', id)
       expect(later.status).toBe(409)
@@ -579,35 +605,43 @@ describe('a closed or held report', () => {
     }
   })
 
-  it('a closed report nobody is named on still answers 409, and the claim writes nothing', async () => {
+  it('a closed issue reopened on GitHub goes back to open, by the Mac that filed it and no other', async () => {
+    const { h, call, send } = setup()
+    const { id } = await send('amy')
+    await walk(h, call, id, 'mo', ['open', 'done'])
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'lee' }, { status: 'open' }), id)).status).toBe(409)
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status: 'open' }), id)).status).toBe(200)
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status: 'not-planned' }), id)).status).toBe(200)
+  })
+
+  it('a closed report from the old pipeline, with nobody named, still answers 409, and the claim writes nothing', async () => {
     const { h, call, send, mem } = setup()
     const { id } = await send('amy')
-    // A report closed before the holder was recorded on the timeline.
     mem.reports.get(id)!.timeline.push({ status: 'with-freeda', by: 'mac', at: 'x' }, { status: 'not-now', by: 'owner', at: 'y' })
     const res = await h.agentClaimApproval(call('POST', 'x', { agent: 'lee' }, {}), id)
     expect(res.status).toBe(409)
-    expect(await res.json()).toMatchObject({ closed: true, status: 'not-now' })
+    expect(await res.json()).toMatchObject({ closed: true, status: 'not-planned' })
     // and lee did not quietly become the holder
     expect((await h.agentReleaseApproval(call('POST', 'x', { agent: 'lee' }, {}), id)).status).toBe(409)
   })
 
-  it('a report being made stays with the Mac that started it, past a week', async () => {
+  it('an open issue stays with the Mac that filed it, past a week', async () => {
     const { h, call, send, mem } = setup()
     const { id } = await send('amy')
-    await walk(h, call, id, 'mo', ['with-freeda', 'planned', 'waiting-on-owner', 'being-made'])
+    await walk(h, call, id, 'mo', ['open'])
     mem.advance(WEEK + 24 * 3600_000)
     const taken = await h.agentClaimApproval(call('POST', 'x', { agent: 'lee' }, {}), id)
     expect(taken.status).toBe(409)
     expect(await taken.json()).toMatchObject({ claimedBy: 'mo' })
-    expect((await h.agentStatus(call('POST', 'x', { agent: 'lee' }, { status: 'live' }), id)).status).toBe(409)
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'lee' }, { status: 'done' }), id)).status).toBe(409)
     expect((await h.agentClaimApproval(call('POST', 'x', { agent: 'mo' }, {}), id)).status).toBe(200) // the holder keeps it
-    expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status: 'live' }), id)).status).toBe(200)
+    expect((await h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status: 'done' }), id)).status).toBe(200)
   })
 
-  it('before the work starts, an unrenewed approval still lapses after a week', async () => {
+  it('before it is filed, an unrenewed approval still lapses after a week', async () => {
     const { h, call, send, mem } = setup()
     const { id } = await send('amy')
-    await walk(h, call, id, 'mo', ['with-freeda', 'planned', 'waiting-on-owner'])
+    await walk(h, call, id, 'mo', ['held'])
     expect((await h.agentClaimApproval(call('POST', 'x', { agent: 'mo' }, {}), id)).status).toBe(200)
     expect((await h.agentClaimApproval(call('POST', 'x', { agent: 'lee' }, {}), id)).status).toBe(409)
     mem.advance(WEEK + 1)
@@ -617,12 +651,9 @@ describe('a closed or held report', () => {
   it('the list never offers a report another maintainer closed, and settles it for this one', async () => {
     const { h, call, send } = setup({ limits: { agentPage: 2 } })
     const list = async (agent: string) => ((await (await h.agentList(call('GET', 'x', { agent }))).json()) as { reports: { id: string; heldBy?: string }[] }).reports
-    const closed: string[] = []
     for (let i = 0; i < 7; i++) {
       const { id } = await send('amy')
-      await walk(h, call, id, 'mo', ['with-freeda', i % 2 ? 'not-now' : 'planned'])
-      if (!(i % 2)) await walk(h, call, id, 'mo', ['being-made', 'live'])
-      closed.push(id)
+      await walk(h, call, id, 'mo', i % 2 ? ['not-planned'] : ['open', 'done'])
     }
     const fresh = await send('amy')
     // Seven closed reports sit ahead of the new one; a page of two (three times over) would never reach it if they were offered.
@@ -631,10 +662,10 @@ describe('a closed or held report', () => {
     expect((await list('lee')).map((r) => r.id)).toEqual([fresh.id]) // the closed ones were settled for lee, not merely skipped once
   })
 
-  it('the list marks a report another maintainer is making', async () => {
+  it('the list marks a report another maintainer filed', async () => {
     const { h, call, send } = setup()
     const { id } = await send('amy')
-    await walk(h, call, id, 'mo', ['with-freeda', 'planned', 'being-made'])
+    await walk(h, call, id, 'mo', ['open'])
     const got = ((await (await h.agentList(call('GET', 'x', { agent: 'lee' }))).json()) as { reports: { id: string; heldBy?: string }[] }).reports
     expect(got.map((r) => [r.id, r.heldBy])).toEqual([[id, 'mo']])
     const own = ((await (await h.agentList(call('GET', 'x', { agent: 'mo' }))).json()) as { reports: { id: string; heldBy?: string }[] }).reports
@@ -644,7 +675,7 @@ describe('a closed or held report', () => {
   it('a member never sees which maintainer holds a report', async () => {
     const { h, call, send } = setup()
     const { id } = await send('amy')
-    await walk(h, call, id, 'mo', ['with-freeda', 'planned', 'being-made', 'live'])
+    await walk(h, call, id, 'mo', ['open', 'done'])
     const view = await (await h.one(call('GET', 'x', { user: 'amy' }), id)).text()
     expect(view).not.toContain('"mo"')
   })
@@ -726,7 +757,7 @@ describe('who may add to a report, and when', () => {
     const { id } = await send('amy')
     const st = (status: string) => h.agentStatus(call('POST', 'x', { agent: 'mo' }, { status }), id)
     await h.agentList(call('GET', 'x', { agent: 'mo' })); expect((await settle('mo', id)).status).toBe(200)
-    for (const s of ['planned', 'waiting-on-owner', 'not-now']) expect((await st(s)).status, s).toBe(200)
+    for (const s of ['held', 'not-planned']) expect((await st(s)).status, s).toBe(200)
     const res = await h.append(call('POST', 'a', { user: 'amy' }, { followId: 'late', words: 'wait' }), id)
     expect(res.status).toBe(409)
     expect(mem.reports.get(id)!.followUps ?? []).toHaveLength(0)
@@ -748,82 +779,81 @@ describe('telling the person who suggested it', () => {
   const told = () => {
     const heard: SubmitterNews[] = []
     const t = setup({ tellSubmitter: (e) => { heard.push(e) }, app: { name: 'Notes', owner: 'Alex' } })
-    const st = (id: string, status: string, agent = 'mo', extra: Record<string, unknown> = {}) => t.h.agentStatus(t.call('POST', 'x', { agent }, { status, ...extra }), id)
+    const st = (id: string, status: string, agent = 'mo', extra: Record<string, unknown> = {}) => t.h.agentStatus(t.call('POST', 'x', { agent }, { status, ...(status === 'open' ? { issue: ISSUE } : {}), ...extra }), id)
     const walk = async (id: string, to: string[], agent = 'mo') => { for (const s of to) expect((await st(id, s, agent)).status, s).toBe(200) }
     return { ...t, heard, st, walk }
   }
 
   it('tells the submitter once on each telling move, with the module words', async () => {
-    for (const end of ['live', 'sent-to-template', 'filed', 'not-now']) {
+    for (const end of ['done', 'not-planned']) {
       const { send, walk, heard } = told()
       const { id } = await send('amy')
-      await walk(id, ['with-freeda', 'planned', 'being-made', end])
-      expect(heard.map((e) => e.status)).toEqual(['being-made', end])
+      await walk(id, ['open', end])
+      expect(heard.map((e) => e.status)).toEqual(['open', end])
       const last = heard[1]
-      expect(last).toMatchObject({ member: 'amy', reportId: id, status: end, ended: true })
+      expect(last).toMatchObject({ member: 'amy', reportId: id, status: end, ended: true, issue: ISSUE })
       const { wordsFor, meaningFor } = await import('../../src/contract.mjs')
       expect(last.words).toBe(wordsFor(end, { owner: 'Alex' }))
-      expect(last.meaning).toBe(meaningFor(end, { owner: 'Alex' }))
-      expect(heard[0]).toMatchObject({ status: 'being-made', ended: false, words: 'Being made' })
+      expect(last.meaning).toBe(meaningFor(end, { owner: 'Alex', issue: ISSUE }))
+      expect(heard[0]).toMatchObject({ status: 'open', ended: false, words: 'Open', meaning: 'Filed as issue #7', issue: ISSUE })
     }
-    expect([...TOLD]).toEqual(['being-made', 'live', 'sent-to-template', 'filed', 'not-now'])
+    expect([...TOLD]).toEqual(['open', 'done', 'not-planned'])
   })
 
-  it('stays quiet on the planning steps and on a repeat', async () => {
+  it('stays quiet while it is held and on a repeat, and tells a reopen', async () => {
     const { send, walk, st, heard } = told()
     const { id } = await send('amy')
-    await walk(id, ['with-freeda', 'planned', 'waiting-on-owner'])
+    await walk(id, ['held'])
     expect(heard).toEqual([])
-    await walk(id, ['being-made'])
-    expect((await st(id, 'being-made')).status).toBe(200) // a repeat
+    await walk(id, ['open'])
+    expect((await st(id, 'open')).status).toBe(200) // a repeat
     expect(heard).toHaveLength(1)
+    await walk(id, ['done', 'open'])
+    expect(heard.map((e) => e.status)).toEqual(['open', 'done', 'open'])
   })
 
   it('tells nobody when the store refused the move, and a throwing hook still answers 200', async () => {
     const { send, walk, st, heard, mem } = told()
     const { id } = await send('amy')
-    await walk(id, ['with-freeda', 'planned'])
+    await walk(id, ['held'])
     const real = mem.store.setStatus
     mem.store.setStatus = async () => false
-    expect((await st(id, 'being-made')).status).toBe(409)
+    expect((await st(id, 'open')).status).toBe(409)
     mem.store.setStatus = real
     expect(heard).toEqual([])
     const boom = setup({ tellSubmitter: () => { throw new Error('the push service is down') } })
     const r = await boom.send('amy')
-    for (const s of ['with-freeda', 'planned', 'being-made', 'live']) expect((await boom.h.agentStatus(boom.call('POST', 'x', { agent: 'mo' }, { status: s }), r.id)).status, s).toBe(200)
+    for (const s of ['open', 'done']) expect((await boom.h.agentStatus(boom.call('POST', 'x', { agent: 'mo' }, { status: s, issue: ISSUE }), r.id)).status, s).toBe(200)
   })
 
-  it("a maintainer's own report is not told it is being made, and is told it ended", async () => {
+  it("a maintainer's own report is not told it was filed, and is told it closed", async () => {
     const { send, walk, heard } = told()
     const { id } = await send('mo')
-    await walk(id, ['with-freeda', 'planned', 'being-made', 'live'])
-    expect(heard.map((e) => e.status)).toEqual(['live'])
+    await walk(id, ['open', 'done'])
+    expect(heard.map((e) => e.status)).toEqual(['done'])
     const other = await send('mo')
-    await walk(other.id, ['with-freeda', 'planned', 'being-made'], 'lee') // another maintainer making it is news to mo
-    expect(heard.map((e) => e.status)).toEqual(['live', 'being-made'])
+    await walk(other.id, ['open'], 'lee') // another maintainer filing it is news to mo
+    expect(heard.map((e) => e.status)).toEqual(['done', 'open'])
   })
 
-  it('not-now passes the note and no other status does; words never carry the report', async () => {
+  it('not-planned passes the note and no other status does; words never carry the report', async () => {
     const { send, walk, st, heard } = told()
     const { id } = await send('amy', { words: 'my secret words' })
-    await walk(id, ['with-freeda', 'planned', 'being-made'])
-    expect((await st(id, 'not-now', 'mo', { note: 'too big for now' })).status).toBe(200)
+    await walk(id, ['open'])
+    expect((await st(id, 'not-planned', 'mo', { note: 'too big for now' })).status).toBe(200)
     const other = await send('amy')
-    await walk(other.id, ['with-freeda', 'planned'])
-    expect((await st(other.id, 'being-made', 'mo', { note: 'starting', step: 'reading' })).status).toBe(200)
-    expect(heard.find((e) => e.status === 'not-now')!.note).toBe('too big for now')
-    for (const e of heard.filter((e) => e.status !== 'not-now')) expect(e.note).toBeUndefined()
+    expect((await st(other.id, 'open', 'mo', { note: 'starting', step: 'reading' })).status).toBe(200)
+    expect(heard.find((e) => e.status === 'not-planned')!.note).toBe('too big for now')
+    for (const e of heard.filter((e) => e.status !== 'not-planned')) expect(e.note).toBeUndefined()
     expect(JSON.stringify(heard)).not.toContain('secret')
   })
 
-  it("the member's list carries the not-now reason, and no other note", async () => {
-    const { send, walk, st, h, call } = told()
+  it("the member's list carries the not-planned reason, and no other note", async () => {
+    const { send, st, h, call } = told()
     const a = await send('amy')
-    await walk(a.id, ['with-freeda', 'planned'])
-    expect((await st(a.id, 'not-now', 'mo', { note: 'too big for now' })).status).toBe(200)
+    expect((await st(a.id, 'not-planned', 'mo', { note: 'too big for now' })).status).toBe(200)
     const b = await send('amy')
-    await walk(b.id, ['with-freeda', 'planned'])
-    expect((await st(b.id, 'being-made', 'mo', { note: 'starting' })).status).toBe(200)
+    expect((await st(b.id, 'open', 'mo', { note: 'starting' })).status).toBe(200)
     const rows = (await (await h.mine(call('GET', '/m', { user: 'amy' }))).json()) as Record<string, unknown>[]
     expect(rows.find((r) => r.id === a.id)!.note).toBe('too big for now')
     expect(rows.find((r) => r.id === b.id)!.note).toBeUndefined()
@@ -833,8 +863,8 @@ describe('telling the person who suggested it', () => {
     const events: TellEvent[] = []
     const t = setup({ tell: (e) => { events.push(e) } })
     const { id } = await t.send('amy')
-    expect((await t.h.agentStatus(t.call('POST', 'x', { agent: 'mo' }, { status: 'with-freeda' }), id)).status).toBe(200)
-    expect(events.at(-1)).toEqual({ type: 'status', reportId: id, member: 'amy', status: 'with-freeda' })
+    expect((await t.h.agentStatus(t.call('POST', 'x', { agent: 'mo' }, { status: 'held' }), id)).status).toBe(200)
+    expect(events.at(-1)).toEqual({ type: 'status', reportId: id, member: 'amy', status: 'held' })
   })
 
   it('refuses to start without the hook, and accepts an explicit none with a reason', async () => {
@@ -845,6 +875,172 @@ describe('telling the person who suggested it', () => {
     expect(() => createReportHandlers({ ...base, tellSubmitter: { none: '   ' } })).toThrow(/reason/)
     const quiet = setup({ tellSubmitter: { none: 'only the maintainer uses this app' } })
     const { id } = await quiet.send('amy')
-    for (const s of ['with-freeda', 'planned', 'being-made', 'live']) expect((await quiet.h.agentStatus(quiet.call('POST', 'x', { agent: 'mo' }, { status: s }), id)).status, s).toBe(200)
+    for (const s of ['open', 'done']) expect((await quiet.h.agentStatus(quiet.call('POST', 'x', { agent: 'mo' }, { status: s, issue: ISSUE }), id)).status, s).toBe(200)
+  })
+})
+
+describe('filing straight from the app\'s server (the github option)', () => {
+  const API = 'https://api.github.com'
+  type Call = { method: string; url: string; body: any }
+  function gh(over: { failIssue?: number } = {}) {
+    const calls: Call[] = []
+    let next = 40
+    const fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = String(input)
+      const c: Call = { method: init.method ?? 'GET', url, body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined }
+      // the app's own storage: a read link the store issued is read back through the same fetch
+      if (url.startsWith('memory://')) { const b = await lastSetup.mem.getViaLink(url); return b ? new Response(b as BodyInit) : new Response(null, { status: 404 }) }
+      calls.push(c)
+      if (url.endsWith('/labels')) return new Response('{}', { status: 201 })
+      if (c.method === 'POST' && url === `${API}/repos/acme/app/issues`) {
+        if (over.failIssue) return new Response('{"message":"no"}', { status: over.failIssue })
+        await Promise.resolve()
+        const number = ++next
+        return new Response(JSON.stringify({ number, html_url: `https://github.com/acme/app/issues/${number}` }), { status: 201 })
+      }
+      if (c.method === 'PATCH') return new Response('{}', { status: 200 })
+      return new Response('{"message":"Not Found"}', { status: 404 })
+    }) as typeof globalThis.fetch
+    const puts: { target: unknown; name: string; bytes: number[] }[] = []
+    const attachments = { async put(target: { reportId: string }, file: { name: string; bytes: Uint8Array | ArrayBuffer }) { puts.push({ target, name: file.name, bytes: Array.from(new Uint8Array(file.bytes as ArrayBuffer)) }); return { url: `https://github.com/acme/app/blob/suggestion-attachments/attachments/${target.reportId}/${file.name}?raw=true` } } }
+    return { fetch, calls, puts, attachments }
+  }
+  const issues = (g: ReturnType<typeof gh>) => g.calls.filter((c) => c.method === 'POST' && c.url.endsWith('/issues'))
+
+  it('a report with nothing attached is filed when it is submitted, and the person is told', async () => {
+    const g = gh()
+    const heard: SubmitterNews[] = []
+    const t = setup({ app: { name: 'Notes', owner: 'Alex' }, tellSubmitter: (e) => { heard.push(e) }, github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch } })
+    const { id, res } = await t.send('amy', { words: 'Make the photos bigger. Please.' })
+    expect(res.status).toBe(200)
+    expect(issues(g)).toHaveLength(1)
+    expect(issues(g)[0].body).toMatchObject({ title: 'Make the photos bigger.', labels: ['enhancement', 'app:notes'] })
+    expect(issues(g)[0].body.body).toContain(`Report ${id}.`)
+    expect(issues(g)[0].body.body).not.toContain('amy') // never the member key
+    const last = t.mem.reports.get(id)!.timeline.at(-1)!
+    expect(last).toMatchObject({ status: 'open', by: 'mac', issue: { repo: 'acme/app', number: 41, url: 'https://github.com/acme/app/issues/41' } })
+    expect(heard.map((e) => e.status)).toEqual(['open'])
+  })
+
+  it('the app\'s name and label are the host\'s own, from app.name and app.label', async () => {
+    const g = gh()
+    const t = setup({ app: { name: 'Notes', label: 'notes-web' }, github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch } })
+    await t.send('amy', { words: 'Make it bigger.' })
+    expect(issues(g)[0].body.labels).toEqual(['enhancement', 'app:notes-web'])
+    expect(issues(g)[0].body.body).toContain('through Suggest a change in the Notes.')
+  })
+
+  it('a report with a photo is filed when its last file is verified: the issue first, then the file, then the edit', async () => {
+    const g = gh()
+    const t = setup({ github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch, attachments: g.attachments } })
+    const id = await t.withPhoto()
+    expect(issues(g)).toHaveLength(1)
+    expect(issues(g)[0].body.body).toMatch(/1 screenshot is being added/)
+    expect(g.puts.map((p) => [p.name, p.bytes.length])).toEqual([['a.png', PNG.length]])
+    expect(g.puts[0].target).toEqual({ repo: 'acme/app', issue: 41, reportId: id })
+    const edit = g.calls.find((c) => c.method === 'PATCH')!
+    expect(edit.url).toBe(`${API}/repos/acme/app/issues/41`)
+    expect(edit.body.body).toContain(`![a.png](https://github.com/acme/app/blob/suggestion-attachments/attachments/${id}/a.png?raw=true)`)
+    expect(t.mem.reports.get(id)!.timeline.at(-1)!.status).toBe('open')
+  })
+
+  it('a report still waiting for a file is not filed yet', async () => {
+    const g = gh()
+    const t = setup({ github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch, attachments: g.attachments } })
+    await t.send('amy', { media: [{ file: 'a.png', type: 'image/png', bytes: PNG.length }] })
+    expect(issues(g)).toHaveLength(0)
+  })
+
+  it('the privacy catch holds a report for the owner, and nothing reaches GitHub', async () => {
+    const g = gh()
+    const heard: SubmitterNews[] = []
+    const t = setup({ tellSubmitter: (e) => { heard.push(e) }, github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch, people: [{ name: 'Dana Whitlock' }] } })
+    for (const words of ['mail sam@example.com', 'my key is AKIAIOSFODNN7EXAMPLE', 'ask Dana Whitlock']) {
+      const { id } = await t.send('amy', { words })
+      const last = t.mem.reports.get(id)!.timeline.at(-1)!
+      expect(last.status, words).toBe('held')
+      expect(last.flags, words).toHaveLength(1)
+      const view = await (await t.h.one(t.call('GET', 'x', { user: 'amy' }), id)).text()
+      expect(view).not.toContain('flags') // what was flagged is the owner's to see, not the member's view
+    }
+    expect(issues(g)).toHaveLength(0)
+    expect(heard).toEqual([])
+  })
+
+  it('GitHub refusing leaves the report received, answers the phone 200, and lets a Mac file it', async () => {
+    const g = gh({ failIssue: 503 })
+    const t = setup({ github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch } })
+    const { id, res } = await t.send('amy')
+    expect(res.status).toBe(200)
+    expect(t.mem.reports.get(id)!.timeline.map((x) => x.status)).toEqual(['received'])
+    expect((await t.h.agentStatus(t.call('POST', 'x', { agent: 'mo' }, { status: 'open', issue: ISSUE }), id)).status).toBe(200)
+  })
+
+  it('two finalizes at once file one issue', async () => {
+    const g = gh()
+    const t = setup({ github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch, attachments: g.attachments } })
+    const { id } = await t.send('amy', { media: [{ file: 'a.png', type: 'image/png', bytes: PNG.length }] })
+    await t.h.uploadUrl(t.call('POST', 'u', { user: 'amy' }, { reportId: id, file: 'a.png', type: 'image/png', bytes: PNG.length }))
+    await t.mem.upload(id, 'a.png', PNG)
+    const both = await Promise.all([1, 2].map(() => t.h.finalize(t.call('POST', 'f', { user: 'amy' }, { file: 'a.png' }), id)))
+    expect(both.map((r) => r.status)).toEqual([200, 200])
+    expect(issues(g)).toHaveLength(1)
+  })
+
+  it('the issue carries the context table and how to reach them, and the sender\'s own email is not held', async () => {
+    const g = gh()
+    const t = setup({ github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch }, contactOf: () => ({ email: 'pat@example.com' }) })
+    const { id } = await t.send('amy', { words: 'write to me at pat@example.com', who: { member: 'x', role: 'member', contact: { email: 'pat@example.com' } }, context: CONTEXT })
+    expect(t.mem.reports.get(id)!.timeline.at(-1)!.status).toBe('open')
+    const body = issues(g)[0].body.body as string
+    expect(body).toContain('[pat@example.com](mailto:pat@example.com)')
+    expect(body).toContain('| Your device | iPhone, iOS 18.1, Safari 18.1 |')
+  })
+})
+
+const CONTEXT = { items: [{ key: 'device', label: 'Your device', value: 'iPhone, iOS 18.1, Safari 18.1', why: 'so the fixer can try it on the same kind of phone' }], taps: [{ label: 'Save note', at: '2026-10-26T17:04:05Z' }] }
+
+describe('context, a way to reach them, and roughly where they were', () => {
+  it('keeps the context and the contact the HOST knows for the sender, and shows both back to them', async () => {
+    const { h, call, send, mem } = setup({ contactOf: (m: string) => (m === 'amy' ? { email: 'pat@example.com', handle: '@pat' } : null) })
+    // the phone says to share (it sends who.contact), and what it typed there is ignored
+    const { id, res } = await send('amy', { who: { member: 'x', role: 'member', contact: { email: 'evil@example.com' } }, context: CONTEXT })
+    expect(res.status).toBe(200)
+    expect(mem.reports.get(id)!.who).toEqual({ member: 'amy', role: 'member', contact: { email: 'pat@example.com', handle: '@pat' } })
+    expect(mem.reports.get(id)!.context).toEqual(CONTEXT)
+    const view = (await (await h.one(call('GET', 'x', { user: 'amy' }), id)).json()) as Record<string, unknown>
+    expect(view.context).toEqual(CONTEXT)
+    expect((view.who as Record<string, unknown>).contact).toEqual({ email: 'pat@example.com', handle: '@pat' })
+  })
+
+  it('never takes a contact from the phone: without contactOf nothing is kept, a host contact of the wrong shape is dropped, and an unticked one is not shared', async () => {
+    const plain = setup()
+    const a = await plain.send('amy', { who: { member: 'x', role: 'member', contact: { email: 'evil@example.com' } } })
+    expect(a.res.status).toBe(200)
+    expect(plain.mem.reports.get(a.id)!.who.contact).toBeUndefined()
+    const odd = setup({ contactOf: () => ({ email: 'not an email' }) as never })
+    const b = await odd.send('amy', { who: { member: 'x', role: 'member', contact: {} } })
+    expect(b.res.status).toBe(200)
+    expect(odd.mem.reports.get(b.id)!.who.contact).toBeUndefined()
+    const host = setup({ contactOf: () => ({ email: 'pat@example.com' }) })
+    const c = await host.send('amy') // no who.contact: the person left it unticked
+    expect(host.mem.reports.get(c.id)!.who.contact).toBeUndefined()
+    expect((await host.send('amy', { context: { items: [{ key: 'k', label: 'l', value: 'v', why: 'w' }], email: 'a@example.com' } })).res.status).toBe(422)
+  })
+
+  it('adds roughly where they were from the request, through geo, and never takes a place the phone claims', async () => {
+    const geo = (req: Request) => (req.headers.get('x-city') ? { city: req.headers.get('x-city')!, region: 'IL', country: 'US' } : null)
+    const { h, call, draft, mem } = setup({ geo })
+    const body = draft({ context: { items: [...CONTEXT.items, { key: 'place', label: 'Where', value: 'Somewhere I made up', why: 'x' }] } })
+    const req = call('POST', '/api/reports', { user: 'amy' }, body)
+    req.headers.set('x-city', 'Chicago')
+    expect((await h.submit(req)).status).toBe(200)
+    const items = (mem.reports.get(body.id as string)!.context as { items: { key: string; value: string; why: string }[] }).items
+    expect(items.filter((i) => i.key === 'place')).toEqual([{ key: 'place', label: 'Roughly where they were', value: 'Chicago, IL, US', why: expect.stringMatching(/connection/) }])
+    // no geo answer: no place at all, and the phone's own claim is still dropped
+    const plain = setup()
+    const b2 = plain.draft({ context: { items: [{ key: 'place', label: 'Where', value: 'made up', why: 'x' }] } })
+    await plain.h.submit(plain.call('POST', '/api/reports', { user: 'amy' }, b2))
+    expect(JSON.stringify(plain.mem.reports.get(b2.id as string)!.context ?? {})).not.toContain('made up')
   })
 })

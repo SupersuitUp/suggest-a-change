@@ -14,54 +14,122 @@ export const CEILINGS = {
   perPersonPerDay: 20,
 };
 
-export const STATUSES = ["on-phone", "received", "with-freeda", "planned", "waiting-on-owner", "being-made", "live", "sent-to-template", "filed", "not-now"];
-export const END = ["live", "sent-to-template", "filed", "not-now"];
-// The moves the person who suggested a change hears about: the work starting, and every end. The planning steps stay quiet.
-export const TOLD = ["being-made", ...END];
+// A suggestion becomes one ordinary GitHub issue (suggestions-as-github-issues design, section 3), so the statuses a
+// person sees are GitHub's: not sent, received, held before filing, then the issue's own open and closed states.
+export const STATUSES = ["on-phone", "received", "held", "open", "done", "not-planned"];
+// Closed on GitHub. A closed issue can be reopened, so an end is not final: it can go back to "open".
+export const END = ["done", "not-planned"];
+// The moves the person who suggested a change hears about: the issue existing, and every close.
+export const TOLD = ["open", ...END];
 
-// actor: who PERFORMS this step (design section 7): sent by the person, received by the app, with Pluma by the Mac. A Helm on the owner's Mac posts straight into
-// the inbox, so a report may go from the phone to Pluma without the hosted app's "received". The owner may decline
-// ("not-now") before Pluma has a plan or before she asks: a report she cannot plan would otherwise have no exit.
+// actor: who PERFORMS this step. Sent by the person, received by the app, held for the owner (the privacy catch stopped
+// it, or the account cannot file yet), filed by the Mac (or an app's own server), closed or reopened on GitHub. A Helm on
+// the owner's Mac posts straight there, so a report may go from the phone to held or open without the app's "received".
 export const FLOW = {
-  "on-phone": { actor: "person", next: ["received", "with-freeda"] },
-  "received": { actor: "app", next: ["with-freeda"] },
-  "with-freeda": { actor: "mac", next: ["planned", "not-now"] },
-  "planned": { actor: "freeda", next: ["waiting-on-owner", "being-made", "not-now"] },
-  "waiting-on-owner": { actor: "owner", next: ["being-made", "filed", "not-now"] },
-  "being-made": { actor: "freeda", next: ["live", "sent-to-template", "filed", "not-now"] },
-  "live": { actor: "freeda", next: [] },
-  "sent-to-template": { actor: "freeda", next: [] },
-  "filed": { actor: "freeda", next: [] },
-  "not-now": { actor: "owner", next: [] },
+  "on-phone": { actor: "person", next: ["received", "held", "open"] },
+  "received": { actor: "app", next: ["held", "open", "not-planned"] },
+  "held": { actor: "owner", next: ["open", "not-planned"] },
+  "open": { actor: "mac", next: ["done", "not-planned"] },
+  "done": { actor: "github", next: ["open"] },
+  "not-planned": { actor: "github", next: ["open"] },
 };
 
-export const mayMove = (from, to) => Boolean(FLOW[from]?.next.includes(to));
+// THE OLD STATUSES (0.1.x) STAY READABLE. Each folds into what it now means: a report the old pipeline was still
+// working on has not been filed yet (the Mac files it), one it shipped or passed on is done, one declined is not planned.
+export const LEGACY = {
+  "with-freeda": "received",
+  "planned": "received",
+  "waiting-on-owner": "received",
+  "being-made": "received",
+  "live": "done",
+  "sent-to-template": "done",
+  "filed": "done",
+  "not-now": "not-planned",
+};
+/** The status this one means now: a legacy status folded, anything else as it is. */
+export const currentStatus = (s) => LEGACY[s] ?? s;
 
-// The design's status table (section 2), word for word. "planned" is a step inside Pluma's work
-// that the table does not name for a person, so it reads as "With Pluma".
+export const mayMove = (from, to) => Boolean(FLOW[currentStatus(from)]?.next.includes(to));
+
+// The design's status table (section 3), word for word.
+const issueWords = (issue) => (Number.isInteger(issue?.number) ? `Filed as issue #${issue.number}` : "Filed as an issue");
 const TABLE = {
-  "on-phone": ["On this phone", () => "Not sent yet; it will send when there is a connection"],
-  "received": ["Received", () => "The app has it, safely stored"],
-  "with-freeda": ["With Pluma", (o) => `${o}'s Mac has picked it up`],
-  "planned": ["With Pluma", (o) => `${o}'s Mac has picked it up`],
-  "waiting-on-owner": [null, (o) => `Pluma has a plan and is asking ${o}`],
-  "being-made": ["Being made", () => "A session is working on it; the current step shows underneath"],
-  "live": ["Done", () => "Shipped in the app, with the date it went live"],
-  "sent-to-template": ["Sent to the template", () => "It became a change to the template every copy of this app uses; it reaches this app once merged"],
-  "filed": ["Filed", () => "It was passed to whoever owns the problem"],
-  "not-now": ["Not now", (o) => `${o} decided against it, with the one-line reason if given`],
+  "on-phone": [() => "On this phone", () => "Not sent yet; it will send when there is a connection"],
+  "received": [() => "Received", () => "The app has it, safely stored"],
+  "held": [(o) => `Waiting on ${o}`, (o) => `${o} looks at it before it is filed`],
+  "open": [() => "Open", (o, issue) => issueWords(issue)],
+  "done": [() => "Done", () => "Closed as completed"],
+  "not-planned": [() => "Not planned", () => "Closed as not planned, with the reason if one was given"],
 };
 const row = (status) => {
-  if (!TABLE[status]) throw new Error(`${status} is not a status`);
-  return TABLE[status];
+  const s = currentStatus(status);
+  if (!TABLE[s]) throw new Error(`${status} is not a status`);
+  return TABLE[s];
 };
-export const wordsFor = (status, { owner } = {}) => row(status)[0] ?? `Waiting on ${owner}`;
-export const meaningFor = (status, { owner } = {}) => row(status)[1](owner);
+export const wordsFor = (status, { owner } = {}) => row(status)[0](owner);
+export const meaningFor = (status, { owner, issue } = {}) => row(status)[1](owner, issue);
+
+// HOW TO REACH THE SENDER: what the app already knows of them, so whoever fixes it can say thanks or ask a question.
+const CONTACT_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const CONTACT_PHONE = /^\+?[0-9][0-9 ().-]{5,24}$/;
+export function validContact(c) {
+  if (!c || typeof c !== "object" || Array.isArray(c)) return ["who.contact is not an object"];
+  const errs = [];
+  for (const k of Object.keys(c)) if (!["email", "phone", "handle"].includes(k)) errs.push(`who.contact.${k} is not one of email, phone, handle`);
+  if (c.email !== undefined && (typeof c.email !== "string" || c.email.length > 254 || !CONTACT_EMAIL.test(c.email))) errs.push("who.contact.email is not an email address");
+  if (c.phone !== undefined && (typeof c.phone !== "string" || !CONTACT_PHONE.test(c.phone))) errs.push("who.contact.phone is not a phone number");
+  if (c.handle !== undefined && (typeof c.handle !== "string" || !c.handle.trim() || c.handle.length > 100 || /[\r\n]/.test(c.handle))) errs.push("who.contact.handle is not a short one-line handle");
+  return errs;
+}
+
+// THE CONTEXT a report carries so it can be fixed: labelled items, each with why it is shared, and the trail that led here.
+export const CONTEXT_CEILINGS = { items: 40, routes: 10, taps: 20, errors: 10 };
+const shortText = (v, max) => typeof v === "string" && v.length <= max;
+/** A time as the module writes one: ISO 8601 with a zone, at most 40 characters, so a time field can never carry text. */
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+export const isIsoTime = (v) => typeof v === "string" && v.length <= 40 && ISO_TIME.test(v);
+export function validContext(ctx) {
+  if (!ctx || typeof ctx !== "object" || Array.isArray(ctx)) return ["context is not an object"];
+  const errs = [];
+  const list = (name, max, check) => {
+    const v = ctx[name];
+    if (v === undefined) return;
+    if (!Array.isArray(v)) { errs.push(`context.${name} is not a list`); return; }
+    if (v.length > max) errs.push(`context.${name} has ${v.length} entries; the ceiling is ${max}`);
+    v.forEach((x, i) => { const e = x && typeof x === "object" ? check(x) : "is not an object"; if (e) errs.push(`context.${name}.${i} ${e}`); });
+  };
+  list("items", CONTEXT_CEILINGS.items, (x) =>
+    !shortText(x.key, 40) || !/^[A-Za-z0-9:_-]+$/.test(x.key) ? "has no plain key"
+      : !shortText(x.label, 80) || !x.label ? "has no short label"
+      : !shortText(x.value, 500) ? "has no value of at most 500 characters"
+      : !shortText(x.why, 200) || !x.why.trim() ? "does not say why it is shared" : null);
+  list("routes", CONTEXT_CEILINGS.routes, (x) => (!shortText(x.route, 300) || /[?#]/.test(x.route) ? "is not a route without its query" : !isIsoTime(x.at) ? "has no ISO time" : null));
+  list("taps", CONTEXT_CEILINGS.taps, (x) => (!shortText(x.label, 80) ? "has no label of at most 80 characters" : !isIsoTime(x.at) ? "has no ISO time" : null));
+  list("errors", CONTEXT_CEILINGS.errors, (x) => (!shortText(x.message, 300) ? "has no message of at most 300 characters" : x.frame !== undefined && !shortText(x.frame, 200) ? "has a frame over 200 characters" : !isIsoTime(x.at) ? "has no ISO time" : null));
+  return errs;
+}
+
+const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** A GitHub "owner/name": two plain segments, neither "." nor "..", so it can never walk out of /repos/ in a URL.
+ *  @param {unknown} s @returns {s is string} */
+export const isRepoName = (s) => typeof s === "string" && REPO.test(s) && !s.split("/").some((p) => p === "." || p === "..");
+/** The issue a report became: `{ repo: "owner/name", number, url }`, the url on github.com. Problems as a list. */
+export function validIssue(issue) {
+  if (!issue || typeof issue !== "object" || Array.isArray(issue)) return ["issue is not an object"];
+  const errs = [];
+  if (!isRepoName(issue.repo)) errs.push("issue.repo is not owner/name");
+  if (!Number.isInteger(issue.number) || issue.number < 1) errs.push("issue.number is not a positive whole number");
+  if (typeof issue.url !== "string" || !issue.url.startsWith("https://github.com/")) errs.push("issue.url is not a https://github.com/ link");
+  return errs;
+}
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+// The platform's secure random source where there is one (every browser and Node 19+), Math.random only where there is not.
 const randomSix = () => {
+  const c = globalThis.crypto;
+  const bytes = typeof c?.getRandomValues === "function" ? c.getRandomValues(new Uint8Array(6)) : Uint8Array.from({ length: 6 }, () => Math.floor(Math.random() * 256));
   let s = "";
-  for (let i = 0; i < 6; i++) s += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+  for (const b of bytes) s += ALPHABET[b % ALPHABET.length];
   return s;
 };
 export function newReportId(now = new Date(), rand = randomSix) {
@@ -95,8 +163,13 @@ export function validateReport(raw, { ceilings = CEILINGS } = {}) {
   if (!ID.test(String(raw.id ?? ""))) errs.push("the id is not a report id");
   if (!KINDS.includes(raw.kind)) errs.push(`kind ${JSON.stringify(raw.kind)} is not one of ${KINDS.join(", ")}`);
   if (!ROLES.includes(raw.who?.role)) errs.push(`role ${JSON.stringify(raw.who?.role)} is not one of ${ROLES.join(", ")}`);
-  for (const p of findKey(raw, "email")) errs.push(`${p}: a report never carries an email`);
+  // The one place an email may sit is the sender's own way to be reached, who.contact.email, and only there.
+  for (const p of findKey(raw, "email")) if (p !== "report.who.contact.email") errs.push(`${p}: a report never carries an email`);
+  if (raw.who?.contact !== undefined) errs.push(...validContact(raw.who.contact));
+  if (raw.diagnostics?.at !== undefined && !isIsoTime(raw.diagnostics.at)) errs.push("diagnostics.at is not an ISO time");
+  if (raw.context !== undefined) errs.push(...validContext(raw.context));
   if (String(raw.where?.route ?? "").includes("?")) errs.push("where.route keeps a query string");
+  if (raw.issue !== undefined) errs.push(...validIssue(raw.issue));
   for (const k of Object.keys(raw.diagnostics ?? {})) {
     if (!DIAGNOSTIC_KEYS.includes(k)) errs.push(`diagnostics.${k} is not one of ${DIAGNOSTIC_KEYS.join(", ")}`);
   }

@@ -7,6 +7,7 @@
 // when none of its writes is left there, because a write leaves only after the adapter said `done`.
 import { useEffect, useRef, useState } from 'react'
 import type { Adapters, Identity } from './adapters.ts'
+import { installContextListeners } from './context.ts'
 import { draftKey } from './drafts.ts'
 import { openStore, type Store } from './idb.ts'
 import { makeOutbox, type Op, type Sent } from './outbox.ts'
@@ -179,6 +180,8 @@ export function useRuntime(adapters: Adapters): { rt: Runtime | null; who: Ident
   const [signal, setSignal] = useState(0)
   const current = useRef<{ account: string | null; release: () => void }>({ account: null, release: () => {} })
   const alive = useRef(true)
+  // Every screen of the module mounts this, so the trail (pages, taps, errors) starts with the first one; it installs once.
+  useEffect(() => { installContextListeners() }, [])
   useEffect(() => { alive.current = true; return () => { alive.current = false; current.current.release(); current.current = { account: null, release: () => {} } } }, [])
   useEffect(() => { const l = () => setSignal((n) => n + 1); identityListeners.add(l); return () => { identityListeners.delete(l) } }, [])
   useEffect(() => { if (state.rt) state.rt.adapters = adapters })

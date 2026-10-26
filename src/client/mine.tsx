@@ -11,7 +11,8 @@ import { useRuntime, useTick } from './runtime.ts'
 import { moved, onSeen } from './seen.ts'
 import { dropCache, isRefusal, mineCacheKey, pruneOnes, readCache, useClearOnSignOut, writeCache } from './view-cache.ts'
 import { Toasts } from './toast.tsx'
-import { statusMeaning, statusWords, stringsFor } from './words.ts'
+import { currentStatus } from '../contract.mjs'
+import { linkableIssue, statusMeaning, statusWords, stringsFor } from './words.ts'
 
 type Row = Summary & { error?: string }
 
@@ -119,14 +120,17 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
         <ul className="sac-list">
           {rows.map((r) => {
             const preview = typeof r.words === 'string' ? r.words : typeof r.title === 'string' ? r.title : ''
+            const issue = linkableIssue(r.issue)
             return (
-              <li key={r.id} className="sac-row" data-status={r.status}>
+              <li key={r.id} className="sac-row" data-status={currentStatus(r.status)}>
                 <button type="button" className="sac-row-button" onClick={() => (onOpen ? onOpen(r.id) : setOpen(r.id))}>
                   {fresh.has(r.id) ? <span className="sac-new" data-new="">{S.newMark}</span> : null}
                   {preview ? <span className="sac-row-words">{preview}</span> : null}
                   <span className="sac-row-status">{statusWords(r.status, owner)}</span>
-                  <span className="sac-muted">{statusMeaning(r.status, owner)}</span>
+                  <span className="sac-muted">{statusMeaning(r.status, owner, r.issue)}</span>
                 </button>
+                {/* The row links to the issue; someone who cannot read the repo still sees the number and the state. */}
+                {issue ? <a className="sac-issue-link" href={issue.url} target="_blank" rel="noopener noreferrer">{S.issueLink(issue.number)}</a> : null}
                 {r.error ? (
                   <>
                     <p role="alert" className="sac-error">{r.error}</p>

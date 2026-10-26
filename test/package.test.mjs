@@ -113,6 +113,28 @@ test('"./server" ships types and ESM, and imports nothing from react, the client
   assert.ok(checked >= 5, `only ${checked} files in dist/server`);
 });
 
+test('"./github" ships types and ESM, imports nothing from react, the client or any package, and works without react', async () => {
+  assert.deepEqual(pkg.exports["./github"], { types: "./dist/github/index.d.ts", import: "./dist/github/index.js" });
+  const dir = join(ROOT, "dist", "github");
+  let checked = 0;
+  for (const f of readdirSync(dir).filter((x) => x.endsWith(".js"))) {
+    checked++;
+    const src = readFileSync(join(dir, f), "utf8");
+    for (const m of src.matchAll(/(?:from|import\()\s*["']([^"']+)["']/g)) {
+      assert.ok(m[1].startsWith("./") || m[1].startsWith("../"), `dist/github/${f} imports ${m[1]}`);
+      assert.ok(!/client|react/.test(m[1]), `dist/github/${f} reaches the client or react through ${m[1]}`);
+    }
+  }
+  assert.ok(checked >= 5, `only ${checked} files in dist/github`);
+  const mod = await import(join(ROOT, "dist", "github", "index.js"));
+  for (const name of ["privacyCatch", "redact", "mayFileAsIs", "composeIssue", "whatGoes", "fileIssue", "updateIssue", "addFollowUp", "issueStates", "issueStatus", "fileSuggestion", "attachPending", "branchHost", "relayHost", "createAttachRelay", "createSuggestionRelay", "relayFiler", "canFileDirectly", "memoryUsage"]) assert.equal(typeof mod[name], "function", name);
+});
+
+test("the version is 0.2.0 and the changelog says why", () => {
+  assert.equal(pkg.version, "0.2.0");
+  assert.match(readFileSync(join(ROOT, "CHANGELOG.md"), "utf8"), /^## 0\.2\.0 \(/m);
+});
+
 test("importing the server entry needs no react", async () => {
   const mod = await import(join(ROOT, "dist", "server", "index.js"));
   for (const name of ["createReportHandlers", "runStoreConformance", "sniffType"]) assert.equal(typeof mod[name], "function", name);

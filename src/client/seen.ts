@@ -4,7 +4,7 @@
 // every end) is "moved": the entry shows a dot, My suggestions marks the row New, and one toast says it. Opening
 // the report marks it seen. The record sits beside the cached views, under the same app-and-account key, so another
 // account never reads it and signing out clears it with them (clearViewCache).
-import { TOLD } from '../contract.mjs'
+import { TOLD, currentStatus } from '../contract.mjs'
 import { draftKey } from './drafts.ts'
 import type { Store } from './idb.ts'
 import { readCache, writeCache } from './view-cache.ts'
@@ -34,8 +34,9 @@ export async function seenStatuses(store: Store, id: Id): Promise<Seen> {
 export function markSeen(store: Store, id: Id, reportId: string, status: string): Promise<void> {
   return serial(seenKey(id), async () => {
     const seen = await seenStatuses(store, id)
-    if (seen[reportId] === status) return
-    seen[reportId] = status
+    const now = currentStatus(status) // kept in the new words, so an old status and the one it means are the same news
+    if (seen[reportId] === now) return
+    seen[reportId] = now
     await writeCache(store, seenKey(id), seen)
     for (const l of listeners) l()
   })
@@ -51,9 +52,10 @@ export function moved(store: Store, id: Id, rows: { id: string; status: string }
     let changed = false
     for (const r of rows) {
       if (typeof r?.id !== 'string' || typeof r.status !== 'string' || r.status === 'on-phone') continue
-      const had = seen[r.id]
-      if (had === r.status) continue
-      if (had === undefined || !TOLD.includes(r.status)) { seen[r.id] = r.status; changed = true; continue }
+      const had = seen[r.id] === undefined ? undefined : currentStatus(seen[r.id])
+      const now = currentStatus(r.status)
+      if (had === now) continue
+      if (had === undefined || !TOLD.includes(now)) { seen[r.id] = now; changed = true; continue }
       out.push({ id: r.id, status: r.status })
     }
     if (changed) await writeCache(store, seenKey(id), seen)

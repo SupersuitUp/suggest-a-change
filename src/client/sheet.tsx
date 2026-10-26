@@ -6,7 +6,11 @@
 // through the outbox, so a closed app loses nothing. A voice note alone is a whole report.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { isAcceptedMedia, sanitizeRoute, typeForFile, validateReport } from '../contract.mjs'
-import type { Adapters, FieldProps, Kind } from './adapters.ts'
+import type { Adapters, FieldProps, Kind, SheetDestination } from './adapters.ts'
+import { destinationWords, whatGoes, type GoesItem } from '../github/compose.ts'
+import { validContact } from '../contract.mjs'
+import type { Contact } from './adapters.ts'
+import { collectContext, type ReportContext } from './context.ts'
 import { useDialog } from './dialog.ts'
 import { DefaultField } from './default-field.tsx'
 import { draftKey, loadDraft, saveDraft } from './drafts.ts'
@@ -83,6 +87,32 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   const [announce, setAnnounce] = useState('')
   const [sent, setSent] = useState<{ id: string; files: { file: string; name: string; bytes: number }[] } | null>(null)
   const [loaded, setLoaded] = useState(false)
+  const [dest, setDest] = useState<SheetDestination | null>(null)
+  // Everything shared so it can be fixed, each with why; all on by default, any one can be left out (`choice`).
+  const [ctx, setCtx] = useState<ReportContext | null>(null)
+  const [contact, setContact] = useState<Contact | null>(null)
+  const [choice, setChoice] = useState<Record<string, boolean>>({})
+  // Where it files, asked once when the sheet opens; until it answers (or with none) the one-line note stays.
+  useEffect(() => {
+    if (!adapters.destination) return
+    let live = true
+    adapters.destination().then((d) => { if (live) setDest(d && typeof d.repo === 'string' ? d : null) }, () => { if (live) setDest(null) })
+    return () => { live = false }
+  }, [adapters])
+  const contextOptions = useCallback(() => {
+    const c = adapters.context
+    return typeof c === 'function' ? { extra: c, precise: false } : { extra: c?.items ? () => c.items!() : undefined, precise: Boolean(c?.precise) }
+  }, [adapters])
+  const gather = useCallback(() => collectContext({ identity: who ?? null, where, about: adapters.about, ...contextOptions(), ...(adapters.phone?.now ? { now: adapters.phone.now } : {}) }), [who, where, adapters, contextOptions])
+  useEffect(() => {
+    if (!who) return
+    let live = true
+    void gather().then((c) => { if (live) setCtx(c) })
+    if (adapters.contact) adapters.contact().then((c) => { if (live) setContact(c && !validContact(c).length ? c : null) }, () => {})
+    return () => { live = false }
+    // where is an object the host may rebuild each render; the context is gathered once per open and again at Send.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adapters, who])
   const chain = useRef<Promise<unknown>>(Promise.resolve())
   // What is on the sheet, kept in step with state so a second take or picture added a moment later counts the first.
   const voiceRef = useRef<Voice[]>([])
@@ -265,6 +295,30 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   ] as { name: Diag; label: string; value: string | undefined }[]).filter((d): d is { name: Diag; label: string; value: string } => Boolean(d.value))
   const lineParts = [`this screen (${where.screen}, ${sanitizeRoute(where.route)})`, ...avail.map((d) => d.label)]
   const summary = `${S.goesTo(adapters.words.owner)} ${S.includes(lineParts)}`
+  // With a destination, the one line becomes the list of exactly what the issue will carry, built by the same function
+  // the issue is written from (`whatGoes`), so the list and the issue cannot drift. It follows the draft as it changes.
+  // Every row of the list, whether or not there is a destination; optional rows carry a tick box.
+  const rows = whatGoes({
+    kind, words, voice: voice.map((v) => ({ file: v.file, ms: v.ms })), media: media.map((m) => ({ file: m.file, type: m.type, bytes: m.bytes })),
+    where: { screen: where.screen, route: sanitizeRoute(where.route) },
+    diagnostics: Object.fromEntries(avail.map((d) => [d.name, d.value])),
+    appName: adapters.about?.app ?? adapters.words.app,
+    ...(dest?.name ? { filerName: dest.name } : {}),
+    ...(ctx ? { context: ctx } : {}),
+    ...(contact ? { who: { contact } } : {}),
+  }, dest ?? { repo: '', public: false, account: '', attaches: true })
+  const isOn = (key: string, fallback = true) => choice[key] ?? rows.find((r) => r.key === key)?.on ?? fallback
+  const goes = dest ? rows : null
+  const destWords = dest ? destinationWords(dest) : null
+  const optionalRow = (g: GoesItem) => (
+    <li key={g.key} data-goes={g.key} className="sac-goes-opt">
+      <label>
+        <input type="checkbox" checked={isOn(g.key)} onChange={(e) => setChoice((c) => ({ ...c, [g.key]: e.target.checked }))} />{' '}
+        <span className="sac-goes-label">{g.text}</span>{g.value ? <>: <span className="sac-goes-value">{g.value}</span></> : null}{' '}
+        <span className="sac-muted sac-goes-why">({g.why}{g.reason ? `; off by default because ${g.reason}` : ''})</span>
+      </label>
+    </li>
+  )
 
   const hasAnything = Boolean(words.trim() || voice.length || media.length)
 
@@ -273,13 +327,20 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     setError('')
     await chain.current
     const d = await saveDraft(rt.store, key, { kind, words, attachments: [...voice.map((v) => v.key), ...media.map((m) => m.key)] })
+    // What was left out never leaves the phone: the context gathered again now (the trail has grown), minus every row
+    // the person unticked, and the diagnostics those rows stand for.
+    const fresh = await gather()
+    const keep = { ...fresh, items: fresh.items.filter((i) => isOn(`ctx:${i.key}`)), routes: isOn('routes') ? fresh.routes : [], taps: isOn('taps') ? fresh.taps : [], errors: isOn('errors') ? fresh.errors : [] }
+    const leftOut: Record<string, Diag> = { 'ctx:device': 'device', 'ctx:screen': 'screen', 'ctx:time': 'at' }
     const diagnostics: Record<string, string> = {}
-    for (const x of avail) diagnostics[x.name] = x.value
+    for (const x of avail) if (!Object.entries(leftOut).some(([k, d]) => d === x.name && !isOn(k))) diagnostics[x.name] = x.value
+    const reach = contact && isOn('contact') ? contact : null
     const report: Record<string, unknown> & { id: string } = {
       id: d.reportId,
       kind,
       ...(adapters.about ? { app: Object.fromEntries(Object.entries(adapters.about).filter(([k]) => k !== 'version')) } : {}),
-      who: { member: who.account, role: who.role },
+      who: { member: who.account, role: who.role, ...(reach ? { contact: reach } : {}) },
+      context: keep,
       words: words.trim(),
       voice: voice.map((v) => ({ file: v.file, ms: v.ms, field: v.field })),
       media: await Promise.all(media.map(async (m) => {
@@ -398,7 +459,20 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
               ) : null}
             </fieldset>
 
-            <p className="sac-muted sac-fyi" data-sac-summary="">{summary}</p>
+            {goes && destWords ? (
+              <div className="sac-goes sac-fyi" data-sac-goes="">
+                <p className="sac-goes-head"><strong>{destWords.headline}</strong>{' ('}<span className={destWords.danger ? 'sac-danger' : 'sac-muted'}>{destWords.privacy}</span>)</p>
+                <p className="sac-muted">It will carry:</p>
+                <ul className="sac-goes-list">{goes.filter((g) => !g.optional).map((g) => <li key={g.key} data-goes={g.key}>{g.text}</li>)}</ul>
+                {goes.some((g) => g.optional) ? <ul className="sac-goes-opts" aria-label={S.contextLegend}>{goes.filter((g) => g.optional).map(optionalRow)}</ul> : null}
+                <p className="sac-muted">{destWords.account}</p>
+              </div>
+            ) : (
+              <div className="sac-fyi">
+                <p className="sac-muted sac-fyi" data-sac-summary="">{summary}</p>
+                {rows.some((g) => g.optional) ? <ul className="sac-goes-opts" aria-label={S.contextLegend}>{rows.filter((g) => g.optional).map(optionalRow)}</ul> : null}
+              </div>
+            )}
 
             {error ? <p role="alert" className="sac-error">{error}</p> : null}
             <div className="sac-actions">
