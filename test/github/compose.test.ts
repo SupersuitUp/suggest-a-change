@@ -149,6 +149,13 @@ describe('whatGoes: the sheet and the issue cannot drift', () => {
     expect(destinationWords(dest)).toEqual({ headline: 'Sending this files an issue on acme/app', privacy: "private: people with access to acme/app's code can read it", danger: false, account: "Filed from pat-gh's GitHub account." })
     expect(destinationWords({ ...dest, public: true })).toMatchObject({ privacy: 'public: anyone on the internet can read this', danger: true })
   })
+
+  it('a filing through a relay says the app opens it and names the sender, never a GitHub account that is not theirs', () => {
+    expect(destinationWords({ ...dest, via: 'relay', relayApp: 'Supersuit Suggestions', name: 'Pat Lee' }).account)
+      .toBe('Opened by the Supersuit Suggestions app on GitHub, which says it came from Pat Lee.')
+    expect(destinationWords({ ...dest, via: 'relay' }).account).toBe('Opened by a suggestions app on GitHub, which says it came from you.')
+    expect(destinationWords({ ...dest, via: 'direct', name: 'Pat Lee' }).account).toBe("Filed from pat-gh's GitHub account.")
+  })
 })
 
 describe('the context, shared so it can be fixed, and a way to reach them', () => {
