@@ -299,7 +299,7 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   // the issue is written from (`whatGoes`), so the list and the issue cannot drift. It follows the draft as it changes.
   // Every row of the list, whether or not there is a destination; optional rows carry a tick box.
   const rows = whatGoes({
-    kind, words, voice: voice.map((v) => ({ file: v.file, ms: v.ms })), media: media.map((m) => ({ file: m.file, type: m.type })),
+    kind, words, voice: voice.map((v) => ({ file: v.file, ms: v.ms })), media: media.map((m) => ({ file: m.file, type: m.type, bytes: m.bytes })),
     where: { screen: where.screen, route: sanitizeRoute(where.route) },
     diagnostics: Object.fromEntries(avail.map((d) => [d.name, d.value])),
     appName: adapters.about?.app ?? adapters.words.app,

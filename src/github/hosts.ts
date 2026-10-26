@@ -11,6 +11,8 @@ export interface AttachmentFile { name: string; type: string; bytes: Uint8Array 
 export interface AttachmentHost { put(target: AttachmentTarget, file: AttachmentFile): Promise<{ url: string }> }
 
 export const ATTACHMENTS_BRANCH = 'suggestion-attachments'
+/** Up to this size a file goes through the contents API; past it, through the git data API (blob, tree, commit). */
+export const CONTENTS_API_BYTES = 1_000_000
 const REPORT_ID = /^r-\d{14}-[a-z0-9]{6}$/
 const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 
@@ -47,11 +49,34 @@ export function branchHost({ repo, token, branch = ATTACHMENTS_BRANCH, fetch, re
     const commit = await github(cfg, 'POST', `/repos/${repo}/git/commits`, { message: 'Start the suggestion attachments branch', tree: tree.body.sha, parents: [] })
     try { await github(cfg, 'POST', `/repos/${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha: commit.body.sha }) } catch (e) { if (!(e instanceof GitHubError) || e.status !== 422) throw e }
   })().catch((e) => { ready = null; throw e }))
+  /** A file past the contents API's comfortable size, through the git data API: a blob, a tree on top of the branch's
+   *  own, a commit, and the branch moved to it (once more if another write moved it first). Up to GitHub's 100 MB. */
+  async function putLarge(path: string, file: AttachmentFile, reportId: string) {
+    try {
+      await github(cfg, 'GET', `/repos/${repo}/contents/${path}?ref=${branch}`)
+      if (refuseExisting) throw new GitHubError(`${path} is already written`, 409, null)
+      return // written once: its link stands
+    } catch (e) { if (!(e instanceof GitHubError) || e.status !== 404) throw e }
+    const blob = (await github(cfg, 'POST', `/repos/${repo}/git/blobs`, { content: toBase64(file.bytes), encoding: 'base64' })).body.sha as string
+    for (let attempt = 0; ; attempt++) {
+      const head = (await github(cfg, 'GET', `/repos/${repo}/git/ref/heads/${branch}`)).body.object.sha as string
+      const base = (await github(cfg, 'GET', `/repos/${repo}/git/commits/${head}`)).body.tree.sha as string
+      const tree = (await github(cfg, 'POST', `/repos/${repo}/git/trees`, { base_tree: base, tree: [{ path, mode: '100644', type: 'blob', sha: blob }] })).body.sha as string
+      const commit = (await github(cfg, 'POST', `/repos/${repo}/git/commits`, { message: `Attach ${file.name} to ${reportId}`, tree, parents: [head] })).body.sha as string
+      try { await github(cfg, 'PATCH', `/repos/${repo}/git/refs/heads/${branch}`, { sha: commit }); return }
+      catch (e) { if (!(e instanceof GitHubError) || e.status !== 422 || attempt >= 2) throw e } // someone else moved the branch: build on theirs
+    }
+  }
   return {
     async put(target, file) {
       if (target.repo !== repo) throw new Error(`this host writes to ${repo}, not ${target.repo}`)
       const path = pathFor(target, file.name)
       await ensure()
+      const size = file.bytes instanceof Uint8Array ? file.bytes.length : file.bytes.byteLength
+      if (size > CONTENTS_API_BYTES) {
+        await putLarge(path, file, target.reportId)
+        return { url: attachmentUrl(repo, branch, path) }
+      }
       try {
         await github(cfg, 'PUT', `/repos/${repo}/contents/${path}`, { message: `Attach ${file.name} to ${target.reportId}`, content: toBase64(file.bytes), branch })
       } catch (e) {

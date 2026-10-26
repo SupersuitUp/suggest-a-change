@@ -283,6 +283,13 @@ describe('the sheet', () => {
     outside.remove()
   })
 
+  it('says before Send when a file is larger than the destination can take', async () => {
+    const { adapters } = await setup({ destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true, maxInlineBytes: 1000 }) })
+    await sheet(adapters)
+    fireEvent.change(images(), { target: { files: [png('big.png', 2048)] } })
+    await screen.findByText(/image-1\.png is over the 1 KB acme\/app can take, so it does not reach the issue/)
+  })
+
   it('a destination that answers nothing keeps today\'s line', async () => {
     const { adapters } = await setup({ destination: async () => null })
     await sheet(adapters)

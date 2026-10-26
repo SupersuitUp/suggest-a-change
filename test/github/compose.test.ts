@@ -133,6 +133,18 @@ describe('whatGoes: the sheet and the issue cannot drift', () => {
     expect(items.find((i) => i.key === 'voice')!.text).toBe('your voice note')
   })
 
+  it('says in advance when a file is larger than the destination can take, and that it will not reach the issue', () => {
+    const items = whatGoes({ ...full(), media: [{ file: 'image-1.png', type: 'image/png', bytes: 1000 }, { file: 'video-3.mp4', type: 'video/mp4', bytes: 9 * 2 ** 20 }] }, { ...dest, maxInlineBytes: 4 * 2 ** 20 })
+    expect(items.find((i) => i.key === 'video')!.text).toBe('1 video, saved to the suggestion-attachments branch of acme/app; video-3.mp4 is over the 4 MB acme/app can take, so it does not reach the issue')
+    expect(items.find((i) => i.key === 'images')!.text).toBe('1 screenshot, saved to the suggestion-attachments branch of acme/app')
+  })
+
+  it('takes the app label from the host when given one, and none when told there is none', () => {
+    expect(composeIssue(full(), { ...opts, appLabel: 'helm-ios' }).labels).toEqual(['enhancement', 'app:helm-ios'])
+    expect(composeIssue(full(), { ...opts, appLabel: null }).labels).toEqual(['enhancement'])
+    expect(composeIssue({ ...full(), appName: undefined }, { ...opts, appName: undefined }).body).toContain('through Suggest a change in an app.')
+  })
+
   it('names the destination, and a public repo in the danger words', () => {
     expect(destinationWords(dest)).toEqual({ headline: 'Sending this files an issue on acme/app', privacy: "private: people with access to acme/app's code can read it", danger: false, account: "Filed from pat-gh's GitHub account." })
     expect(destinationWords({ ...dest, public: true })).toMatchObject({ privacy: 'public: anyone on the internet can read this', danger: true })

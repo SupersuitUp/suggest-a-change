@@ -17,6 +17,7 @@ function fakeGitHub(over: { publicKey?: string; files?: string[]; issueBody?: st
   let issues = 100
   const files = new Set(over.files ?? [])
   const opened: { number: number; title: string; body: string; labels: string[] }[] = []
+  const blobs: { content: string; encoding: string }[] = []
   const comments: { number: number; body: string }[] = []
   const fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = String(input)
@@ -47,6 +48,15 @@ function fakeGitHub(over: { publicKey?: string; files?: string[]; issueBody?: st
     if (url.startsWith(`${API}/repos/acme/app/issues/`)) return ok(404, { message: 'Not Found' })
     if (url.startsWith(`${API}/repos/acme/app/contents/attachments/${ID}?`)) return files.size ? ok(200, [...files].map((name) => ({ name, type: 'file' }))) : ok(404, { message: 'Not Found' })
     if (url === `${API}/repos/acme/app/git/ref/heads/suggestion-attachments`) return branch ? ok(200, { object: { sha: 'c1' } }) : ok(404, {})
+    // Large files go through the git data API: a blob, a tree on top of the branch's, a commit, the ref moved.
+    if (c.method === 'POST' && url.endsWith('/git/blobs')) { blobs.push(c.body); return ok(201, { sha: `blob${blobs.length}` }) }
+    if (c.method === 'GET' && /\/git\/commits\/c\d+$/.test(url)) return ok(200, { sha: 'c1', tree: { sha: 't0' } })
+    if (c.method === 'PATCH' && url === `${API}/repos/acme/app/git/refs/heads/suggestion-attachments`) {
+      const t = calls.filter((x) => x.url.endsWith('/git/trees')).at(-1)?.body.tree?.[0]
+      if (t?.path?.startsWith(`attachments/`)) files.add(t.path.split('/').pop()); return ok(200, {})
+    }
+    const one = new RegExp(`/repos/acme/app/contents/attachments/${ID}/([^?]+)\\?ref=`).exec(url)
+    if (c.method === 'GET' && one) return files.has(one[1]) ? ok(200, { name: one[1] }) : ok(404, {})
     if (url.endsWith('/git/trees')) return ok(201, { sha: 't1' })
     if (url.endsWith('/git/commits')) return ok(201, { sha: 'c1' })
     if (url.endsWith('/git/refs')) { branch = true; return ok(201, {}) }
@@ -57,14 +67,33 @@ function fakeGitHub(over: { publicKey?: string; files?: string[]; issueBody?: st
     }
     return ok(404, { message: 'Not Found' })
   }) as typeof globalThis.fetch
-  return { fetch, calls, opened, comments }
+  return { fetch, calls, opened, comments, blobs, files }
 }
+
+/** A staging store as a host would back it with a bucket: a one-time signed PUT, then the relay reads and discards. */
+function fakeStaging() {
+  const objects = new Map<string, Uint8Array>()
+  const issued: { key: string; type: string; bytes: number }[] = []
+  const discarded: string[] = []
+  const staging = {
+    async uploadUrl(key: string, o: { type: string; bytes: number }) { issued.push({ key, ...o }); return { url: `https://staging.test/${key}`, headers: { 'content-type': o.type, 'x-goog-if-generation-match': '0' } } },
+    async read(key: string) { return objects.get(key) ?? null },
+    async discard(key: string) { discarded.push(key); objects.delete(key) },
+  }
+  /** What the storage service does with a PUT on one of those links. */
+  const put = (url: string, bytes: Uint8Array) => { objects.set(url.replace('https://staging.test/', ''), bytes) }
+  return { staging, objects, issued, discarded, put }
+}
+/** An mp4's first bytes, padded to `size`: enough for the sniffer, large enough to need staging and the git data API. */
+const mp4 = (size: number) => { const b = new Uint8Array(size); b.set([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32]); return b }
 
 // Who is calling, as the host knows them: the name, role, app and contact the issue uses come from here, never the request.
 const who = (req: Request) => Promise.resolve(
   req.headers.get('authorization') === 'Bearer member' ? { account: 'amy', name: 'Pat Okafor', role: 'member' as const, appName: 'Notes', contact: { email: 'pat@example.com' } }
     : req.headers.get('authorization') === 'Bearer ben' ? { account: 'ben', name: 'Ben Okoro' } : null)
-const relay = (g: ReturnType<typeof fakeGitHub>, extra: Record<string, unknown> = {}) => createAttachRelay({ app: { id: 1234, privateKey: KEY.privateKey }, identity: who, fetch: g.fetch, now: () => Date.parse('2026-10-26T18:00:00Z'), ...extra })
+const relay = (g: ReturnType<typeof fakeGitHub>, extra: Record<string, unknown> = {}) => createAttachRelay({ app: { id: 1234, privateKey: KEY.privateKey }, identity: who, apps: APPS, fetch: g.fetch, now: () => Date.parse('2026-10-26T18:00:00Z'), ...extra })
+// The apps this relay files for, as the host names them: the request names one by its id, and only these are accepted.
+const APPS = { notes: { name: 'Notes', label: 'notes' } }
 const post = (body: unknown, auth = 'Bearer member', method = 'POST') => new Request('https://relay.test/attach', { method, headers: { authorization: auth, 'content-type': 'application/json' }, ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) })
 const file = (over: Record<string, unknown> = {}) => ({ repo: 'acme/app', issue: 7, reportId: ID, name: 'image-1.png', type: 'image/png', bytes: toBase64(PNG), ...over })
 const status = async (res: Response) => [res.status, ((await res.json()) as { error?: string }).error]
@@ -182,14 +211,14 @@ describe('createAttachRelay: every refusal', () => {
 // FILING FOR PEOPLE WITH NO ACCESS. The relay opens the issue itself, as the App, for someone who cannot even read the
 // repo: the privacy catch runs on the relay, the files go to the branch first, then the issue, and only the identity
 // that filed a report may add to it or read its state.
-const suggestions = (g: ReturnType<typeof fakeGitHub>, extra: Record<string, unknown> = {}) => createSuggestionRelay({ app: { id: 1234, privateKey: KEY.privateKey }, identity: who, fetch: g.fetch, now: () => Date.parse('2026-10-26T18:00:00Z'), ...extra })
+const suggestions = (g: ReturnType<typeof fakeGitHub>, extra: Record<string, unknown> = {}) => createSuggestionRelay({ app: { id: 1234, privateKey: KEY.privateKey }, identity: who, apps: APPS, fetch: g.fetch, now: () => Date.parse('2026-10-26T18:00:00Z'), ...extra })
 const act = (action: string, body: unknown, auth = 'Bearer member') => new Request(`https://relay.test/api/suggestions/${action}`, { method: 'POST', headers: { authorization: auth, 'content-type': 'application/json' }, body: JSON.stringify(body) })
 const report = (over: Record<string, unknown> = {}) => ({
   id: ID, kind: 'broken', words: 'The save button is gone.', who: { member: 'amy', role: 'member' },
   voice: [], media: [{ file: 'image-1.png', type: 'image/png', bytes: PNG.length }],
   where: { screen: 'Notes', route: '/notes' }, diagnostics: { appVersion: '1.2.3', at: '2026-10-26T17:04:12Z', device: 'iPhone', screen: '390x844' }, ...over,
 })
-const filing = (over: Record<string, unknown> = {}) => ({ repo: 'acme/app', report: report(), filerName: 'Pat Okafor', appName: 'Notes', appVersion: '1.2.3', files: [{ name: 'image-1.png', type: 'image/png', bytes: toBase64(PNG) }], ...over })
+const filing = (over: Record<string, unknown> = {}) => ({ repo: 'acme/app', report: report(), app: 'notes', filerName: 'Pat Okafor', appVersion: '1.2.3', files: [{ name: 'image-1.png', type: 'image/png', bytes: toBase64(PNG) }], ...over })
 
 describe('createSuggestionRelay: file', () => {
   it('saves the files first, then opens the issue as the App, with the filer\'s name and never their account', async () => {
@@ -424,10 +453,11 @@ describe('the review: who may attach, what is trusted, and what is counted', () 
     const g2 = fakeGitHub()
     await suggestions(g2)(act('file', filing({ report: report() })))
     expect(g2.opened[0].body).not.toContain('## Reach them')
-    // an identity with no app name gets no app label, whatever the request says
+    // a request naming no app gets no app label and no app name, whatever else it says
     const g3 = fakeGitHub()
-    expect((await suggestions(g3)(act('file', filing({ appName: 'Evil', report: report({ id: 'r-20261026170412-cccccc', media: [] }), files: [] }), 'Bearer ben'))).status).toBe(200)
+    expect((await suggestions(g3)(act('file', filing({ app: undefined, appName: 'Evil', report: report({ id: 'r-20261026170412-cccccc', media: [] }), files: [] }), 'Bearer ben'))).status).toBe(200)
     expect(g3.opened[0].labels).toEqual(['bug'])
+    expect(g3.opened[0].body).toContain('through Suggest a change in an app.')
   })
 
   it('refuses a repo with a dot segment, and a follow-up on a repo the host does not allow', async () => {
@@ -438,5 +468,127 @@ describe('the review: who may attach, what is trusted, and what is counted', () 
     expect((await suggestions(g, { usage })(act('file', filing()))).status).toBe(200)
     const closed = suggestions(g, { usage, repos: () => [] })
     expect(await status(await closed(act('follow-up', { repo: 'acme/app', number: 101, reportId: ID, words: 'more' })))).toEqual([403, 'this account may not file on acme/app'])
+  })
+})
+
+describe('the app comes from the host\'s table', () => {
+  it('names the app and its label from apps, by the id the request gives, and refuses one it does not know', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g, { apps: { notes: { name: 'Notes', label: 'notes' }, helm: { name: 'Helm', label: 'helm' } } })
+    expect((await r(act('file', filing({ app: 'helm' })))).status).toBe(200)
+    expect(g.opened[0].labels).toEqual(['bug', 'app:helm'])
+    expect(g.opened[0].body).toContain('through Suggest a change in the Helm.')
+    expect(await status(await r(act('file', filing({ app: 'evil', report: report({ id: 'r-20261026170412-eeeeee', media: [] }), files: [] }))))).toEqual([400, 'unknown app'])
+  })
+
+  it('with no table, no request can name an app', async () => {
+    const g = fakeGitHub()
+    expect((await suggestions(g, { apps: undefined })(act('file', filing({ app: 'notes' })))).status).toBe(200)
+    expect(g.opened[0].labels).toEqual(['bug'])
+    expect(g.opened[0].body).toContain('through Suggest a change in an app.')
+  })
+})
+
+describe('staging: files past a serverless body limit', () => {
+  const VID = 'video-1.mp4'
+  const big = mp4(1_200_000)
+  const videoReport = () => report({ media: [{ file: VID, type: 'video/mp4', bytes: big.length, ms: 5000 }] })
+  const get = (action: string) => new Request(`https://relay.test/api/suggestions/${action}`, { method: 'GET' })
+
+  it('says what it can take, so a filer knows before it sends', async () => {
+    const plain = await (await suggestions(fakeGitHub())(get('capabilities'))).json()
+    expect(plain).toMatchObject({ staging: false, inlineBytes: 3 * 2 ** 20, actions: ['file', 'follow-up', 'status', 'attach'] })
+    const st = fakeStaging()
+    expect(await (await suggestions(fakeGitHub(), { staging: st.staging })(get('capabilities'))).json()).toMatchObject({ staging: true, actions: ['file', 'follow-up', 'status', 'attach', 'upload-url'] })
+  })
+
+  it('upload-url answers a one-time signed PUT for staging/<account>/<report>/<name>, with the day\'s bytes held up front', async () => {
+    const st = fakeStaging()
+    const r = suggestions(fakeGitHub(), { staging: st.staging })
+    const res = await r(act('upload-url', { repo: 'acme/app', reportId: ID, name: VID, type: 'video/mp4', bytes: big.length }))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ url: `https://staging.test/staging/amy/${ID}/${VID}`, headers: { 'content-type': 'video/mp4', 'x-goog-if-generation-match': '0' }, staged: VID })
+    expect(st.issued).toEqual([{ key: `staging/amy/${ID}/${VID}`, type: 'video/mp4', bytes: big.length }])
+    // its refusals
+    expect((await r(act('upload-url', { repo: 'acme/app', reportId: ID, name: VID, type: 'video/mp4', bytes: big.length }, 'Bearer stranger'))).status).toBe(401)
+    expect((await r(act('upload-url', { repo: 'acme/app', reportId: ID, name: 'x.exe', type: 'application/x-msdownload', bytes: 10 }))).status).toBe(422)
+    expect((await r(act('upload-url', { repo: 'acme/app', reportId: ID, name: VID, type: 'video/mp4', bytes: 101 * 2 ** 20 }))).status).toBe(413)
+    expect((await r(act('upload-url', { repo: 'acme/app', reportId: ID, name: 'v2.mp4', type: 'video/mp4', bytes: 10 }, 'Bearer ben'))).status).toBe(403) // amy's report
+    const tight = suggestions(fakeGitHub(), { staging: fakeStaging().staging, limits: { bytesPerPersonPerDay: 1000 } })
+    expect((await tight(act('upload-url', { repo: 'acme/app', reportId: ID, name: VID, type: 'video/mp4', bytes: 5000 }))).status).toBe(429)
+    expect((await suggestions(fakeGitHub())(act('upload-url', { repo: 'acme/app', reportId: ID, name: VID, type: 'video/mp4', bytes: 10 }))).status).toBe(404) // no staging: no such action
+  })
+
+  it('file takes a staged file: reads it, sniffs it, writes it through the git data API, links it, and discards it', async () => {
+    const g = fakeGitHub()
+    const st = fakeStaging()
+    const r = suggestions(g, { staging: st.staging })
+    const u = (await (await r(act('upload-url', { repo: 'acme/app', reportId: ID, name: VID, type: 'video/mp4', bytes: big.length }))).json()) as { url: string }
+    st.put(u.url, big)
+    const res = await r(act('file', filing({ report: videoReport(), files: [{ name: VID, type: 'video/mp4', staged: VID }] })))
+    expect(res.status).toBe(200)
+    expect(g.blobs).toHaveLength(1)
+    expect(g.blobs[0].encoding).toBe('base64')
+    expect(g.calls.some((c) => c.method === 'PATCH' && c.url.endsWith('/git/refs/heads/suggestion-attachments'))).toBe(true)
+    expect(g.calls.some((c) => c.method === 'PUT' && c.url.includes(VID))).toBe(false) // never the contents API for a large file
+    expect(g.opened[0].body).toContain(`[video-1.mp4](https://github.com/acme/app/blob/suggestion-attachments/attachments/${ID}/${VID}?raw=true)`)
+    expect(st.discarded).toEqual([`staging/amy/${ID}/${VID}`])
+  })
+
+  it('a staged file that is not what it says, or was never uploaded, files nothing', async () => {
+    const g = fakeGitHub()
+    const st = fakeStaging()
+    const r = suggestions(g, { staging: st.staging })
+    expect((await r(act('file', filing({ report: videoReport(), files: [{ name: VID, type: 'video/mp4', staged: VID }] })))).status).toBe(400) // never uploaded
+    st.objects.set(`staging/amy/${ID}/${VID}`, new TextEncoder().encode('MZ this is a program'))
+    expect((await r(act('file', filing({ report: videoReport(), files: [{ name: VID, type: 'video/mp4', staged: VID }] })))).status).toBe(422)
+    expect(g.opened).toHaveLength(0)
+  })
+
+  it('a file over the inline cap is refused in words before anything is filed, saying whether staging would take it', async () => {
+    const g = fakeGitHub()
+    const res = await suggestions(g, { limits: { inlineBytes: 8 } })(act('file', filing()))
+    expect(res.status).toBe(413)
+    expect(((await res.json()) as { error: string }).error).toBe('image-1.png is larger than this relay takes in one request, and it has no staging for larger files')
+    const st = suggestions(fakeGitHub(), { limits: { inlineBytes: 8 }, staging: fakeStaging().staging })
+    expect(((await (await st(act('file', filing()))).json()) as { error: string }).error).toBe('image-1.png is larger than this relay takes in one request; send it staged (upload-url)')
+    expect(g.opened).toHaveLength(0)
+  })
+
+  it('attach takes a staged file too', async () => {
+    const g = fakeGitHub()
+    const st = fakeStaging()
+    const r = suggestions(g, { staging: st.staging })
+    const u = (await (await r(act('upload-url', { repo: 'acme/app', reportId: ID, name: VID, type: 'video/mp4', bytes: big.length }))).json()) as { url: string }
+    st.put(u.url, big)
+    const res = await r(act('attach', { repo: 'acme/app', issue: 7, reportId: ID, name: VID, type: 'video/mp4', staged: VID }))
+    expect(res.status).toBe(200)
+    expect(g.blobs).toHaveLength(1)
+    expect(st.discarded).toEqual([`staging/amy/${ID}/${VID}`])
+  })
+
+  it('relayFiler stages anything over 2 MB when the relay can, and refuses before filing when it cannot', async () => {
+    const g = fakeGitHub()
+    const st = fakeStaging()
+    const handler = suggestions(g, { staging: st.staging })
+    const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.startsWith('https://staging.test/')) { st.put(url, new Uint8Array(init!.body as ArrayBuffer)); return new Response(null, { status: 200 }) }
+      return url.startsWith('https://relay.test/') ? handler(new Request(url, init)) : g.fetch(input, init)
+    }) as typeof globalThis.fetch
+    const huge = mp4(2_500_000)
+    const filer = relayFiler({ url: 'https://relay.test/api/suggestions', headers: { authorization: 'Bearer member' }, fetch })
+    const got = await filer.file({ repo: 'acme/app', app: 'notes', report: report({ media: [{ file: VID, type: 'video/mp4', bytes: huge.length, ms: 5000 }] }), files: [{ name: VID, type: 'video/mp4', bytes: huge }] })
+    expect(got.number).toBe(101)
+    expect(st.issued.map((i) => i.key)).toEqual([`staging/amy/${ID}/${VID}`])
+    const fileCall = g.calls.length // the relay's own GitHub calls happened; the file request itself carried no bytes
+    expect(fileCall).toBeGreaterThan(0)
+    // a relay with no staging: refused before anything is filed
+    const g2 = fakeGitHub()
+    const plain = suggestions(g2)
+    const f2 = (async (input: RequestInfo | URL, init?: RequestInit) => (String(input).startsWith('https://relay.test/') ? plain(new Request(String(input), init)) : g2.fetch(input, init))) as typeof globalThis.fetch
+    const noStaging = relayFiler({ url: 'https://relay.test/api/suggestions', headers: { authorization: 'Bearer member' }, fetch: f2 })
+    await expect(noStaging.file({ repo: 'acme/app', report: report({ media: [{ file: VID, type: 'video/mp4', bytes: huge.length, ms: 5000 }] }), files: [{ name: VID, type: 'video/mp4', bytes: huge }] })).rejects.toThrow(/video-1\.mp4 is larger than this relay takes/)
+    expect(g2.opened).toHaveLength(0)
   })
 })

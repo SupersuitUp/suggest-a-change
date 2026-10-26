@@ -627,7 +627,7 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
       const filerName = (await g.nameOf?.(r.who.member)) || undefined
       const filed = await fileSuggestion({ repo: g.repo, token: g.token, fetch: f }, {
         report,
-        compose: { appName: opts.app?.name, appVersion: typeof report.diagnostics?.appVersion === 'string' ? report.diagnostics.appVersion : undefined, filerName, filerRole: r.who.role },
+        compose: { appName: opts.app?.name, ...(typeof opts.app?.label === 'string' && opts.app.label ? { appLabel: opts.app.label } : {}), appVersion: typeof report.diagnostics?.appVersion === 'string' ? report.diagnostics.appVersion : undefined, filerName, filerRole: r.who.role },
         files,
         ...(g.attachments ? { attachments: g.attachments } : {}),
       })

@@ -12,7 +12,7 @@
 // Web-standard only: Request, Response, fetch, crypto.subtle.
 import { CEILINGS, isRepoName, isReportId, validContact, validateReport } from '../contract.mjs'
 import { cappedText, json } from '../server/http.ts'
-import { ACCEPTED_TYPES, sameType, sniffType } from '../server/sniff.ts'
+import { ACCEPTED_TYPES, canonicalType, sameType, sniffType } from '../server/sniff.ts'
 import { withPlace, type GeoHook } from '../server/geo.ts'
 import { addFollowUp, fileIssue, github, GitHubError, issueStates, issueStatus, type Fetch } from './api.ts'
 import { composeIssue } from './compose.ts'
@@ -35,6 +35,9 @@ export interface RelayLimits {
   voiceBytes: number
   /** How long after an issue closed a file may still be attached to it. */
   closedGraceMs: number
+  /** The largest file taken inside a request body. A larger one is staged (upload-url), or refused without staging.
+   *  Serverless hosts cap a request body (Vercel at about 4.5 MB), so the default leaves room for base64 and the rest. */
+  inlineBytes: number
 }
 export const RELAY_LIMITS: RelayLimits = {
   perPersonPerDay: CEILINGS.perPersonPerDay,
@@ -43,6 +46,7 @@ export const RELAY_LIMITS: RelayLimits = {
   videos: CEILINGS.videos, videoBytes: CEILINGS.videoBytes,
   voice: 60, voiceBytes: RELAY_VOICE_BYTES,
   closedGraceMs: 7 * 24 * 3600_000,
+  inlineBytes: 3 * 2 ** 20,
 }
 
 export interface FiledRecord { account: string; reportId: string; number: number; url: string }
@@ -115,8 +119,6 @@ export interface RelayIdentity {
   /** The name the issue says it was filed by; "Someone" without one. */
   name?: string
   role?: 'operator' | 'member' | 'maintainer'
-  /** The app the suggestion came from; it names the issue's `app:<slug>` label. Without one there is no app label. */
-  appName?: string
   /** How to reach them, shared only when the request asks (the person left it ticked). */
   contact?: { email?: string; phone?: string; handle?: string }
 }
@@ -132,6 +134,12 @@ export interface SuggestionRelayOptions {
   privacy?: { people?: Person[]; secrets?: string[] }
   /** Roughly where the filer was, from the request (see the server half's geo hooks); added to the issue's context. */
   geo?: GeoHook
+  /** The apps this relay files for, by the id a request names (`app`): the issue's app name and its `app:<label>`
+   *  come from here. A request naming an app not in the table is refused; without a table no request names one. */
+  apps?: Record<string, { name: string; label: string }>
+  /** Where files too large for one request body wait: the filer PUTs each to a one-time signed link (`upload-url`),
+   *  and `file` or `attach` names it as `staged`. Without it, only files up to `inlineBytes` can be sent. */
+  staging?: StagingAdapter
   /** May lower any limit, never raise one. */
   limits?: Partial<RelayLimits>
   usage?: RelayUsage
@@ -143,9 +151,20 @@ export interface SuggestionRelayOptions {
 /** The 0.2.0 name, for a relay that only attaches. */
 export type AttachRelayOptions = SuggestionRelayOptions
 
+/** A bucket the relay controls, for files past a request body limit. `uploadUrl` answers a one-time signed PUT that
+ *  can only create `key` once, with this type and at most these bytes: on Google Cloud Storage a V4 signed URL for PUT
+ *  with `x-goog-if-generation-match: 0` and `x-goog-content-length-range: 0,<bytes>` as signed headers; on S3 a
+ *  presigned PUT with `If-None-Match: *` and the content type and length signed. `read` answers what arrived (or null),
+ *  `discard` deletes it once the relay has written it to GitHub. */
+export interface StagingAdapter {
+  uploadUrl(key: string, o: { type: string; bytes: number }): Promise<{ url: string; headers?: Record<string, string> }>
+  read(key: string): Promise<ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer | null>
+  discard(key: string): Promise<void>
+}
+
 const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 const B64 = /^[A-Za-z0-9+/]+={0,2}$/
-const ACTIONS = ['file', 'follow-up', 'status', 'attach'] as const
+const ACTIONS = ['file', 'follow-up', 'status', 'attach', 'upload-url'] as const
 type Action = (typeof ACTIONS)[number]
 
 const enc = new TextEncoder()
@@ -197,7 +216,27 @@ const kindByName = (name: string): 'image' | 'video' | 'voice' | null => {
 }
 const kindOf = (type: string): 'image' | 'video' | 'voice' => (type.startsWith('image/') ? 'image' : type.startsWith('video/') ? 'video' : 'voice')
 
-type Checked = { name: string; type: string; kind: 'image' | 'video' | 'voice'; bytes: Uint8Array }
+/** A file ready to write: its real type and bytes, and (when it was staged) the key to discard once it is written. */
+type Checked = { name: string; type: string; kind: 'image' | 'video' | 'voice'; bytes: Uint8Array; stagedKey?: string }
+const stageKey = (account: string, reportId: string, name: string) => `staging/${encodeURIComponent(account)}/${reportId}/${name}`
+/** Everything a staged object holds, refusing past `max` as it is read. */
+async function bytesOf(got: ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer, max: number): Promise<Uint8Array | null> {
+  if (got instanceof Uint8Array) return got.length > max ? null : got
+  if (got instanceof ArrayBuffer) return got.byteLength > max ? null : new Uint8Array(got)
+  const parts: Uint8Array[] = []
+  let n = 0
+  const reader = got.getReader()
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    n += value.length
+    if (n > max) { await reader.cancel(); return null }
+    parts.push(value)
+  }
+  const out = new Uint8Array(n); let at = 0
+  for (const p of parts) { out.set(p, at); at += p.length }
+  return out
+}
 
 export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Action): (req: Request) => Promise<Response> {
   const limits: RelayLimits = { ...RELAY_LIMITS }
@@ -217,9 +256,9 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
   const b64 = (n: number) => Math.ceil(n / 3) * 4
   const room = 64 * 1024
   const budget = b64(limits.bytesPerPersonPerDay) + room
-  const oneCap = Math.min(b64(Math.max(limits.imageBytes, limits.videoBytes, limits.voiceBytes)) + room, budget)
-  const reportCap = Math.min(b64(limits.images * limits.imageBytes + limits.videos * limits.videoBytes + 10 * limits.voiceBytes) + 4 * room, budget)
-  const caps: Record<Action, number> = { file: reportCap, 'follow-up': oneCap, status: room, attach: oneCap }
+  const oneCap = Math.min(b64(Math.min(limits.inlineBytes, Math.max(limits.imageBytes, limits.videoBytes, limits.voiceBytes))) + room, budget)
+  const reportCap = Math.min(b64(Math.min(limits.inlineBytes, limits.imageBytes) * limits.images + Math.min(limits.inlineBytes, limits.videoBytes) * limits.videos + Math.min(limits.inlineBytes, limits.voiceBytes) * 10) + 4 * room, budget)
+  const caps: Record<Action, number> = { file: reportCap, 'follow-up': oneCap, status: room, attach: oneCap, 'upload-url': room }
   const bad = (error: string) => json(400, { error })
   const gone = (e: unknown) => json(502, { error: 'GitHub could not be reached or refused the relay; try again', ...(e instanceof GitHubError ? { status: e.status } : {}) })
 
@@ -233,21 +272,44 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     return (await github({ ...cfgBase, token: jwt }, 'POST', `/app/installations/${installation}/access_tokens`, { repositories: [repo.split('/')[1]] })).body.token as string
   }
 
-  /** One file: a plain name, real base64, an accepted type by its bytes that agrees with what was declared, within its cap. */
-  function checkFile(f: unknown, declared?: string): Checked | Response {
+  const kindCap = (kind: 'image' | 'video' | 'voice') => (kind === 'image' ? limits.imageBytes : kind === 'video' ? limits.videoBytes : limits.voiceBytes)
+  const kindOfType = (t: string): 'image' | 'video' | 'voice' => (t.startsWith('audio/') ? 'voice' : kindOf(t))
+
+  /** One file, inline (base64 `bytes`, up to `inlineBytes`) or `staged` (put to an upload-url link first): a plain name,
+   *  an accepted type by its bytes that agrees with what was declared, within its kind's cap. */
+  async function checkFile(f: unknown, declared: string | undefined, account: string, reportId: string): Promise<Checked | Response> {
     const x = f as Record<string, unknown> | null
     if (!x || typeof x !== 'object' || typeof x.name !== 'string' || !FILE.test(x.name)) return bad('a file name is not a plain file name')
     if (typeof x.type !== 'string') return bad(`${x.name} has no type`)
-    const bytes = typeof x.bytes === 'string' ? fromBase64(x.bytes) : null
-    if (!bytes || !bytes.length) return bad(`${x.name} is not base64`)
+    const kind = kindOfType(x.type)
+    let bytes: Uint8Array | null
+    let stagedKey: string | undefined
+    if (x.staged !== undefined) {
+      if (!opts.staging) return bad(`${x.name} is staged, and this relay has no staging`)
+      if (x.staged !== true && x.staged !== x.name) return bad(`${x.name} is staged under another name`)
+      stagedKey = stageKey(account, reportId, x.name)
+      const got = await opts.staging.read(stagedKey)
+      if (!got) return bad(`${x.name} was never uploaded; ask upload-url for a link and put it there first`)
+      bytes = await bytesOf(got, kindCap(kind))
+      if (!bytes) return json(413, { error: `${x.name} is larger than the ${kindCap(kind)} bytes allowed` })
+    } else {
+      bytes = typeof x.bytes === 'string' ? fromBase64(x.bytes) : null
+      if (!bytes || !bytes.length) return bad(`${x.name} is not base64`)
+      if (bytes.length > limits.inlineBytes && bytes.length <= kindCap(kind)) {
+        return json(413, { error: opts.staging ? `${x.name} is larger than this relay takes in one request; send it staged (upload-url)` : `${x.name} is larger than this relay takes in one request, and it has no staging for larger files` })
+      }
+    }
+    if (!bytes.length) return bad(`${x.name} is empty`)
     const real = sniffType(bytes.subarray(0, 64))
     if (!real || !(ACCEPTED_TYPES as readonly string[]).includes(real)) return json(422, { error: 'the file is not a picture, video or recording this module accepts' })
     if (!sameType(x.type, real) || (declared && !sameType(declared, real))) return json(422, { error: 'the file is not the type it was declared as' })
-    const kind = x.type.startsWith('audio/') ? 'voice' : kindOf(real)
-    const max = kind === 'image' ? limits.imageBytes : kind === 'video' ? limits.videoBytes : limits.voiceBytes
+    const max = kindCap(kind)
     if (bytes.length > max) return json(413, { error: `that file is larger than the ${max} bytes allowed` })
-    return { name: x.name, type: real, kind, bytes }
+    return { name: x.name, type: real, kind, bytes, ...(stagedKey ? { stagedKey } : {}) }
   }
+  /** The bytes a request still has to hold today: inline files only, since upload-url held a staged file's up front. */
+  const inlineBytesOf = (files: Checked[]) => files.reduce((n, f) => n + (f.stagedKey ? 0 : f.bytes.length), 0)
+  const discardStaged = async (files: Checked[]) => { for (const f of files) if (f.stagedKey) { try { await opts.staging?.discard(f.stagedKey) } catch { /* the bucket's own expiry catches it */ } } }
 
   /** The catch, on the relay, over every string that would reach the issue. A credential refuses by its kind (never its
    *  text). Anything else holds, unless the filer says they redacted: then the relay redacts what it found itself and
@@ -296,17 +358,21 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     for (const f of Array.isArray(body.files) ? body.files : []) {
       const want = declared.find(([n]) => n === (f as { name?: unknown })?.name)
       if (!want) return bad(`${String((f as { name?: unknown })?.name)} is not a file the report declares`)
-      const c = checkFile(f, want[1] === 'audio/*' ? undefined : want[1]); if (c instanceof Response) return c
+      const c = await checkFile(f, want[1] === 'audio/*' ? undefined : want[1], account, reportId); if (c instanceof Response) return c
       if (want[1] === 'audio/*' && c.kind !== 'voice') return json(422, { error: `${c.name} is a voice note and is not audio` })
       files.push(c)
     }
-    // Who it is from comes from the host, never the request: the name, the role, the app and the contact.
+    // The app is the host's: a request names one by its id in the host's table, or none.
+    const appId = body.app
+    if (appId !== undefined && opts.apps && (typeof appId !== 'string' || !Object.prototype.hasOwnProperty.call(opts.apps, appId))) return bad('unknown app')
+    const app = opts.apps && typeof appId === 'string' ? opts.apps[appId] : undefined
+    // Who it is from comes from the host, never the request: the name, the role and the contact.
     const contact = contactFor(me, (report.who as { contact?: unknown } | undefined)?.contact)
     const appVersion = typeof (report.diagnostics as { appVersion?: unknown } | undefined)?.appVersion === 'string' ? (report.diagnostics as { appVersion: string }).appVersion : undefined
     const readable = {
       words: report.words, followUps: report.followUps, where: report.where, diagnostics: report.diagnostics,
       context: report.context, transcript: typeof body.transcript === 'string' ? body.transcript : undefined,
-      filerName: me.name, appName: me.appName, who: { contact },
+      filerName: me.name, appName: app?.name, who: { contact },
     }
     const caught = catchIt(readable, account, body.redacted === true); if ('res' in caught) return caught.res
     const clean = caught.clean as typeof readable
@@ -317,7 +383,7 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     const began = await usage.begin(repo, reportId, account)
     if (began.state === 'filed') return began.account === account ? json(200, { number: began.number, url: began.url }) : json(409, { error: 'that report id is taken; start the suggestion again' })
     if (began.state === 'busy') return json(409, { error: 'that report is being filed right now; try again in a moment' })
-    const held = await reserve(account, reportId, files.reduce((n, f) => n + f.bytes.length, 0))
+    const held = await reserve(account, reportId, inlineBytesOf(files))
     if (held instanceof Response) { await usage.abandon(repo, reportId); return held }
     try {
       const token = await repoToken(repo); if (token instanceof Response) { await usage.abandon(repo, reportId); await usage.release(held.token); return token }
@@ -328,6 +394,7 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
       const role = me.role ?? 'member'
       const issue = composeIssue({ ...report, words: clean.words, where: clean.where, diagnostics: clean.diagnostics, ...(context !== undefined ? { context } : {}), who: { role, ...(clean.who.contact ? { contact: clean.who.contact } : {}) } } as never, {
         appName: typeof clean.appName === 'string' ? clean.appName.slice(0, 100) : undefined,
+        appLabel: app ? app.label : null,
         appVersion: appVersion?.slice(0, 50),
         filerName: typeof clean.filerName === 'string' && clean.filerName.trim() ? clean.filerName.trim().slice(0, 100) : 'Someone',
         filerRole: role,
@@ -337,6 +404,7 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
       const made = await fileIssue({ repo, token, fetch: opts.fetch, api: opts.api }, issue)
       await usage.finish(repo, { account, reportId, number: made.number, url: made.url })
       await usage.commit(held.token)
+      await discardStaged(files)
       return json(200, { number: made.number, url: made.url })
     } catch (e) { await usage.abandon(repo, reportId); await usage.release(held.token); return gone(e) }
   }
@@ -351,12 +419,12 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     const rec = await usage.filer(repo, number as number)
     if (!rec || rec.account !== account || rec.reportId !== reportId) return json(403, { error: 'only the person who filed it may add to it' })
     const files: Checked[] = []
-    for (const f of Array.isArray(body.files) ? body.files : []) { const c = checkFile(f); if (c instanceof Response) return c; files.push(c) }
+    for (const f of Array.isArray(body.files) ? body.files : []) { const c = await checkFile(f, undefined, account, reportId); if (c instanceof Response) return c; files.push(c) }
     const readable = { words: typeof body.words === 'string' ? body.words.slice(0, 20_000) : '', transcript: typeof body.transcript === 'string' ? body.transcript : undefined }
     const caught = catchIt(readable, account, body.redacted === true); if ('res' in caught) return caught.res
     const { words, transcript } = caught.clean
     if (!words.trim() && !transcript && !files.length) return bad('a follow-up needs words or a file')
-    const held = await reserve(account, reportId, files.reduce((n, f) => n + f.bytes.length, 0))
+    const held = await reserve(account, reportId, inlineBytesOf(files))
     if (held instanceof Response) return held
     try {
       const token = await repoToken(repo); if (token instanceof Response) { await usage.release(held.token); return token }
@@ -371,6 +439,7 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
       const text = ['## Added later', words.trim() ? fenced(words.trim()) : '', transcript ? `\n### Voice note\n${fenced(transcript.trim())}` : '', links.length ? `\n${links.join('\n')}` : ''].filter(Boolean).join('\n')
       const got = await addFollowUp({ repo, token, fetch: opts.fetch, api: opts.api }, number as number, text)
       await usage.commit(held.token)
+      await discardStaged(files)
       return json(200, got)
     } catch (e) { await usage.release(held.token); return gone(e) }
   }
@@ -412,11 +481,11 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     if (!isRepoName(repo)) return bad('repo is not owner/name')
     if (!Number.isInteger(issue) || (issue as number) < 1) return bad('issue is not an issue number')
     if (typeof reportId !== 'string' || !isReportId(reportId)) return bad('reportId is not a report id')
-    const c = checkFile(body); if (c instanceof Response) return c
     const refused = await allowed(account, repo); if (refused) return refused
+    const c = await checkFile(body, undefined, account, reportId); if (c instanceof Response) return c
     // A report belongs to the first identity that files or attaches for it; nobody else may add files to it.
     if ((await usage.bind(repo, reportId, account)) === 'taken') return json(403, { error: 'this report belongs to someone else' })
-    const held = await reserve(account, reportId, c.bytes.length); if (held instanceof Response) return held
+    const held = await reserve(account, reportId, inlineBytesOf([c])); if (held instanceof Response) return held
     const fail = async (res: Response) => { await usage.release(held.token); return res }
     try {
       const token = await repoToken(repo); if (token instanceof Response) return fail(token)
@@ -441,16 +510,48 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
         await branchHost({ repo, token, fetch: opts.fetch, refuseExisting: true }).put({ repo, issue: issue as number, reportId }, { name: c.name, type: c.type, bytes: c.bytes })
       } catch (e) { if (e instanceof GitHubError && e.status === 409) return fail(json(409, { error: `${folder}/${c.name} is already written` })); throw e }
       await usage.commit(held.token)
+      await discardStaged([c])
       return json(200, { url: attachmentUrl(repo, ATTACHMENTS_BRANCH, `${folder}/${c.name}`) })
     } catch (e) { await usage.release(held.token); return gone(e) }
   }
 
-  const run: Record<Action, (me: RelayIdentity, body: Record<string, unknown>, req: Request) => Promise<Response>> = { file, 'follow-up': followUp, status, attach }
+  /** A one-time signed PUT for one file of a report, for a file too large to send inside a request. Bound to this
+   *  identity and report like a filing, with the day's bytes held now (the later file or attach does not hold them again). */
+  async function uploadUrl(me: RelayIdentity, body: Record<string, unknown>): Promise<Response> {
+    const account = me.account
+    const { repo, reportId, name, type, bytes } = body
+    if (!isRepoName(repo)) return bad('repo is not owner/name')
+    if (typeof reportId !== 'string' || !isReportId(reportId)) return bad('reportId is not a report id')
+    if (typeof name !== 'string' || !FILE.test(name)) return bad('name is not a plain file name')
+    if (typeof type !== 'string' || !(ACCEPTED_TYPES as readonly string[]).includes(canonicalType(type))) return json(422, { error: 'that is not a picture, video or recording this module accepts' })
+    if (!Number.isInteger(bytes) || (bytes as number) < 1) return bad("bytes is the file's size")
+    const kind = kindOfType(canonicalType(type))
+    if ((bytes as number) > kindCap(kind)) return json(413, { error: `${name} is larger than the ${kindCap(kind)} bytes allowed` })
+    const refused = await allowed(account, repo); if (refused) return refused
+    if ((await usage.bind(repo, reportId, account)) === 'taken') return json(403, { error: 'this report belongs to someone else' })
+    const held = await reserve(account, reportId, bytes as number); if (held instanceof Response) return held
+    try {
+      const link = await opts.staging!.uploadUrl(stageKey(account, reportId, name), { type: canonicalType(type), bytes: bytes as number })
+      await usage.commit(held.token)
+      return json(200, { url: link.url, headers: link.headers ?? {}, staged: name })
+    } catch (e) { await usage.release(held.token); return gone(e) }
+  }
+
+  const run: Record<Action, (me: RelayIdentity, body: Record<string, unknown>, req: Request) => Promise<Response>> = { file, 'follow-up': followUp, status, attach, 'upload-url': uploadUrl }
+  /** What this relay can take, so a filer knows before it sends (no sign-in needed: it says nothing about anyone). */
+  const capabilities = () => json(200, {
+    actions: ACTIONS.filter((a) => (only ? a === only : a !== 'upload-url' || Boolean(opts.staging))),
+    staging: Boolean(opts.staging),
+    inlineBytes: limits.inlineBytes,
+    maxBytes: { image: limits.imageBytes, video: limits.videoBytes, voice: limits.voiceBytes },
+  })
 
   return async function relay(req: Request): Promise<Response> {
     // The action is the last segment of the path the handler is mounted on: .../file, .../follow-up, .../status, .../attach.
     const last = new URL(req.url).pathname.replace(/\/+$/, '').split('/').pop() ?? ''
-    const action = only ?? (ACTIONS as readonly string[]).find((a) => a === last) as Action | undefined
+    if (req.method === 'GET' && last === 'capabilities') return capabilities()
+    const found = (ACTIONS as readonly string[]).find((a) => a === last && (a !== 'upload-url' || opts.staging)) as Action | undefined
+    const action = only ?? found
     if (!action) return json(404, { error: `no such action; use one of ${ACTIONS.join(', ')}` })
     if (req.method !== 'POST') return json(405, { error: 'method not allowed' })
     const me = await opts.identity(req)

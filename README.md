@@ -234,7 +234,7 @@ geo: (req) => ({ city: req.headers.get("cf-ipcity") ?? "", region: req.headers.g
 
 The handlers keep a report's `context` (the contract checks its shape) and show it back to the member who sent it. **How to reach them comes from the host:** `contactOf(member)` answers what the app knows; the phone only says whether to share it, by sending `who.contact` while the person leaves it ticked, and what it sent there is ignored. Without `contactOf` no report carries a contact, and one of the wrong shape is dropped.
 
-**Filing from the app's server.** With `github: { repo, token, attachments?, people?, nameOf?, fetch? }` the handlers file each report as an issue the moment it is complete: at submit when it has no files, else when its last file is verified. One caller files it (the approval is taken under a one-time name and the report read again under it). The privacy catch runs first; a hit moves the report to `held` with the kinds found (`flags`, never the words, never in the member's view) for the owner to decide. The files are read back through the store's own read links and saved with `attachments` (a `branchHost` with a token that can push, usually); the issue is opened first, then the files saved, then their links edited in. GitHub failing leaves the report `received` and the approval free, so a maintainer's Mac can file it. `nameOf(member)` gives the name the issue says; the member key never appears in an issue. Send it on the app's own channel (push, email, an activity row) to that member only. A failure never fails the move. `createReportHandlers` throws at startup when `tellSubmitter` is missing; an app that genuinely has nobody to tell passes `tellSubmitter: { none: "only the maintainer uses this app" }`, and an empty reason throws too. The `tell` event for a status move now also carries `member` and `status`.
+**Filing from the app's server.** With `github: { repo, token, attachments?, people?, nameOf?, fetch? }` the handlers file each report as an issue the moment it is complete: at submit when it has no files, else when its last file is verified. One caller files it (the approval is taken under a one-time name and the report read again under it). The privacy catch runs first; a hit moves the report to `held` with the kinds found (`flags`, never the words, never in the member's view) for the owner to decide. The files are read back through the store's own read links and saved with `attachments` (a `branchHost` with a token that can push, usually); the issue is opened first, then the files saved, then their links edited in. GitHub failing leaves the report `received` and the approval free, so a maintainer's Mac can file it. `app.name` and `app.label` (the host's own) name the app and its `app:<label>`; `nameOf(member)` gives the name the issue says; the member key never appears in an issue. Send it on the app's own channel (push, email, an activity row) to that member only. A failure never fails the move. `createReportHandlers` throws at startup when `tellSubmitter` is missing; an app that genuinely has nobody to tell passes `tellSubmitter: { none: "only the maintainer uses this app" }`, and an empty reason throws too. The `tell` event for a status move now also carries `member` and `status`.
 
 | Route | Handler | Answers |
 | --- | --- | --- |
@@ -322,22 +322,43 @@ const relay = createSuggestionRelay({
   identity: async (req) => {
     // Whoever your app already knows: a session cookie, an API key in the authorization header. Null refuses.
     const user = await userFromRequest(req);
-    // The issue says it was filed by `name`, with `role`, from `appName`, and shares `contact` if the person ticked it.
+    // The issue says it was filed by `name`, with `role`, and shares `contact` if the person ticked it.
     // None of these is ever taken from the request.
-    return user ? { account: user.id, name: user.displayName, role: "member", appName: "Notes", contact: { email: user.email } } : null;
+    return user ? { account: user.id, name: user.displayName, role: "member", contact: { email: user.email } } : null;
   },
   repos: async (account) => ["acme/notes"],          // optional: where this identity may file; null means any repo the App is on
+  apps: { notes: { name: "Notes", label: "notes" } }, // the apps it files for: a request names one by id, and the issue's name and app:<label> come from here
+  staging,                                            // optional: a bucket for files past a request body limit (below)
   privacy: { people: await thirdParties() },          // optional: names the privacy catch looks for, and any secrets you know
   // limits: { perPersonPerDay: 10 },                 // may lower any limit, never raise one
   usage: myDatabaseUsage,                             // see below
 });
 
 export const POST = relay;
+export const GET = relay; // GET .../capabilities: what this relay can take, so a filer knows before it sends
 ```
 
 4. **Point the filers at it:** `relayFiler({ url: "https://your.app/api/suggestions", headers: { authorization: `Bearer ${apiKey}` } })` for filing, following up and reading state, or `relayHost({ url: "https://your.app/api/suggestions/attach", headers })` for attaching to an issue the filer opened themselves.
 
 **The usage store.** `usage` remembers the daily counts, which identity filed which issue, and each report's filing (so a repeat answers the same issue). The default, `memoryUsage()`, lives in memory and is right for **one server instance only**: on a host that runs several instances, or restarts, the caps, the idempotency and who-filed-what are lost or split between instances. Implement `RelayUsage` on your database for anything else. Each method must be ATOMIC, because the check and the change it guards are one step: `reserve(account, day, reportId, bytes, limits)` holds a day's report count and bytes for one request before any work starts (two requests at once can never both pass a cap of one), `commit` keeps it, `release` gives it back when the request fails; `bind(repo, reportId, account)` makes a report belong to the first identity that files or attaches for it; `begin`, `finish` and `abandon` make filing once per report; `filer` answers who filed an issue.
+
+### Files past a request body limit: staging
+
+Serverless hosts cap a request body (Vercel at about 4.5 MB), so a relay takes a file inside a request only up to `limits.inlineBytes` (3 MB by default). For anything larger, give it a `staging` adapter, a bucket it controls:
+
+```ts
+const staging = {
+  // A one-time signed PUT that can only create `key` once, with this type and at most these bytes.
+  // Google Cloud Storage: a V4 signed URL for PUT with x-goog-if-generation-match: 0 and
+  // x-goog-content-length-range: 0,<bytes> signed. S3: a presigned PUT with If-None-Match: * and the
+  // content type and length signed. Answer the headers the PUT must send.
+  uploadUrl: async (key, { type, bytes }) => ({ url, headers: { "content-type": type, "x-goog-if-generation-match": "0" } }),
+  read: async (key) => objectStreamOrNull(key),   // a ReadableStream, Uint8Array or ArrayBuffer, or null when nothing arrived
+  discard: async (key) => deleteObject(key),       // once the relay has written it to GitHub
+};
+```
+
+The filer asks `upload-url` `{ repo, reportId, name, type, bytes }` for each large file (bound to that identity and report like a filing, with the day's bytes held there and then), PUTs the bytes to the link it gets for `staging/<account>/<report id>/<name>`, and names the file in `file` or `attach` as `{ name, type, staged: name }`. The relay reads the staged object, sniffs its bytes, writes it to the branch through the git data API (a blob, a tree, a commit; the contents API is only used under 1 MB), then discards it. `relayFiler` does all of this itself for any file over 2 MB when the relay's `GET .../capabilities` says it stages. Without staging, a file over `inlineBytes` is refused in words before anything is filed (`relayFiler` refuses it before it sends), and a sheet whose `destination()` answers `maxInlineBytes` names such a file in its list before Send: "it does not reach the issue".
 
 ### Filing for people with no access
 
@@ -349,13 +370,13 @@ import { relayFiler, fileSuggestion } from "@supersuit/suggest-a-change/github";
 const relay = relayFiler({ url: "https://your.app/api/suggestions", headers: { authorization: `Bearer ${apiKey}` } });
 // With no token, or one that cannot see the repo (canFileDirectly is false), fileSuggestion files through the relay;
 // with one that can, it files directly as before. `via` says which.
-const got = await fileSuggestion({ repo: "acme/notes", token: maybeToken, relay }, { report, compose: { appName: "Notes", appVersion: "1.2.3", filerName: "Alex Kim", transcript }, files });
+const got = await fileSuggestion({ repo: "acme/notes", token: maybeToken, relay, app: "notes" }, { report, compose: { appName: "Notes", appVersion: "1.2.3", filerName: "Alex Kim", transcript }, files });
 // { number, url, via: "relay" | "direct", attached, pending }
 await relay.followUp({ repo: "acme/notes", number: got.number, reportId: report.id, words: "one more thing" });
 await relay.status([{ repo: "acme/notes", number: got.number }]); // [{ repo, number, status: "open" | "done" | "not-planned", reason? }]
 ```
 
-- **`file`** `{ repo, report, filerName, appName, appVersion, transcript?, files: [{ name, type, bytes (base64) }], redacted? }` answers `{ number, url }`. The relay checks the report against the contract and each file against what the report declares, runs the privacy catch itself, saves the files to `suggestion-attachments`, then opens the issue **as the App**, filed by the name `identity()` gives (never the account id, and never a name in the request), with the role, the `app:<slug>` label and the contact from `identity()` too; the contact only when the report carries `who.contact` (the person left it ticked). At most ten labels. A credential refuses with 422 naming the kind and the field, never the text, whatever `redacted` says. Any other hit refuses with 409 `{ held: true, hits: [{ kind, field }] }` until the filer sends again with `redacted: true`, saying they chose to file without the flagged part; the relay then redacts what it found itself, so raw text is never filed on the filer's word. The catch reads every string that would reach the issue (where, every diagnostic, the context, the trail, the names, the handle), after folding look-alike letters and removing invisible characters. A repeat of the same report answers the same issue; another identity using that report id is 409.
+- **`file`** `{ repo, app?, report, transcript?, files: [{ name, type, bytes (base64) } | { name, type, staged: name }], redacted? }` answers `{ number, url }`. The relay checks the report against the contract and each file against what the report declares, runs the privacy catch itself, saves the files to `suggestion-attachments`, then opens the issue **as the App**, filed by the name `identity()` gives (never the account id, and never a name in the request), with the role and the contact from `identity()` too and the app's name and `app:<label>` from the relay's `apps` table by the request's `app` id (an id not in the table is 400 "unknown app"; with no table no request names an app, and the issue says "in an app" with no app label); the contact only when the report carries `who.contact` (the person left it ticked). At most ten labels. A credential refuses with 422 naming the kind and the field, never the text, whatever `redacted` says. Any other hit refuses with 409 `{ held: true, hits: [{ kind, field }] }` until the filer sends again with `redacted: true`, saying they chose to file without the flagged part; the relay then redacts what it found itself, so raw text is never filed on the filer's word. The catch reads every string that would reach the issue (where, every diagnostic, the context, the trail, the names, the handle), after folding look-alike letters and removing invisible characters. A repeat of the same report answers the same issue; another identity using that report id is 409.
 - **`follow-up`** `{ repo, number, reportId, words, transcript?, files?, redacted? }` adds a comment, only for the identity that filed that report through this relay (anyone else, 403). The same privacy catch runs.
 - **`status`** `{ items: [{ repo, number }] }` answers `{ items: [{ repo, number, status, reason? }] }`, only for issues this identity filed (anything else, 403).
 - **`attach`** is for a filer who opened the issue themselves but cannot push. Reading the issue is the proof they could file there: it must exist, be an issue, be open or closed within a week, and END with the composer's own `## Filed by` line for that report ("Report <id>" anywhere else proves nothing). And a report belongs to the first identity that files or attaches for it: anyone else attaching to it is 403.

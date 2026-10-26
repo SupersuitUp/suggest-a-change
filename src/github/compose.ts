@@ -26,6 +26,8 @@ export interface Destination {
   attaches: boolean
   /** False when nobody transcribes voice notes (an app's own server): the list does not promise a transcript. */
   transcribes?: boolean
+  /** The largest file this destination takes; a larger one is named in the list as staying on the phone. */
+  maxInlineBytes?: number
 }
 /** What composeIssue and whatGoes read: a report in the contract's shape, plus two optional names for the list. */
 export interface Draft {
@@ -47,6 +49,8 @@ export interface Draft {
 }
 export interface ComposeOptions {
   appName?: string
+  /** The app label's host-given name (`app:<appLabel>`); null for none. Without it the label is made from appName. */
+  appLabel?: string | null
   appVersion?: string
   filerName?: string
   filerRole?: string
@@ -139,13 +143,20 @@ function basicGoes(draft: Draft, destination: Destination): GoesItem[] {
     ? `saved to the suggestion-attachments branch of ${destination.repo}`
     : `added once ${destination.repo} can take attachments`
   const voices = (draft.voice ?? []).length
+  // A file the destination cannot take is said so in advance, by name, before anything is sent.
+  const max = destination.maxInlineBytes
+  const mb = (n: number) => (n < 2 ** 20 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${Math.round((n / 2 ** 20) * 10) / 10} MB`)
+  const tooBig = (files: { file: string; bytes?: number }[]) => {
+    const over = max ? files.filter((m) => (m.bytes ?? 0) > max) : []
+    return over.length ? `; ${list(over.map((m) => m.file))} ${over.length === 1 ? 'is' : 'are'} over the ${mb(max!)} ${destination.repo} can take, so ${over.length === 1 ? 'it does' : 'they do'} not reach the issue` : ''
+  }
   const say: Record<string, () => string> = {
     words: () => 'your words',
     voice: () => destination.transcribes === false
       ? (voices === 1 ? 'your voice note' : `your ${voices} voice notes`)
       : (voices === 1 ? 'your voice note and its transcript' : `your ${voices} voice notes and their transcripts`),
-    images: () => `${plural(media.filter(isImage).length, 'screenshot')}, ${kept}`,
-    video: () => `${plural(media.filter(isVideo).length, 'video')}, ${kept}`,
+    images: () => `${plural(media.filter(isImage).length, 'screenshot')}, ${kept}${tooBig(media.filter(isImage))}`,
+    video: () => `${plural(media.filter(isVideo).length, 'video')}, ${kept}${tooBig(media.filter(isVideo))}`,
     where: () => `this screen (${[text(draft.where?.screen), text(draft.where?.route)].filter(Boolean).join(', ')})`,
     app: () => `${draft.appName || 'the app'} ${text(g.appVersion)}`,
     device: () => [text(g.device), text(g.screen)].filter(Boolean).join(', '),
@@ -295,7 +306,7 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
     }
     const role = opts.filerRole ?? text(report.who?.role) ?? 'member'
     // "Report <id>" is exact on purpose: the attachment relay reads the issue and requires this line before it saves a file.
-    out.push('## Filed by', `${inline(opts.filerName ?? report.filerName ?? 'A member')} (${inline(role || 'member')}), through Suggest a change in the ${inline(appName || 'app')}. Report ${inline(text(report.id))}.`)
+    out.push('## Filed by', `${inline(opts.filerName ?? report.filerName ?? 'A member')} (${inline(role || 'member')}), through Suggest a change in ${appName ? `the ${inline(appName)}` : 'an app'}. Report ${inline(text(report.id))}.`)
     return out.join('\n')
   }
 
@@ -324,6 +335,7 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
 
   // A title is plain text on GitHub; it still never pings anyone or links an issue.
   const title = clip(firstSentence(words) || firstSentence(transcript) || `Suggestion from ${appName || 'an app'}`, 70).replace(/@(?=[\w-])/g, '@‍').replace(/#(?=\d)/g, '#‍')
-  const labels = [LABEL[text(report.kind)] ?? 'feedback', ...(appName ? [`app:${slug(appName)}`] : [])]
+  const appLabel = opts.appLabel === null ? '' : opts.appLabel !== undefined ? slug(opts.appLabel) : appName ? slug(appName) : ''
+  const labels = [LABEL[text(report.kind)] ?? 'feedback', ...(appLabel ? [`app:${appLabel}`] : [])]
   return { title, body, labels, carries }
 }

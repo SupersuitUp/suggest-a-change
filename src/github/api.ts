@@ -119,7 +119,7 @@ export interface FileSuggestionInput {
 }
 export interface FiledSuggestion { number: number; url: string; attached: Record<string, string>; pending: string[]; /** How it was filed: with the filer's own token, or through a suggestion relay. */ via: 'direct' | 'relay' }
 /** Where to file: the repo, the filer's own token when they have one, and a relay for when that token cannot file there. */
-export type FilingConfig = Omit<GitHubConfig, 'token'> & { token?: string; relay?: RelayFiler }
+export type FilingConfig = Omit<GitHubConfig, 'token'> & { token?: string; relay?: RelayFiler; /** The app's id in the relay's own table, when filing through one. */ app?: string }
 
 const reportFiles = (r: Draft) => [...(r.media ?? []), ...(r.voice ?? [])].map((f) => f.file)
 
@@ -151,7 +151,7 @@ export async function fileSuggestion(cfg: FilingConfig, input: FileSuggestionInp
   if (!direct) {
     if (!cfg.relay) throw new Error('fileSuggestion needs a token that can file on the repo, or a relay')
     const made = await cfg.relay.file({
-      repo: cfg.repo, report: input.report as Record<string, unknown>, files: input.files,
+      repo: cfg.repo, ...(cfg.app ? { app: cfg.app } : {}), report: input.report as Record<string, unknown>, files: input.files,
       ...(input.compose?.filerName ? { filerName: input.compose.filerName } : {}),
       ...(input.compose?.appName ? { appName: input.compose.appName } : {}),
       ...(input.compose?.appVersion ? { appVersion: input.compose.appVersion } : {}),

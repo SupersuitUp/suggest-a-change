@@ -922,6 +922,14 @@ describe('filing straight from the app\'s server (the github option)', () => {
     expect(heard.map((e) => e.status)).toEqual(['open'])
   })
 
+  it('the app\'s name and label are the host\'s own, from app.name and app.label', async () => {
+    const g = gh()
+    const t = setup({ app: { name: 'Notes', label: 'notes-web' }, github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch } })
+    await t.send('amy', { words: 'Make it bigger.' })
+    expect(issues(g)[0].body.labels).toEqual(['enhancement', 'app:notes-web'])
+    expect(issues(g)[0].body.body).toContain('through Suggest a change in the Notes.')
+  })
+
   it('a report with a photo is filed when its last file is verified: the issue first, then the file, then the edit', async () => {
     const g = gh()
     const t = setup({ github: { repo: 'acme/app', token: 'tkn', fetch: g.fetch, attachments: g.attachments } })
