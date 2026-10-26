@@ -80,7 +80,7 @@ export function whatGoes(draft: Draft, destination: Destination): { key: Piece; 
   const g = draft.diagnostics ?? {}
   const kept = destination.attaches
     ? `saved to the suggestion-attachments branch of ${destination.repo}`
-    : `added once ${destination.repo}'s owner installs Supersuit Suggestions`
+    : `added once ${destination.repo} can take attachments`
   const voices = (draft.voice ?? []).length
   const say: Record<Piece, () => string> = {
     words: () => 'your words',

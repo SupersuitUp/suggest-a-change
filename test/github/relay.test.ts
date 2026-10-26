@@ -2,7 +2,7 @@
 // push, through the operator's own GitHub App. Every refusal the relay makes has a test here.
 import { createPublicKey, generateKeyPairSync, verify } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { createAttachRelay, relayHost, toBase64 } from '../../src/github/index.ts'
+import { canFileDirectly, createAttachRelay, createSuggestionRelay, fileSuggestion, relayFiler, relayHost, toBase64 } from '../../src/github/index.ts'
 
 const API = 'https://api.github.com'
 const ID = 'r-20261026170412-ab12cd'
@@ -14,7 +14,10 @@ type Call = { method: string; url: string; auth: string; body: any }
 function fakeGitHub(over: { publicKey?: string; files?: string[]; issueBody?: string; closedAt?: string | null; pr?: boolean } = {}) {
   const calls: Call[] = []
   let branch = false
+  let issues = 100
   const files = new Set(over.files ?? [])
+  const opened: { number: number; title: string; body: string; labels: string[] }[] = []
+  const comments: { number: number; body: string }[] = []
   const fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = String(input)
     const auth = new Headers(init.headers).get('authorization') ?? ''
@@ -31,6 +34,15 @@ function fakeGitHub(over: { publicKey?: string; files?: string[]; issueBody?: st
     if (url.endsWith('/installation')) return ok(404, { message: 'Not Found' })
     if (c.method === 'POST' && url === `${API}/app/installations/55/access_tokens`) return ok(201, { token: 'inst-token' })
     if (!auth.includes('inst-token')) return ok(401, { message: 'Bad credentials' })
+    if (c.method === 'POST' && url === `${API}/repos/acme/app/labels`) return ok(201, {})
+    if (c.method === 'POST' && url === `${API}/repos/acme/app/issues`) { const number = ++issues; opened.push({ number, ...c.body }); return ok(201, { number, html_url: `https://github.com/acme/app/issues/${number}` }) }
+    const comment = /\/repos\/acme\/app\/issues\/(\d+)\/comments$/.exec(url)
+    if (c.method === 'POST' && comment) { comments.push({ number: Number(comment[1]), body: c.body.body }); return ok(201, { id: 900 + comments.length, html_url: `https://github.com/acme/app/issues/${comment[1]}#issuecomment-${900 + comments.length}` }) }
+    if (c.method === 'POST' && url === `${API}/graphql`) {
+      const data: Record<string, unknown> = {}
+      for (const k of Object.keys(c.body.variables).filter((v) => v.startsWith('k'))) data[`i${k.slice(1)}`] = { issue: { state: c.body.variables[k] === 101 ? 'CLOSED' : 'OPEN', stateReason: c.body.variables[k] === 101 ? 'COMPLETED' : null, comments: { nodes: [] } } }
+      return ok(200, { data })
+    }
     if (url === `${API}/repos/acme/app/issues/7`) return ok(200, { number: 7, state: over.closedAt ? 'closed' : 'open', closed_at: over.closedAt ?? null, body: over.issueBody ?? `## What they said\nhi\n\n## Filed by\nA member (member), through Suggest a change in the app. Report ${ID}.`, ...(over.pr ? { pull_request: {} } : {}) })
     if (url.startsWith(`${API}/repos/acme/app/issues/`)) return ok(404, { message: 'Not Found' })
     if (url.startsWith(`${API}/repos/acme/app/contents/attachments/${ID}?`)) return files.size ? ok(200, [...files].map((name) => ({ name, type: 'file' }))) : ok(404, { message: 'Not Found' })
@@ -45,7 +57,7 @@ function fakeGitHub(over: { publicKey?: string; files?: string[]; issueBody?: st
     }
     return ok(404, { message: 'Not Found' })
   }) as typeof globalThis.fetch
-  return { fetch, calls }
+  return { fetch, calls, opened, comments }
 }
 
 const who = (req: Request) => Promise.resolve(req.headers.get('authorization') === 'Bearer member' ? { account: 'amy' } : req.headers.get('authorization') === 'Bearer ben' ? { account: 'ben' } : null)
@@ -159,7 +171,170 @@ describe('createAttachRelay: every refusal', () => {
     const dir = new URL('../../src/github/', import.meta.url)
     for (const f of readdirSync(dir)) {
       const src = readFileSync(new URL(f, dir), 'utf8')
-      expect(src, f).not.toMatch(/continentalworks|member key|memberKey/i)
+      expect(src, f).not.toMatch(/continentalworks|continental works|supersuit suggestions|member key|memberKey/i)
     }
+  })
+})
+
+// FILING FOR PEOPLE WITH NO ACCESS. The relay opens the issue itself, as the App, for someone who cannot even read the
+// repo: the privacy catch runs on the relay, the files go to the branch first, then the issue, and only the identity
+// that filed a report may add to it or read its state.
+const suggestions = (g: ReturnType<typeof fakeGitHub>, extra: Record<string, unknown> = {}) => createSuggestionRelay({ app: { id: 1234, privateKey: KEY.privateKey }, identity: who, fetch: g.fetch, now: () => Date.parse('2026-10-26T18:00:00Z'), ...extra })
+const act = (action: string, body: unknown, auth = 'Bearer member') => new Request(`https://relay.test/api/suggestions/${action}`, { method: 'POST', headers: { authorization: auth, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+const report = (over: Record<string, unknown> = {}) => ({
+  id: ID, kind: 'broken', words: 'The save button is gone.', who: { member: 'amy', role: 'member' },
+  voice: [], media: [{ file: 'image-1.png', type: 'image/png', bytes: PNG.length }],
+  where: { screen: 'Notes', route: '/notes' }, diagnostics: { appVersion: '1.2.3', at: '2026-10-26T17:04:12Z', device: 'iPhone', screen: '390x844' }, ...over,
+})
+const filing = (over: Record<string, unknown> = {}) => ({ repo: 'acme/app', report: report(), filerName: 'Pat Okafor', appName: 'Notes', appVersion: '1.2.3', files: [{ name: 'image-1.png', type: 'image/png', bytes: toBase64(PNG) }], ...over })
+
+describe('createSuggestionRelay: file', () => {
+  it('saves the files first, then opens the issue as the App, with the filer\'s name and never their account', async () => {
+    const g = fakeGitHub()
+    const res = await suggestions(g)(act('file', filing()))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ number: 101, url: 'https://github.com/acme/app/issues/101' })
+    const order = g.calls.filter((c) => c.method === 'PUT' || c.url === `${API}/repos/acme/app/issues`).map((c) => c.method)
+    expect(order).toEqual(['PUT', 'POST'])
+    const issue = g.opened[0]
+    expect(issue.labels).toEqual(['bug', 'app:notes'])
+    expect(issue.body).toContain('Pat Okafor (member), through Suggest a change in the Notes.')
+    expect(issue.body).toContain(`Report ${ID}.`)
+    expect(issue.body).toContain(`![image-1.png](https://github.com/acme/app/blob/suggestion-attachments/attachments/${ID}/image-1.png?raw=true)`)
+    expect(issue.body).not.toContain('amy')
+    expect(g.calls.find((c) => c.url === `${API}/repos/acme/app/issues`)!.auth).toBe('Bearer inst-token')
+  })
+
+  it('is idempotent by report id: a repeat answers the same issue; another identity using that id is refused', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g)
+    expect((await (await r(act('file', filing()))).json())).toMatchObject({ number: 101 })
+    const again = await r(act('file', filing()))
+    expect(again.status).toBe(200)
+    expect(await again.json()).toMatchObject({ number: 101, url: 'https://github.com/acme/app/issues/101' })
+    expect(g.opened).toHaveLength(1)
+    expect((await r(act('file', filing(), 'Bearer ben'))).status).toBe(409)
+  })
+
+  it('refuses someone it does not know, a repo the host does not allow for them, and a repo the App is not installed on', async () => {
+    const g = fakeGitHub()
+    expect((await suggestions(g)(act('file', filing(), 'Bearer stranger'))).status).toBe(401)
+    const only = suggestions(g, { repos: (account: string) => (account === 'amy' ? ['acme/app'] : []) })
+    expect(await status(await only(act('file', filing(), 'Bearer ben')))).toEqual([403, 'this account may not file on acme/app'])
+    expect(await status(await suggestions(g)(act('file', filing({ repo: 'other/x' }))))).toEqual([403, 'the app is not installed on other/x'])
+    expect(g.opened).toHaveLength(0)
+  })
+
+  it('a credential is refused by its kind and never echoed, even when the filer says they redacted', async () => {
+    const g = fakeGitHub()
+    const secret = 'AKIA' + 'IOSFODNN7EXAMPLE'
+    for (const redacted of [false, true]) {
+      const res = await suggestions(g)(act('file', filing({ report: report({ words: `my key ${secret}` }), redacted })))
+      expect(res.status).toBe(422)
+      const text = await res.text()
+      expect(text).toContain('credential')
+      expect(text).not.toContain(secret)
+    }
+    expect(g.opened).toHaveLength(0)
+  })
+
+  it('anything else the catch finds holds the report, naming the kind and field only, until the filer has redacted', async () => {
+    const g = fakeGitHub()
+    const people = [{ name: 'Dana Whitlock' }]
+    const r = suggestions(g, { privacy: { people } })
+    const held = await r(act('file', filing({ report: report({ words: 'ask Dana Whitlock or mail sam@example.com' }) })))
+    expect(held.status).toBe(409)
+    const body = await held.text()
+    expect(JSON.parse(body)).toEqual({ held: true, hits: [{ kind: 'email', field: 'words' }, { kind: 'person', field: 'words' }] })
+    expect(body).not.toMatch(/Dana|sam@/)
+    expect(g.opened).toHaveLength(0)
+    expect((await r(act('file', filing({ report: report({ words: 'ask [removed]' }), redacted: true })))).status).toBe(200)
+  })
+
+  it('refuses a file over the cap, bytes that are not what they say, a file the report did not declare, and an invalid report', async () => {
+    const g = fakeGitHub()
+    expect((await suggestions(g, { limits: { imageBytes: 8 } })(act('file', filing()))).status).toBe(413)
+    expect((await suggestions(g)(act('file', filing({ files: [{ name: 'image-1.png', type: 'image/png', bytes: toBase64(new TextEncoder().encode('MZ this is a program, not a picture')) }] })))).status).toBe(422)
+    expect((await suggestions(g)(act('file', filing({ files: [{ name: 'other.png', type: 'image/png', bytes: toBase64(PNG) }] })))).status).toBe(400)
+    expect((await suggestions(g)(act('file', filing({ report: report({ kind: 'rant' }) })))).status).toBe(400)
+    expect(g.opened).toHaveLength(0)
+  })
+
+  it('holds each identity to a daily cap of reports and of bytes', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g, { limits: { perPersonPerDay: 1 } })
+    expect((await r(act('file', filing()))).status).toBe(200)
+    expect((await r(act('file', filing({ report: report({ id: 'r-20261026170412-zzzzzz', media: [] }), files: [] })))).status).toBe(429)
+    const b = suggestions(fakeGitHub(), { limits: { bytesPerPersonPerDay: PNG.length } })
+    expect((await b(act('file', filing()))).status).toBe(200)
+    expect((await b(act('file', filing({ report: report({ id: 'r-20261026170412-zzzzzz' }) })))).status).toBe(429)
+  })
+
+  it('an action it does not have is not found', async () => {
+    expect((await suggestions(fakeGitHub())(act('delete', {}))).status).toBe(404)
+  })
+})
+
+describe('createSuggestionRelay: follow-up and status, for the one who filed it', () => {
+  it('adds a comment for the identity that filed it, and refuses anyone else', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g)
+    await r(act('file', filing()))
+    const add = (auth: string, over: Record<string, unknown> = {}) => r(act('follow-up', { repo: 'acme/app', number: 101, reportId: ID, words: 'one more thing', ...over }, auth))
+    const ok = await add('Bearer member')
+    expect(ok.status).toBe(200)
+    expect(g.comments).toEqual([{ number: 101, body: expect.stringContaining('one more thing') }])
+    expect(await status(await add('Bearer ben'))).toEqual([403, 'only the person who filed it may add to it'])
+    expect((await add('Bearer member', { number: 7 })).status).toBe(403) // not an issue this identity filed
+    expect((await add('Bearer member', { words: 'my key AKIA' + 'IOSFODNN7EXAMPLE' })).status).toBe(422)
+    expect(g.comments).toHaveLength(1)
+  })
+
+  it('answers the state of the issues this identity filed, and refuses someone else\'s', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g)
+    await r(act('file', filing()))
+    const mine = await r(act('status', { items: [{ repo: 'acme/app', number: 101 }] }))
+    expect(mine.status).toBe(200)
+    expect(await mine.json()).toEqual({ items: [{ repo: 'acme/app', number: 101, status: 'done' }] })
+    expect((await r(act('status', { items: [{ repo: 'acme/app', number: 101 }] }, 'Bearer ben'))).status).toBe(403)
+  })
+})
+
+describe('the filer\'s side: relayFiler, canFileDirectly and the choice fileSuggestion makes', () => {
+  const wire = (g: ReturnType<typeof fakeGitHub>, extra: Record<string, unknown> = {}) => {
+    const handler = suggestions(g, extra)
+    return (async (input: RequestInfo | URL, init?: RequestInit) => (String(input).startsWith('https://relay.test/') ? handler(new Request(String(input), init)) : g.fetch(input, init))) as typeof globalThis.fetch
+  }
+
+  it('relayFiler files, follows up and reads status through any relay URL with any headers', async () => {
+    const g = fakeGitHub()
+    const filer = relayFiler({ url: 'https://relay.test/api/suggestions', headers: { authorization: 'Bearer member' }, fetch: wire(g) })
+    const got = await filer.file(filing())
+    expect(got).toEqual({ number: 101, url: 'https://github.com/acme/app/issues/101' })
+    expect((await filer.followUp({ repo: 'acme/app', number: 101, reportId: ID, words: 'more' })).url).toMatch(/issuecomment/)
+    expect(await filer.status([{ repo: 'acme/app', number: 101 }])).toEqual([{ repo: 'acme/app', number: 101, status: 'done' }])
+    await expect(filer.file(filing({ report: report({ words: 'mail sam@example.com' }) }))).rejects.toMatchObject({ status: 409, body: { held: true } })
+  })
+
+  it('canFileDirectly is true only when the token can see the repo', async () => {
+    const f = (status: number) => (async () => new Response('{}', { status })) as unknown as typeof globalThis.fetch
+    expect(await canFileDirectly({ repo: 'acme/app', token: 't', fetch: f(200) })).toBe(true)
+    expect(await canFileDirectly({ repo: 'acme/app', token: 't', fetch: f(404) })).toBe(false)
+    expect(await canFileDirectly({ repo: 'acme/app', token: 't', fetch: f(403) })).toBe(false)
+  })
+
+  it('fileSuggestion goes through the relay when the filer\'s own token cannot file, with every file', async () => {
+    const g = fakeGitHub()
+    const relayed = wire(g)
+    const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => (String(input) === `${API}/repos/acme/app` ? new Response('{}', { status: 404 }) : relayed(input, init))) as typeof globalThis.fetch
+    const relay = relayFiler({ url: 'https://relay.test/api/suggestions', headers: { authorization: 'Bearer member' }, fetch })
+    const got = await fileSuggestion({ repo: 'acme/app', token: 'no-access', fetch, relay }, { report: report(), compose: { appName: 'Notes', appVersion: '1.2.3', filerName: 'Pat Okafor' }, files: [{ name: 'image-1.png', type: 'image/png', bytes: PNG }] })
+    expect(got).toMatchObject({ number: 101, via: 'relay', pending: [] })
+    expect(g.opened[0].body).toContain('![image-1.png](')
+    // with no token at all, it goes straight to the relay
+    const g2 = fakeGitHub()
+    const r2 = relayFiler({ url: 'https://relay.test/api/suggestions', headers: { authorization: 'Bearer member' }, fetch: wire(g2) })
+    expect(await fileSuggestion({ repo: 'acme/app', relay: r2 }, { report: report(), compose: { appName: 'Notes' }, files: [{ name: 'image-1.png', type: 'image/png', bytes: PNG }] })).toMatchObject({ via: 'relay' })
   })
 })

@@ -2,6 +2,7 @@
 // filer's (`gh auth token` on a Mac) or an app server's own; it is sent to api.github.com and nowhere else.
 import { composeIssue, type ComposeOptions, type Draft } from './compose.ts'
 import type { AttachmentHost, AttachmentFile } from './hosts.ts'
+import { canFileDirectly, type RelayFiler } from './filer.ts'
 
 export type Fetch = typeof globalThis.fetch
 export interface GitHubConfig { repo: string; token: string; fetch?: Fetch; /** Default https://api.github.com */ api?: string }
@@ -113,7 +114,9 @@ export interface FileSuggestionInput {
   files: AttachmentFile[]
   attachments?: AttachmentHost
 }
-export interface FiledSuggestion { number: number; url: string; attached: Record<string, string>; pending: string[] }
+export interface FiledSuggestion { number: number; url: string; attached: Record<string, string>; pending: string[]; /** How it was filed: with the filer's own token, or through a suggestion relay. */ via: 'direct' | 'relay' }
+/** Where to file: the repo, the filer's own token when they have one, and a relay for when that token cannot file there. */
+export type FilingConfig = Omit<GitHubConfig, 'token'> & { token?: string; relay?: RelayFiler }
 
 const reportFiles = (r: Draft) => [...(r.media ?? []), ...(r.voice ?? [])].map((f) => f.file)
 
@@ -136,13 +139,28 @@ export async function attachPending(cfg: GitHubConfig, input: FileSuggestionInpu
   return { attached, pending: [...wanted].filter((n) => !attached[n]) }
 }
 
-/** The whole filing, in the order that never shows an incomplete issue as complete: open the issue saying what is being
- *  added (opening it is the proof the filer can file there), save each file against that issue, then edit the links in. */
-export async function fileSuggestion(cfg: GitHubConfig, input: FileSuggestionInput): Promise<FiledSuggestion> {
+/** The whole filing. With a token that can see the repo it files directly, in the order that never shows an incomplete
+ *  issue as complete: open the issue saying what is being added (opening it is the proof the filer can file there),
+ *  save each file against that issue, then edit the links in. With no token, or one that cannot see the repo, and a
+ *  `relay`, the relay files it (the files, then the issue, as its App) for someone with no access at all. */
+export async function fileSuggestion(cfg: FilingConfig, input: FileSuggestionInput): Promise<FiledSuggestion> {
+  const direct = cfg.token ? (!cfg.relay || await canFileDirectly({ repo: cfg.repo, token: cfg.token, fetch: cfg.fetch, api: cfg.api })) : false
+  if (!direct) {
+    if (!cfg.relay) throw new Error('fileSuggestion needs a token that can file on the repo, or a relay')
+    const made = await cfg.relay.file({
+      repo: cfg.repo, report: input.report as Record<string, unknown>, files: input.files,
+      ...(input.compose?.filerName ? { filerName: input.compose.filerName } : {}),
+      ...(input.compose?.appName ? { appName: input.compose.appName } : {}),
+      ...(input.compose?.appVersion ? { appVersion: input.compose.appVersion } : {}),
+      ...(input.compose?.transcript ? { transcript: input.compose.transcript } : {}),
+    })
+    return { ...made, attached: {}, pending: [], via: 'relay' }
+  }
+  const own = { ...cfg, token: cfg.token as string }
   const hasFiles = reportFiles(input.report).length > 0
   const first = composeIssue(input.report, { ...input.compose, pending: hasFiles })
-  const issue = await fileIssue(cfg, first)
-  if (!hasFiles) return { ...issue, attached: {}, pending: [] }
-  const rest = await attachPending(cfg, { ...input, number: issue.number })
-  return { ...issue, ...rest }
+  const issue = await fileIssue(own, first)
+  if (!hasFiles) return { ...issue, attached: {}, pending: [], via: 'direct' }
+  const rest = await attachPending(own, { ...input, number: issue.number })
+  return { ...issue, ...rest, via: 'direct' }
 }

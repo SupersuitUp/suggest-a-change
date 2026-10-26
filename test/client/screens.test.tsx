@@ -201,7 +201,7 @@ describe('the sheet', () => {
     const danger = await waitFor(() => { const d = document.querySelector('[data-sac-goes] .sac-danger'); expect(d).toBeTruthy(); return d! })
     expect(danger.textContent).toBe('public: anyone on the internet can read this')
     fireEvent.change(images(), { target: { files: [png('a.png')] } })
-    await screen.findByText("1 screenshot, added once acme/open's owner installs Supersuit Suggestions")
+    await screen.findByText('1 screenshot, added once acme/open can take attachments')
   })
 
   it('a destination that answers nothing keeps today\'s line', async () => {

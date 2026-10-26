@@ -129,7 +129,7 @@ describe('whatGoes: the sheet and the issue cannot drift', () => {
 
   it('when the repo cannot take files yet, the list says they wait; a voice note with no transcription says so', () => {
     const items = whatGoes(full(), { ...dest, attaches: false, transcribes: false })
-    expect(items.find((i) => i.key === 'images')!.text).toBe("2 screenshots, added once acme/app's owner installs Supersuit Suggestions")
+    expect(items.find((i) => i.key === 'images')!.text).toBe('2 screenshots, added once acme/app can take attachments')
     expect(items.find((i) => i.key === 'voice')!.text).toBe('your voice note')
   })
 

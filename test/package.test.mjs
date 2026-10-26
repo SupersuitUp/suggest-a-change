@@ -127,7 +127,7 @@ test('"./github" ships types and ESM, imports nothing from react, the client or 
   }
   assert.ok(checked >= 5, `only ${checked} files in dist/github`);
   const mod = await import(join(ROOT, "dist", "github", "index.js"));
-  for (const name of ["privacyCatch", "redact", "mayFileAsIs", "composeIssue", "whatGoes", "fileIssue", "updateIssue", "addFollowUp", "issueStates", "issueStatus", "fileSuggestion", "attachPending", "branchHost", "relayHost", "createAttachRelay"]) assert.equal(typeof mod[name], "function", name);
+  for (const name of ["privacyCatch", "redact", "mayFileAsIs", "composeIssue", "whatGoes", "fileIssue", "updateIssue", "addFollowUp", "issueStates", "issueStatus", "fileSuggestion", "attachPending", "branchHost", "relayHost", "createAttachRelay", "createSuggestionRelay", "relayFiler", "canFileDirectly", "memoryUsage"]) assert.equal(typeof mod[name], "function", name);
 });
 
 test("the version is 0.2.0 and the changelog says why", () => {

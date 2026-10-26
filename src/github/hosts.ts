@@ -1,7 +1,7 @@
 // WHERE A SCREENSHOT OR RECORDING GOES (design: "Attachment parity for every filer"). GitHub has no API for attaching a
 // file to an issue, so each file is committed to the repo's own `suggestion-attachments` branch and linked: it shows to
 // exactly the people who can read the repo, and to nobody else. Two hosts ship: one for a filer that can push, one
-// through the Supersuit Suggestions GitHub App for everyone who cannot.
+// through the repo owner's own GitHub App, by way of a suggestion relay, for everyone who cannot.
 import { github, GitHubError, type Fetch } from './api.ts'
 
 /** Which issue a file belongs to. The relay reads that issue and requires it to carry `Report <reportId>`. */

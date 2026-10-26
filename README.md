@@ -272,34 +272,59 @@ issueStatus(states[0]); // "open" | "done" | "not-planned"; a closed issue's `re
 - `fileIssue`, `updateIssue`, `addFollowUp` are the REST calls; `fileIssue` creates missing labels first and skips one it may not create (a read-only filer; GitHub then keeps only the labels they may set).
 - `AttachmentHost` is `{ put({ repo, issue, reportId }, { name, type, bytes }) -> { url } }`. Every file goes to `attachments/<report id>/<file>` on the repo's own `suggestion-attachments` branch (made the first time, as an orphan sharing no history with the code), linked as `https://github.com/<repo>/blob/suggestion-attachments/<path>?raw=true`, which renders for exactly the people who can read the repo. `branchHost({ repo, token })` writes with a token that can push. `relayHost({ url, headers })` sends the file to an attachment relay (below) with whatever header your relay checks, for the many filers who can open an issue but cannot push.
 
-### Run your own attachment relay
+### Run your own suggestion relay
 
-A relay is one route on a server you run. It acts as a GitHub App you own, so a filer's screenshots reach their issue without them having push access, and without your repo trusting anyone else's server.
+A relay is one route on a server you run. It acts as a GitHub App you own, and your repo trusts nobody else's server. It does four things, chosen by the **last segment of the path** it is mounted on: `.../file`, `.../follow-up`, `.../status` and `.../attach`, each a POST with a JSON body. Any other last segment is 404.
 
-1. **Create the GitHub App** (Settings, Developer settings, GitHub Apps, New GitHub App). Repository permissions: **Contents: Read and write**, **Issues: Read-only**, nothing else. No webhook is needed. Generate a private key (GitHub gives you a PKCS#1 `.pem`; the relay takes that or PKCS#8) and note the App ID.
-2. **Install it** on each repo suggestions file to. Uninstalling it stops every write at once; the files already saved stay in the repo, because they are just a branch.
-3. **Mount the handler.** In a Next.js app (app router), `app/api/suggestions/attach/route.ts`:
+1. **Create the GitHub App** (Settings, Developer settings, GitHub Apps, New GitHub App). Repository permissions: **Contents: Read and write** and **Issues: Read and write**, nothing else. No webhook is needed. Generate a private key (GitHub gives you a PKCS#1 `.pem`; the relay takes that or PKCS#8) and note the App ID.
+2. **Install it** on each repo suggestions file to. Uninstalling it stops every write at once; the issues and files already made stay in the repo.
+3. **Mount the handler.** In a Next.js app (app router), one dynamic route serves all four actions, `app/api/suggestions/[action]/route.ts`:
 
 ```ts
-import { createAttachRelay } from "@supersuit/suggest-a-change/github";
+import { createSuggestionRelay } from "@supersuit/suggest-a-change/github";
 
-const relay = createAttachRelay({
+const relay = createSuggestionRelay({
   app: { id: process.env.SUGGESTIONS_APP_ID!, privateKey: process.env.SUGGESTIONS_APP_KEY! },
   identity: async (req) => {
     // Whoever your app already knows: a session cookie, an API key in the authorization header. Null refuses.
     const user = await userFromRequest(req);
     return user ? { account: user.id } : null;
   },
-  // limits: { perPersonPerDay: 10 },   // may lower any limit, never raise one
-  // usage: myDatabaseUsage,            // the daily count; the default is in memory, per server instance
+  repos: async (account) => ["acme/notes"],          // optional: where this identity may file; null means any repo the App is on
+  privacy: { people: await thirdParties() },          // optional: names the privacy catch looks for, and any secrets you know
+  // limits: { perPersonPerDay: 10 },                 // may lower any limit, never raise one
+  usage: myDatabaseUsage,                             // see below
 });
 
 export const POST = relay;
 ```
 
-4. **Point the filers at it:** `relayHost({ url: "https://your.app/api/suggestions/attach", headers: { authorization: `Bearer ${apiKey}` } })`.
+4. **Point the filers at it:** `relayFiler({ url: "https://your.app/api/suggestions", headers: { authorization: `Bearer ${apiKey}` } })` for filing, following up and reading state, or `relayHost({ url: "https://your.app/api/suggestions/attach", headers })` for attaching to an issue the filer opened themselves.
 
-On every call the relay refuses (each refusal has a test): anything but POST (405); a caller `identity` does not know (401); a malformed repo, issue number, report id, file name or base64 body (400); bytes that are not an accepted picture, video or recording, or not the type declared, judged by the bytes (422); a file over the size caps (413); a repo the App is not installed on (403, "the app is not installed on <repo>"); an issue that does not exist (404), is a pull request, does not carry `Report <report id>`, or closed more than a week ago (403); a path already written, which is never overwritten (409); a report already holding all the pictures, videos or recordings it may (422); more different reports in a day than the cap for that account (429). It writes only `attachments/<report id>/<file>` on `suggestion-attachments`, with an installation token scoped to that one repo, and answers `{ url }`. Reading the issue is what proves the caller could file there, so nobody can store a file in a repo they could not open an issue on. A host that limits request bodies (several serverless platforms stop at a few MB) also limits the file size the relay can take; a video near the 100 MB ceiling needs a route that accepts a body that large.
+**The usage store.** `usage` remembers the daily counts, which identity filed which issue, and each report's filing (so a repeat answers the same issue). The default, `memoryUsage()`, lives in memory and is right for **one server instance only**: on a host that runs several instances, or restarts, the caps, the idempotency and who-filed-what are lost or split between instances. Implement `RelayUsage` on your database for anything else; each method must be atomic.
+
+### Filing for people with no access
+
+Someone who cannot read the repo can still suggest a change, with every screenshot and recording. Their machine sends the whole report to the relay's `file` action, and the relay files it:
+
+```ts
+import { relayFiler, fileSuggestion } from "@supersuit/suggest-a-change/github";
+
+const relay = relayFiler({ url: "https://your.app/api/suggestions", headers: { authorization: `Bearer ${apiKey}` } });
+// With no token, or one that cannot see the repo (canFileDirectly is false), fileSuggestion files through the relay;
+// with one that can, it files directly as before. `via` says which.
+const got = await fileSuggestion({ repo: "acme/notes", token: maybeToken, relay }, { report, compose: { appName: "Notes", appVersion: "1.2.3", filerName: "Alex Kim", transcript }, files });
+// { number, url, via: "relay" | "direct", attached, pending }
+await relay.followUp({ repo: "acme/notes", number: got.number, reportId: report.id, words: "one more thing" });
+await relay.status([{ repo: "acme/notes", number: got.number }]); // [{ repo, number, status: "open" | "done" | "not-planned", reason? }]
+```
+
+- **`file`** `{ repo, report, filerName, appName, appVersion, transcript?, files: [{ name, type, bytes (base64) }], redacted? }` answers `{ number, url }`. The relay checks the report against the contract and each file against what the report declares, runs the privacy catch itself, saves the files to `suggestion-attachments`, then opens the issue **as the App**, filed by `filerName` (never the account id), creating any missing labels. A credential refuses with 422 naming the kind and the field, never the text, whatever `redacted` says. Any other hit refuses with 409 `{ held: true, hits: [{ kind, field }] }` until the filer replaces the flagged part themselves (`redact()`) and sends again with `redacted: true`. A repeat of the same report answers the same issue; another identity using that report id is 409.
+- **`follow-up`** `{ repo, number, reportId, words, transcript?, files?, redacted? }` adds a comment, only for the identity that filed that report through this relay (anyone else, 403). The same privacy catch runs.
+- **`status`** `{ items: [{ repo, number }] }` answers `{ items: [{ repo, number, status, reason? }] }`, only for issues this identity filed (anything else, 403).
+- **`attach`** is for a filer who opened the issue themselves but cannot push. Reading the issue is the proof they could file there: it must exist, be an issue, be open or closed within a week, and carry `Report <report id>`.
+
+On every call the relay refuses, and each refusal has a test: anything but POST (405); an action it does not have (404); a caller `identity` does not know (401); a repo `repos` does not allow for that identity (403, "this account may not file on <repo>"); a malformed repo, number, report id, file name, base64 body or report, or a file the report does not declare (400); bytes that are not an accepted picture, video or recording, or not the type declared, judged by the bytes (422); a file over the size caps (413); a repo the App is not installed on (403, "the app is not installed on <repo>"); a credential (422) or another privacy hit (409, held); a follow-up or status request for an issue another identity filed (403); for `attach`, an issue that does not exist (404), is a pull request, does not carry the report, or closed more than a week ago (403), a path already written (409), or a report holding all the files it may (422); and more reports, or more bytes, in a day than one identity's cap (429). It writes only `attachments/<report id>/<file>` on `suggestion-attachments`, with an installation token scoped to the one repo. A host that limits request bodies (several serverless platforms stop at a few MB) also limits what the relay can take: a report with a long video needs a route that accepts a body that large.
 
 ## What is here, and what is coming
 
@@ -311,7 +336,7 @@ On every call the relay refuses (each refusal has a test): anything but POST (40
 | `"./styles.css"` optional defaults | here |
 | `"./check"` and the `suggest-a-change-check` and `suggest-a-change init` commands | here |
 | `"./server"` the receiving side: handlers, store conformance suite, byte sniffing | here |
-| `"./github"` suggestions as issues: privacy catch, issue body, filing, attachment hosts, your own relay | here |
+| `"./github"` suggestions as issues: privacy catch, issue body, filing, attachment hosts, your own suggestion relay | here |
 
 Each export is added to `package.json` in the same change as its code, so nothing here points at a file that does not exist.
 
