@@ -7,6 +7,7 @@ import type { Store } from './idb.ts'
 import type { StoreAdapter } from './reports.ts'
 import type { startTake } from './recorder.ts'
 import type { Words } from './words.ts'
+import type { Destination } from '../github/compose.ts'
 
 export type Role = 'operator' | 'member' | 'maintainer'
 export type Kind = 'change' | 'broken' | 'feedback'
@@ -75,4 +76,11 @@ export interface Adapters {
   startTake?: typeof startTake
   /** False when the receiving side cannot take a voice note added to a report afterwards (the detail view then says so). */
   appendVoice?: boolean
+  /** Where a sent report files as a GitHub issue. With it, the sheet lists exactly what goes and where above Send
+   *  (the same list the issue is written from); null or absent keeps the one-line note. */
+  destination?(): Promise<SheetDestination | null>
 }
+
+/** The issue's destination as the sheet shows it: the repo, whether it is public, the GitHub login it files from,
+ *  whether files can reach it yet, and (optionally) the sender's name as the issue will say it. */
+export interface SheetDestination extends Destination { name?: string }

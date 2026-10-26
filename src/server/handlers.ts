@@ -7,14 +7,18 @@
 // a report is decided here from the signed-in member and the explicit maintainers list, never from the
 // request. Nothing is uploaded through this server: `uploadUrl` issues a direct-to-storage link with the
 // size and type fixed, and `finalize` checks what actually landed.
-import { END, FLOW, STATUSES, TOLD, isAcceptedMedia, isReportId, mayMove, meaningFor, validateReport, wordsFor } from '../contract.mjs'
+import { END, FLOW, LEGACY, STATUSES, TOLD, currentStatus, isAcceptedMedia, isReportId, mayMove, meaningFor, validIssue, validateReport, wordsFor } from '../contract.mjs'
+import { fileSuggestion, privacyCatch, type AttachmentHost, type Fetch, type Person } from '../github/index.ts'
 import { effectiveLimits, type Limits } from './rate.ts'
 import { ACCEPTED_TYPES, canonicalType, sameType } from './sniff.ts'
 import { json, notFound, signIn, cappedText } from './http.ts'
 
-/** `by` is the actor (contract FLOW). `holder` is the maintainer whose Mac started or ended the work, written on a being-made
- *  or end entry: the approval on such a report never lapses, and it is how the list and the claim name who has it. */
-export interface TimelineEntry { status: string; by: string; at: string; step?: string; note?: string; holder?: string }
+export interface IssueRef { repo: string; number: number; url: string }
+/** `by` is the actor (contract FLOW). `holder` is the maintainer whose Mac filed or closed the issue, written on that
+ *  entry: the approval on such a report never lapses, and it is how the list and the claim name who has it. `issue` is
+ *  written on the move to open. `flags` are the kinds the privacy catch found (never the words), on a held entry; the
+ *  member's own view never shows them. */
+export interface TimelineEntry { status: string; by: string; at: string; step?: string; note?: string; holder?: string; issue?: IssueRef; flags?: string[] }
 export interface FileState { pending?: { type: string; bytes: number; issuedAt?: number }; type?: string; bytes?: number; sha256?: string; at?: string }
 export interface FollowUp { followId: string; words: string; at: string; by: string; voice: { file: string; ms: number }[] }
 export interface StoredReport {
@@ -88,7 +92,22 @@ export interface TellEvent { type: 'submitted' | 'followed-up' | 'status' | 'set
 export { TOLD }
 /** What `tellSubmitter` is handed. `words` and `meaning` are the module's own words for the status (`wordsFor`/`meaningFor`),
  *  never the report's text, so a lock screen never shows what someone wrote. `note` is the one-line reason, on `not-now` only. */
-export interface SubmitterNews { member: string; reportId: string; status: string; words: string; meaning: string; ended: boolean; note?: string }
+export interface SubmitterNews { member: string; reportId: string; status: string; words: string; meaning: string; ended: boolean; note?: string; /** The issue it became, so a push can link it. */ issue?: IssueRef }
+/** Filing straight from the app's server: each complete report becomes an issue, with no Mac in the loop. */
+export interface GitHubFiling {
+  /** owner/name of the repo the issues go to. */
+  repo: string
+  /** A token that can open issues there (and push, when `attachments` is a branchHost with it). */
+  token: string
+  /** Where screenshots and recordings go. Without one they are listed as still being added. */
+  attachments?: AttachmentHost
+  /** Third parties the privacy catch looks for (anyone but the sender and the owner). */
+  people?: Person[]
+  /** The sender's name as the issue says it; without it the issue says "A member". Never their key or email. */
+  nameOf?(member: string): string | undefined | Promise<string | undefined>
+  /** For GitHub calls and for reading the stored files back through their read links. */
+  fetch?: Fetch
+}
 export interface ReportHandlerOptions {
   store: HostedStore
   /** The signed-in member, or null. Anything but `account` is ignored: the role is decided here. */
@@ -109,6 +128,9 @@ export interface ReportHandlerOptions {
    *  and never to a maintainer about their own report being made. A failure never fails the move. An app that genuinely
    *  has nobody to tell passes `{ none: "<reason>" }`; leaving it out throws at startup. */
   tellSubmitter: ((news: SubmitterNews) => void | Promise<void>) | { none: string }
+  /** When given, a report is filed as an issue the moment it is complete: at submit when it has no files, else when its
+   *  last file is verified. A privacy hit holds it for the owner instead; GitHub failing leaves it received for a Mac. */
+  github?: GitHubFiling
   now?: () => number
 }
 
@@ -128,7 +150,9 @@ export const VOICE_BYTES_PER_SECOND = 200_000
 export const INCOMPLETE_GRACE_MS = 60 * 60_000
 const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 const FOLLOW = /^[A-Za-z0-9_-]{1,64}$/
-const FORBIDDEN = ['timeline', 'status', 'plan', 'decision', 'files', 'receivedAt', 'followUps', 'claimedBy', 'settledBy']
+const FORBIDDEN = ['timeline', 'status', 'plan', 'decision', 'issue', 'files', 'receivedAt', 'followUps', 'claimedBy', 'settledBy']
+/** Every stored status that means closed, old ones included: what a store's atomic follow-up write refuses on. */
+const CLOSED_STORED = [...END, ...Object.keys(LEGACY).filter((k) => END.includes(LEGACY[k as keyof typeof LEGACY]))]
 
 const bad = (error: string) => json(400, { error })
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -146,10 +170,17 @@ async function readBody(req: Request, cap = BODY_CAP, optional = false): Promise
 }
 
 const iso = (ms: number) => new Date(ms).toISOString()
+/** The status as stored (a store's precondition compares this one). */
 const lastStatus = (r: StoredReport) => r.timeline[r.timeline.length - 1]?.status ?? 'received'
-/** Past asking the owner: the work has started or ended, and whoever holds the approval keeps it. */
-const PAST_ASKING = ['being-made', ...END]
-/** The maintainer named on the latest move that started or ended the work; none on a report from before 0.1.4. */
+/** The status it means now: an old (0.1.x) status folded into the new one. Every decision below reads this. */
+const cur = (r: StoredReport) => currentStatus(lastStatus(r))
+/** Filed or closed: whoever holds the approval keeps it. */
+const FILED = [...TOLD]
+const issueOf = (r: StoredReport): IssueRef | undefined => {
+  for (let i = r.timeline.length - 1; i >= 0; i--) if (r.timeline[i].issue) return r.timeline[i].issue
+  return undefined
+}
+/** The maintainer named on the latest move that filed or closed it (or an old one that started or ended the work). */
 const holderOf = (r: StoredReport): string | undefined => {
   for (let i = r.timeline.length - 1; i >= 0; i--) if (r.timeline[i].holder) return r.timeline[i].holder
   return undefined
@@ -207,6 +238,7 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     ...(r.answers !== undefined ? { answers: r.answers } : {}),
     ...(r.app !== undefined ? { app: r.app } : {}),
     where: r.where, diagnostics: r.diagnostics, media: r.media ?? [], voice: r.voice ?? [],
+    ...(issueOf(r) ? { issue: issueOf(r) } : {}),
     timeline: (r.timeline ?? []).map((t) => ({ status: t.status, by: t.by, at: t.at, ...(t.step ? { step: t.step } : {}), ...(t.note ? { note: t.note } : {}) })),
     followUps: (r.followUps ?? []).map((f) => ({ followId: f.followId, words: f.words, at: f.at, by: f.by, voice: f.voice })),
   })
@@ -275,7 +307,7 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const id = report.id as string
     const existing = await store.get(id)
     // The same member sending the same id again is a repeat, even at the day's limit: it was stored.
-    if (existing?.who?.member === member) return json(200, { id, status: lastStatus(existing) })
+    if (existing?.who?.member === member) return json(200, { id, status: cur(existing) })
     if ((await store.countToday(member)) >= limits.perPersonPerDay) return json(429, { error: 'you have reached today\'s limit of suggestions' })
     const at = iso(now())
     const made = await store.put(
@@ -287,10 +319,13 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
       // Lost a race with the same member (a repeat), or the id belongs to someone else. Someone else's id is REFUSED
       // (not re-issued, not dropped silently): nothing is created or overwritten, and the phone is told to start again.
       const now2 = await store.get(id)
-      return now2?.who?.member === member ? json(200, { id, status: lastStatus(now2) }) : json(409, { error: 'that suggestion cannot use this id; start it again' })
+      return now2?.who?.member === member ? json(200, { id, status: cur(now2) }) : json(409, { error: 'that suggestion cannot use this id; start it again' })
     }
     await tell({ type: 'submitted', reportId: id, member })
-    return json(200, { id, status: 'received' })
+    // Nothing to wait for: with the github option it becomes an issue now.
+    if (opts.github && !fileNames(report as unknown as StoredReport).length) await fileNow(id)
+    const after = await store.get(id)
+    return json(200, { id, status: after ? cur(after) : 'received' })
   }
 
   async function mine(req: Request): Promise<Response> {
@@ -300,8 +335,8 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const rows = (await store.listFor(member)).filter((r) => r.who?.member === member)
     rows.sort((a, b) => (a.receivedAt < b.receivedAt ? 1 : -1))
     // A declined report carries its one-line reason, which the member's own view already shows; no other note is listed.
-    const reason = (r: StoredReport) => { const t = r.timeline[r.timeline.length - 1]; return t?.status === 'not-now' && t.note ? { note: t.note } : {} }
-    return json(200, rows.map((r) => ({ id: r.id, status: lastStatus(r), kind: r.kind, at: Date.parse(r.receivedAt), ...reason(r) })))
+    const reason = (r: StoredReport) => { const t = r.timeline[r.timeline.length - 1]; return cur(r) === 'not-planned' && t?.note ? { note: t.note } : {} }
+    return json(200, rows.map((r) => ({ id: r.id, status: cur(r), kind: r.kind, at: Date.parse(r.receivedAt), ...reason(r), ...(issueOf(r) ? { issue: issueOf(r) } : {}) })))
   }
 
   async function one(req: Request, id: string): Promise<Response> {
@@ -324,11 +359,11 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     // a maintainer speaks to the member through status notes.
     const r = await readable(id, member, { ownerOnly: true }); if (!r) return notFound()
     if ((r.followUps ?? []).some((f) => f.followId === followId)) return json(200, { id, followId }) // a repeat
-    if (END.includes(lastStatus(r))) return json(409, { error: 'this suggestion is closed; start a new one' })
+    if (END.includes(cur(r))) return json(409, { error: 'this suggestion is closed; start a new one' })
     const v = voiceEntries(raw.voice, limits.followUpVoiceNotes, new Set(fileNames(r))); if ('error' in v) return bad(v.error)
     // The caps are enforced again inside the store's atomic write: the read above is only a fast path.
     const added = await store.addFollowUp(id, { followId, words, at: iso(now()), by: roleOf(member), voice: v.voice.map(({ file, ms }) => ({ file, ms })) },
-      { max: limits.followUps, maxVoice: limits.followUps * limits.followUpVoiceNotes, voiceTotalMs: limits.voiceTotalMs, closed: [...END] })
+      { max: limits.followUps, maxVoice: limits.followUps * limits.followUpVoiceNotes, voiceTotalMs: limits.voiceTotalMs, closed: CLOSED_STORED })
     if (added === 'missing') return notFound()
     if (added === 'closed') return json(409, { error: 'this suggestion is closed; start a new one' })
     if (added === 'full') return bad('this report has all the follow-ups or voice it can take')
@@ -388,6 +423,7 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const verified: FileState = { type: real.type as string, bytes: real.bytes, sha256: real.sha256, at: iso(now()) }
     await store.setFile(id, file, verified)
     await store.reopen(id) // verified after a Mac collected the report: it is offered again with this file
+    if (opts.github) await fileNow(id) // its last file: with the github option it becomes an issue now
     return json(200, { file, type: verified.type, bytes: verified.bytes, sha256: verified.sha256 })
   }
 
@@ -406,7 +442,7 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
       let settled = 0
       for (const r of batch) {
         if (out.length >= limits.agentPage) break
-        if (END.includes(lastStatus(r)) && holderOf(r) !== by) {
+        if (END.includes(cur(r)) && holderOf(r) !== by) {
           await store.claim(r.id, by, LEASE_MS)
           if ((await store.settle(r.id, by, reportRevision(r))) === 'settled') settled++
           continue
@@ -419,9 +455,9 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
       if (!settled || batch.length < limits.agentPage * 3) break
     }
     // `revision` is what this Mac is being shown; it goes back with the settle so a report that grew in between is not settled.
-    // `heldBy` names another maintainer whose Mac is making the report, so this Mac files it as taken.
+    // `heldBy` names another maintainer whose Mac filed the issue, so this Mac leaves it to that one.
     return json(200, { reports: out.map((r) => {
-      const holder = lastStatus(r) === 'being-made' ? holderOf(r) : undefined
+      const holder = cur(r) === 'open' ? holderOf(r) : undefined
       return { ...r, revision: reportRevision(r), ...(holder && holder !== by ? { heldBy: holder } : {}) }
     }) })
   }
@@ -448,22 +484,22 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const settled = await store.settle(id, by, revision)
     if (settled === 'unclaimed') return json(409, { error: 'this report was not claimed by this Mac' })
     if (settled === 'stale') return json(409, { error: 'this report changed after it was listed; list again', stale: true })
-    const moves = mayMove(lastStatus(r), 'with-freeda')
-    if (moves) await store.setStatus(id, { status: 'with-freeda', by: FLOW['with-freeda'].actor, at: iso(now()) }, lastStatus(r))
+    // Collecting is not filing: the report stays received until the Mac files the issue or holds it.
     await store.moveCollected(id)
     await tell({ type: 'settled', reportId: id })
-    return json(200, { id, status: moves ? 'with-freeda' : lastStatus(r) })
+    return json(200, { id, status: cur(r) })
   }
 
-  /** Takes (or renews) the approval for `by`. A closed report is never taken, by anyone: it answers who closed it. A
-   *  report being made stays with the Mac that started it. Taken for a move that starts or ends the work, or on a
-   *  report already being made, the lease is HELD_MS, so it does not lapse; before that, a week. Writes nothing when refused. */
+  /** Takes (or renews) the approval for `by`. A closed report is never taken, except to reopen it by the Mac that
+   *  filed it (or by anyone when nobody is named); otherwise it answers who closed it. An open issue stays with the Mac
+   *  that filed it. Taken for filing or closing, or on an open issue, the lease is HELD_MS, so it does not lapse; before
+   *  that, a week. Writes nothing when refused. */
   async function takeApproval(r: StoredReport, by: string, to?: string): Promise<{ ok: true } | { closed: string; claimedBy?: string } | { claimedBy: string }> {
-    const from = lastStatus(r)
+    const from = cur(r)
     const holder = holderOf(r)
-    if (END.includes(from)) return { closed: from, ...(holder ? { claimedBy: holder } : {}) }
-    if (from === 'being-made' && holder && holder !== by) return { claimedBy: holder }
-    const lasting = from === 'being-made' || (to !== undefined && PAST_ASKING.includes(to))
+    if (END.includes(from) && !(to === 'open' && (!holder || holder === by))) return { closed: from, ...(holder ? { claimedBy: holder } : {}) }
+    if (from === 'open' && holder && holder !== by) return { claimedBy: holder }
+    const lasting = FILED.includes(from) || (to !== undefined && FILED.includes(to))
     return store.claimApproval(r.id, by, lasting ? HELD_MS : APPROVAL_LEASE_MS)
   }
 
@@ -495,34 +531,94 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const step = got.body.step === undefined ? undefined : str(got.body.step, 200)
     const note = got.body.note === undefined ? undefined : str(got.body.note, 200)
     if (step === null || note === null) return bad('step and note are short text')
+    const rawIssue = got.body.issue
+    if (rawIssue !== undefined && validIssue(rawIssue).length) return bad(`the issue is not valid: ${validIssue(rawIssue).join('; ')}`)
+    const given = rawIssue as IssueRef | undefined
     const r = isReportId(id) ? await store.get(id) : null
     if (!r) return notFound()
-    const from = lastStatus(r)
+    const from = cur(r)
     if (from === status) return json(200, { id, status }) // a repeat
     if (!mayMove(from, status)) return json(409, { error: `a report cannot go from ${from} to ${status}` })
-    // Once the owner is being asked, the Mac that holds the approval decides what happens next. Leaving
-    // waiting-on-owner, starting the work and ending it need the claim (taken here if nobody holds it).
-    const needsApproval = from === 'waiting-on-owner' || PAST_ASKING.includes(status)
+    const issue = given ? { repo: given.repo, number: given.number, url: given.url } : undefined
+    if (status === 'open' && !issue && !issueOf(r)) return bad('a move to open names the issue it became: { repo, number, url }')
+    // Once it is held for the owner, the Mac that holds the approval decides what happens next. Leaving held,
+    // filing and closing need the claim (taken here if nobody holds it).
+    const needsApproval = from === 'held' || FILED.includes(status)
     if (needsApproval) {
       const c = await takeApproval(r, by, status)
       if (!('ok' in c)) return json(409, { error: 'another Mac holds the approval for this report', ...(c.claimedBy ? { claimedBy: c.claimedBy } : {}) })
     }
-    // The maintainer is named on a move that starts or ends the work, so the hold is known from the report itself.
-    const holder = PAST_ASKING.includes(status) ? { holder: by } : {}
-    const moved = await store.setStatus(id, { status, by: FLOW[status as keyof typeof FLOW].actor, at: iso(now()), ...(step ? { step } : {}), ...(note ? { note } : {}), ...holder }, from)
+    // The maintainer is named on a move that files or closes it, so the hold is known from the report itself.
+    const holder = FILED.includes(status) ? { holder: by } : {}
+    // Declined before it was ever filed is the owner's decision, not GitHub's.
+    const actor = status === 'not-planned' && from !== 'open' ? 'owner' : FLOW[status as keyof typeof FLOW].actor
+    const moved = await store.setStatus(id, { status, by: actor, at: iso(now()), ...(step ? { step } : {}), ...(note ? { note } : {}), ...holder, ...(issue ? { issue } : {}) }, lastStatus(r))
     if (!moved) {
       // The lasting lease was taken for a move that did not happen: bring it back to a week.
-      if (needsApproval && from !== 'being-made' && PAST_ASKING.includes(status)) await store.claimApproval(id, by, APPROVAL_LEASE_MS)
+      if (needsApproval && !FILED.includes(from) && FILED.includes(status)) await store.claimApproval(id, by, APPROVAL_LEASE_MS)
       return json(409, { error: 'the report changed while this was sent; read it again' })
     }
-    await tell({ type: 'status', reportId: id, member: r.who?.member, status })
-    const member = r.who?.member
-    // A maintainer is not told that the work they just started on their own report has started; an end is still news.
-    const ownStart = status === 'being-made' && member === by
-    if (member && TOLD.includes(status) && !ownStart) {
-      await news({ member, reportId: id, status, words: wordsFor(status, { owner }), meaning: meaningFor(status, { owner }), ended: END.includes(status), ...(status === 'not-now' && note ? { note } : {}) })
-    }
+    // A maintainer is not told that the issue they just filed from their own report exists; a close is still news.
+    await moved_(r, status, { by, note, issue: issue ?? issueOf(r) })
     return json(200, { id, status })
+  }
+
+  /** After a move landed: the ids-only tell, and the person who suggested it on a telling move. */
+  async function moved_(r: StoredReport, status: string, { by, note, issue }: { by?: string; note?: string; issue?: IssueRef }) {
+    const member = r.who?.member
+    await tell({ type: 'status', reportId: r.id, member, status })
+    const ownFiling = status === 'open' && member === by
+    if (member && TOLD.includes(status) && !ownFiling) {
+      await news({ member, reportId: r.id, status, words: wordsFor(status, { owner }), meaning: meaningFor(status, { owner, issue }), ended: END.includes(status), ...(status === 'not-planned' && note ? { note } : {}), ...(issue ? { issue } : {}) })
+    }
+  }
+
+  /** FILING FROM THE APP'S SERVER (the github option). Runs once a report is complete. One caller files it: the approval
+   *  is taken atomically under a one-time name, the report is read again under it, and a second caller finds it taken
+   *  or already filed. A privacy hit holds it for the owner (the kinds on the entry, never the words); GitHub failing
+   *  leaves it received and the approval free, so a maintainer's Mac can file it. Never fails the person's request. */
+  async function fileNow(id: string): Promise<void> {
+    const g = opts.github
+    if (!g) return
+    const first = await store.get(id)
+    if (!first || cur(first) !== 'received' || !complete(first)) return
+    const lock = `@app:${Math.random().toString(36).slice(2, 10)}`
+    const got = await store.claimApproval(id, lock, HELD_MS)
+    if (!('ok' in got)) return
+    try {
+      const r = await store.get(id)
+      if (!r || cur(r) !== 'received' || !complete(r)) return
+      const report = { id: r.id, kind: r.kind as string, words: (r.words as string) ?? '', who: r.who, voice: (r.voice as { file: string; ms: number }[]) ?? [], media: (r.media as { file: string; type: string; bytes: number }[]) ?? [], where: r.where as Record<string, string>, diagnostics: r.diagnostics as Record<string, string>, followUps: r.followUps ?? [] }
+      const { hits } = privacyCatch(report, { people: g.people ?? [], secrets: [r.who.member, ...maintainers] })
+      if (hits.length) {
+        const flags = [...new Set(hits.map((h) => h.kind))]
+        await store.setStatus(id, { status: 'held', by: FLOW.held.actor, at: iso(now()), flags }, lastStatus(r))
+        return
+      }
+      const f = g.fetch ?? globalThis.fetch
+      const files = []
+      if (g.attachments) {
+        for (const name of fileNames(r)) {
+          const v = r.files?.[name]
+          if (!v?.sha256) continue
+          const link = await store.readUrl({ reportId: id, file: name, ttlMs: READ_TTL_MS })
+          const res = await f(link.url)
+          if (!res.ok) continue // left as still being added
+          files.push({ name, type: String(v.type), bytes: new Uint8Array(await res.arrayBuffer()) })
+        }
+      }
+      const filerName = (await g.nameOf?.(r.who.member)) || undefined
+      const filed = await fileSuggestion({ repo: g.repo, token: g.token, fetch: f }, {
+        report,
+        compose: { appName: opts.app?.name, appVersion: typeof report.diagnostics?.appVersion === 'string' ? report.diagnostics.appVersion : undefined, filerName, filerRole: r.who.role },
+        files,
+        ...(g.attachments ? { attachments: g.attachments } : {}),
+      })
+      const issue = { repo: g.repo, number: filed.number, url: filed.url }
+      if (await store.setStatus(id, { status: 'open', by: FLOW.open.actor, at: iso(now()), issue }, lastStatus(r))) await moved_(r, 'open', { issue })
+    } catch { /* GitHub or storage failed: it stays received for a Mac to file */ } finally {
+      await store.releaseApproval(id, lock)
+    }
   }
 
   return { submit, uploadUrl, finalize, mine, one, append, agentList, agentFile, agentSettle, agentClaimApproval, agentReleaseApproval, agentStatus }

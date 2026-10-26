@@ -14,49 +14,71 @@ export const CEILINGS = {
   perPersonPerDay: 20,
 };
 
-export const STATUSES = ["on-phone", "received", "with-freeda", "planned", "waiting-on-owner", "being-made", "live", "sent-to-template", "filed", "not-now"];
-export const END = ["live", "sent-to-template", "filed", "not-now"];
-// The moves the person who suggested a change hears about: the work starting, and every end. The planning steps stay quiet.
-export const TOLD = ["being-made", ...END];
+// A suggestion becomes one ordinary GitHub issue (suggestions-as-github-issues design, section 3), so the statuses a
+// person sees are GitHub's: not sent, received, held before filing, then the issue's own open and closed states.
+export const STATUSES = ["on-phone", "received", "held", "open", "done", "not-planned"];
+// Closed on GitHub. A closed issue can be reopened, so an end is not final: it can go back to "open".
+export const END = ["done", "not-planned"];
+// The moves the person who suggested a change hears about: the issue existing, and every close.
+export const TOLD = ["open", ...END];
 
-// actor: who PERFORMS this step (design section 7): sent by the person, received by the app, with Pluma by the Mac. A Helm on the owner's Mac posts straight into
-// the inbox, so a report may go from the phone to Pluma without the hosted app's "received". The owner may decline
-// ("not-now") before Pluma has a plan or before she asks: a report she cannot plan would otherwise have no exit.
+// actor: who PERFORMS this step. Sent by the person, received by the app, held for the owner (the privacy catch stopped
+// it, or the account cannot file yet), filed by the Mac (or an app's own server), closed or reopened on GitHub. A Helm on
+// the owner's Mac posts straight there, so a report may go from the phone to held or open without the app's "received".
 export const FLOW = {
-  "on-phone": { actor: "person", next: ["received", "with-freeda"] },
-  "received": { actor: "app", next: ["with-freeda"] },
-  "with-freeda": { actor: "mac", next: ["planned", "not-now"] },
-  "planned": { actor: "freeda", next: ["waiting-on-owner", "being-made", "not-now"] },
-  "waiting-on-owner": { actor: "owner", next: ["being-made", "filed", "not-now"] },
-  "being-made": { actor: "freeda", next: ["live", "sent-to-template", "filed", "not-now"] },
-  "live": { actor: "freeda", next: [] },
-  "sent-to-template": { actor: "freeda", next: [] },
-  "filed": { actor: "freeda", next: [] },
-  "not-now": { actor: "owner", next: [] },
+  "on-phone": { actor: "person", next: ["received", "held", "open"] },
+  "received": { actor: "app", next: ["held", "open", "not-planned"] },
+  "held": { actor: "owner", next: ["open", "not-planned"] },
+  "open": { actor: "mac", next: ["done", "not-planned"] },
+  "done": { actor: "github", next: ["open"] },
+  "not-planned": { actor: "github", next: ["open"] },
 };
 
-export const mayMove = (from, to) => Boolean(FLOW[from]?.next.includes(to));
+// THE OLD STATUSES (0.1.x) STAY READABLE. Each folds into what it now means: a report the old pipeline was still
+// working on has not been filed yet (the Mac files it), one it shipped or passed on is done, one declined is not planned.
+export const LEGACY = {
+  "with-freeda": "received",
+  "planned": "received",
+  "waiting-on-owner": "received",
+  "being-made": "received",
+  "live": "done",
+  "sent-to-template": "done",
+  "filed": "done",
+  "not-now": "not-planned",
+};
+/** The status this one means now: a legacy status folded, anything else as it is. */
+export const currentStatus = (s) => LEGACY[s] ?? s;
 
-// The design's status table (section 2), word for word. "planned" is a step inside Pluma's work
-// that the table does not name for a person, so it reads as "With Pluma".
+export const mayMove = (from, to) => Boolean(FLOW[currentStatus(from)]?.next.includes(to));
+
+// The design's status table (section 3), word for word.
+const issueWords = (issue) => (Number.isInteger(issue?.number) ? `Filed as issue #${issue.number}` : "Filed as an issue");
 const TABLE = {
-  "on-phone": ["On this phone", () => "Not sent yet; it will send when there is a connection"],
-  "received": ["Received", () => "The app has it, safely stored"],
-  "with-freeda": ["With Pluma", (o) => `${o}'s Mac has picked it up`],
-  "planned": ["With Pluma", (o) => `${o}'s Mac has picked it up`],
-  "waiting-on-owner": [null, (o) => `Pluma has a plan and is asking ${o}`],
-  "being-made": ["Being made", () => "A session is working on it; the current step shows underneath"],
-  "live": ["Done", () => "Shipped in the app, with the date it went live"],
-  "sent-to-template": ["Sent to the template", () => "It became a change to the template every copy of this app uses; it reaches this app once merged"],
-  "filed": ["Filed", () => "It was passed to whoever owns the problem"],
-  "not-now": ["Not now", (o) => `${o} decided against it, with the one-line reason if given`],
+  "on-phone": [() => "On this phone", () => "Not sent yet; it will send when there is a connection"],
+  "received": [() => "Received", () => "The app has it, safely stored"],
+  "held": [(o) => `Waiting on ${o}`, (o) => `${o} looks at it before it is filed`],
+  "open": [() => "Open", (o, issue) => issueWords(issue)],
+  "done": [() => "Done", () => "Closed as completed"],
+  "not-planned": [() => "Not planned", () => "Closed as not planned, with the reason if one was given"],
 };
 const row = (status) => {
-  if (!TABLE[status]) throw new Error(`${status} is not a status`);
-  return TABLE[status];
+  const s = currentStatus(status);
+  if (!TABLE[s]) throw new Error(`${status} is not a status`);
+  return TABLE[s];
 };
-export const wordsFor = (status, { owner } = {}) => row(status)[0] ?? `Waiting on ${owner}`;
-export const meaningFor = (status, { owner } = {}) => row(status)[1](owner);
+export const wordsFor = (status, { owner } = {}) => row(status)[0](owner);
+export const meaningFor = (status, { owner, issue } = {}) => row(status)[1](owner, issue);
+
+const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** The issue a report became: `{ repo: "owner/name", number, url }`, the url on github.com. Problems as a list. */
+export function validIssue(issue) {
+  if (!issue || typeof issue !== "object" || Array.isArray(issue)) return ["issue is not an object"];
+  const errs = [];
+  if (typeof issue.repo !== "string" || !REPO.test(issue.repo)) errs.push("issue.repo is not owner/name");
+  if (!Number.isInteger(issue.number) || issue.number < 1) errs.push("issue.number is not a positive whole number");
+  if (typeof issue.url !== "string" || !issue.url.startsWith("https://github.com/")) errs.push("issue.url is not a https://github.com/ link");
+  return errs;
+}
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const randomSix = () => {
@@ -97,6 +119,7 @@ export function validateReport(raw, { ceilings = CEILINGS } = {}) {
   if (!ROLES.includes(raw.who?.role)) errs.push(`role ${JSON.stringify(raw.who?.role)} is not one of ${ROLES.join(", ")}`);
   for (const p of findKey(raw, "email")) errs.push(`${p}: a report never carries an email`);
   if (String(raw.where?.route ?? "").includes("?")) errs.push("where.route keeps a query string");
+  if (raw.issue !== undefined) errs.push(...validIssue(raw.issue));
   for (const k of Object.keys(raw.diagnostics ?? {})) {
     if (!DIAGNOSTIC_KEYS.includes(k)) errs.push(`diagnostics.${k} is not one of ${DIAGNOSTIC_KEYS.join(", ")}`);
   }

@@ -1,6 +1,6 @@
 {
   "name": "@supersuit/suggest-a-change",
-  "version": "0.1.13",
+  "version": "0.2.0",
   "description": "The report format and flow behind a Suggest a change button: what a report is, who acts at each step, the screens, and the check every app runs. The contract has zero dependencies.",
   "type": "module",
   "bin": {
@@ -16,6 +16,10 @@
     "./server": {
       "types": "./dist/server/index.d.ts",
       "import": "./dist/server/index.js"
+    },
+    "./github": {
+      "types": "./dist/github/index.d.ts",
+      "import": "./dist/github/index.js"
     },
     "./check": "./src/check/index.mjs",
     "./styles.css": "./src/client/styles.css",

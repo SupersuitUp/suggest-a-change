@@ -12,8 +12,10 @@ npm install @supersuit/suggest-a-change
 import { KINDS, STATUSES, FLOW, CEILINGS } from "@supersuit/suggest-a-change";
 
 console.log(KINDS);            // ["change", "broken", "feedback"]
-console.log(FLOW["with-freeda"]); // { actor: "mac", next: ["planned", "not-now"] }
+console.log(FLOW["received"]); // { actor: "app", next: ["held", "open", "not-planned"] }
 ```
+
+A suggestion becomes one ordinary GitHub issue. The statuses a person sees are GitHub's: `on-phone` (not sent yet), `received` (the app has it), `held` (waiting on the owner: the privacy catch stopped it, or the account cannot file yet), `open` (the issue exists), `done` and `not-planned` (closed; a reopened issue goes back to `open`). The 0.1 statuses stay readable: `LEGACY` maps each to the one it now means and `currentStatus(s)` folds it, and every function and screen here reads through it.
 
 The package root is the report contract: the kinds, roles, ceilings, the status list and the flow map (who performs each step and which moves are allowed), plus the functions that validate a report against them. It has no imports, so it can also be copied whole into a place that has no install step. If you copy it, keep a hash of the copy and fail a test when the bytes change; fix the contract here and copy it again.
 
@@ -42,6 +44,7 @@ const adapters: Adapters = {
   snapshot: async () => screenshotBlob(), // optional: one tap to attach a picture of this screen
   about: { app: "notes", version: "1.2.3" }, // stamped into every report
   lands: "app",                           // "mac" on a Helm that posts straight to the owner's Mac
+  destination: async () => ({ repo: "acme/notes", public: false, account: "alex-gh", attaches: true, name: "Alex Kim" }), // optional
 };
 // On every screen below home:  <SuggestEntry adapters={adapters} onOpen={() => setOpen(true)} />
 // then:                        {open && <SuggestSheet adapters={adapters} where={{ screen: "Photos", route: location.pathname }} onClose={() => setOpen(false)} />}
@@ -71,9 +74,11 @@ Styling: structure only, class names prefixed `sac-`. `@supersuit/suggest-a-chan
 
 The four diagnostics are the app's version, the time, the screen size and the phone type. All four go with every report, with the screen's name and address, and the sheet says so in one small line above Send rather than a section of switches.
 
+**Where it files.** With the optional `destination()` adapter, answering `{ repo, public, account, attaches, name? }`, that line becomes the list of exactly what the issue will carry ("your words · your voice note and its transcript · 2 screenshots, saved to the suggestion-attachments branch of acme/notes · this screen (Photos, /photos) · notes 1.2.3 · iPhone, 390x844 · the time · your name, Alex Kim"), the repo it files on, who can read it there (a public repo says so in `--sac-danger`), and whose GitHub account files it. The list follows the draft as things are added or removed, and it is built by `whatGoes` from `./github`, the same pieces `composeIssue` writes the body from, so the sheet and the issue cannot drift. `attaches: false` says files wait until the repo can take them. Sending is the consent. Without the adapter (or when it answers null) the sheet keeps the one line. My suggestions and the detail view link the issue a report became ("Issue #7"); a member who cannot read the repo still sees the number and the state.
+
 **Identity.** Every screen asks `adapters.identity()` when it mounts, whenever it is handed a different `adapters` object, and whenever the host calls `refreshIdentity()` (exported from `"./client"`; call it after a sign-in, sign-out or account switch). When the account differs, the old account's rows leave the screen and its waiting reports stay on the phone, to be sent only while that account is signed in; every send re-confirms the account first. Keep `adapters` stable where you can; a parent that rebuilds it every render is safe, only slower (one `identity()` call per render).
 
-**Telling the person in the app, with no setup.** The entry asks `mine()` once when it mounts and compares each report's status with the one this account last opened (kept on the phone beside the cached views, per app and account, and cleared on sign-out). A report that has since been started or ended (`TOLD`) shows a dot on the entry, says New on its row in My suggestions, and the newest such move gets one toast per page load in the module's words (`words.text.movedToast`, given the status's own word and, on `not-now`, the reason: "Your suggestion: Done", "Your suggestion: Not now. too big for now"). Opening the report clears it. A report this phone sees for the first time is recorded silently, so an app taking this release does not announce every old report. The list's `not-now` rows carry their one-line `note` for this. Out of the app, the server's `tellSubmitter` does the telling (below).
+**Telling the person in the app, with no setup.** The entry asks `mine()` once when it mounts and compares each report's status with the one this account last opened (kept on the phone beside the cached views, per app and account, and cleared on sign-out). A report that has since been filed or closed (`TOLD`) shows a dot on the entry, says New on its row in My suggestions, and the newest such move gets one toast per page load in the module's words (`words.text.movedToast`, given the status's own word and, on `not-planned`, the reason: "Your suggestion: Done", "Your suggestion: Not planned. too big for now"). Opening the report clears it. A report this phone sees for the first time is recorded silently, so an app taking this release does not announce every old report. The list's `not-planned` rows carry their one-line `note` for this. Out of the app, the server's `tellSubmitter` does the telling (below).
 
 **When the entry sits in a menu.** A host that shows the entry inside a menu that stays closed (a three-dot menu, often remounting its rows on every open) would never show the dot, and the toast would be drawn inside the closed menu. Mount `<SuggestNews>` once at the app's root, always mounted: it asks `mine()` when it mounts, shows the page load's one toast with no entry on screen, and keeps the outbox moving. Put the dot on the menu's own trigger with `useSuggestNews(adapters)`, which returns `{ moved }`, and `<SuggestDot>`, which draws the entry's dot (nothing when `moved` is 0). The trigger needs `position: relative`; the class `sac-dot-host` does it. The toast is once per page load and account however many times the entry mounts, whichever of these asks first, and only for a move the previous page load had not already seen: older news keeps the dot and the New mark without a toast. The entry in the menu keeps its own dot.
 
@@ -189,10 +194,13 @@ const h = createReportHandlers({
   maintainersSince: { mo: "2026-10-01" }, // optional: reports from before this are not offered to that maintainer's Mac
   tell: (e) => notify(e),                 // ids only, never words; a failure never fails the request
   tellSubmitter: (e) => push(e.member, e.words, e.note), // REQUIRED: tell the person who suggested it (or { none: "<reason>" })
+  github: { repo: "acme/notes", token, attachments },     // optional: file each complete report as an issue from here (below)
 });
 ```
 
-**Telling the person who suggested it is required.** `tellSubmitter` is called once when a report moves to `being-made` and once when it ends (`live`, `sent-to-template`, `filed`, `not-now`; the list is exported as `TOLD`), with `{ member, reportId, status, words, meaning, ended, note? }`. `words` and `meaning` are the module's own words for the status (`wordsFor`/`meaningFor`, with `app.owner` as the owner's name when given), never the report's text, so a lock screen never shows what someone wrote; `note` is the one-line reason and comes with `not-now` only. The planning steps (`with-freeda`, `planned`, `waiting-on-owner`) tell nobody, a repeat of a status tells nobody, a move the store refused tells nobody, and a maintainer is not told that the work they just started on their own report has started (its end is still told). Send it on the app's own channel (push, email, an activity row) to that member only. A failure never fails the move. `createReportHandlers` throws at startup when `tellSubmitter` is missing; an app that genuinely has nobody to tell passes `tellSubmitter: { none: "only the maintainer uses this app" }`, and an empty reason throws too. The `tell` event for a status move now also carries `member` and `status`.
+**Telling the person who suggested it is required.** `tellSubmitter` is called once when a report becomes an issue (`open`) and once each time it closes or reopens (`done`, `not-planned`, `open`; the list is exported as `TOLD`), with `{ member, reportId, status, words, meaning, ended, note?, issue? }`. `words` and `meaning` are the module's own words for the status (`wordsFor`/`meaningFor`, with `app.owner` as the owner's name when given), never the report's text, so a lock screen never shows what someone wrote; `note` is the one-line reason and comes with `not-planned` only; `issue` is `{ repo, number, url }` once there is one. Being held tells nobody, a repeat of a status tells nobody, a move the store refused tells nobody, and a maintainer is not told that the issue they just filed from their own report exists (its close is still told).
+
+**Filing from the app's server.** With `github: { repo, token, attachments?, people?, nameOf?, fetch? }` the handlers file each report as an issue the moment it is complete: at submit when it has no files, else when its last file is verified. One caller files it (the approval is taken under a one-time name and the report read again under it). The privacy catch runs first; a hit moves the report to `held` with the kinds found (`flags`, never the words, never in the member's view) for the owner to decide. The files are read back through the store's own read links and saved with `attachments` (a `branchHost` with a token that can push, usually); the issue is opened first, then the files saved, then their links edited in. GitHub failing leaves the report `received` and the approval free, so a maintainer's Mac can file it. `nameOf(member)` gives the name the issue says; the member key never appears in an issue. Send it on the app's own channel (push, email, an activity row) to that member only. A failure never fails the move. `createReportHandlers` throws at startup when `tellSubmitter` is missing; an app that genuinely has nobody to tell passes `tellSubmitter: { none: "only the maintainer uses this app" }`, and an empty reason throws too. The `tell` event for a status move now also carries `member` and `status`.
 
 | Route | Handler | Answers |
 | --- | --- | --- |
@@ -206,11 +214,11 @@ const h = createReportHandlers({
 | `GET /api/agent/reports/:id/files/:file` | `agentFile(req, id, file)` | 200 `{ url, expiresAt, type, bytes, sha256 }` (the link lives five minutes), 404 |
 | `POST /api/agent/reports/:id/settle` | `agentSettle` | body `{ revision }` (the one the list gave this report): 200, 400 (no revision), 409 (not claimed, or `stale`: something was added since the list, so the report is offered again) |
 | `POST /api/agent/reports/:id/claim-approval` | `agentClaimApproval` | 200, or 409 `{ claimedBy }`, or on a closed report 409 `{ closed: true, status, claimedBy? }` |
-| `POST /api/agent/reports/:id/status` | `agentStatus` | 200, 400, 409 |
+| `POST /api/agent/reports/:id/status` | `agentStatus` | body `{ status, step?, note?, issue? }`: 200, 400 (not a status, an old status, a bad issue, or open with no issue), 409 |
 
 A client adapter's `uploadPart` asks `upload-url`, PUTs the bytes straight to storage, then calls `finalize`. Nothing is uploaded through the app's server and no handler reads a body over about 400 KB (sized from the field limits at four bytes a character; far under 4 MB).
 
-The role stored on a report comes from the signed-in member and the `maintainers` list. A `who` sent by the phone is ignored; a report carrying `timeline`, `status`, `plan` or `decision` is refused. `sniffType(firstBytes)` names a file by its bytes (jpeg, png, webp, heic/heif, gif, mp4/mov, webm, m4a/aac, mp3, wav, ogg/opus; anything else is `null`) and `finalize` refuses a file whose bytes are not the type it was declared as.
+The role stored on a report comes from the signed-in member and the `maintainers` list. A `who` sent by the phone is ignored; a report carrying `timeline`, `status`, `plan`, `decision` or `issue` is refused. Settling (`agentSettle`) moves the files under `collected/` and leaves the status alone: collecting is not filing. `sniffType(firstBytes)` names a file by its bytes (jpeg, png, webp, heic/heif, gif, mp4/mov, webm, m4a/aac, mp3, wav, ogg/opus; anything else is `null`) and `finalize` refuses a file whose bytes are not the type it was declared as.
 
 **A wrapper of your own answers in the module's words.** When an app's route has to check a caller or read one field before the handler runs, it uses the same door the handlers use: `json(status, body)` (JSON, never cached), `signIn()` (401) and `notFound()` (404), `cappedText(req, cap)` (the body as text, or a 413 `Response` past `cap` bytes, by the declared length and again by counting what arrives; no body reads as `""`), and `peek(text)` (a JSON object, or `{}` for anything else, for reading one field while the module judges the body). Copying these into an app made a second door that could drift from the first.
 
@@ -218,7 +226,7 @@ The role stored on a report comes from the signed-in member and the `maintainers
 
 **The collector MUST verify.** `agentFile` answers the verified `bytes` and `sha256`; a Mac that downloads the link must check both before it trusts the file.
 
-**The approval.** Moves before the owner is asked (`with-freeda`, `planned`, `waiting-on-owner`) need no claim. Leaving `waiting-on-owner`, starting `being-made` and any end status need the Mac that holds the approval (taken atomically if nobody holds it, otherwise 409 with who does). Before the work starts the holder can release it, and an unrenewed approval lapses after seven days. Once the work starts or ends it does not lapse: the move to `being-made` or to an end names the maintainer on its timeline entry (`holder`, never shown to the member), the approval is taken for `HELD_MS`, and another Mac asking is answered 409 with that holder. A claim on a closed report is 409 `{ closed: true, status, claimedBy }` for everyone, the holder included, and writes nothing. The owner may decline (`not-now`) from `with-freeda` and `planned` as well as from `waiting-on-owner`.
+**The approval.** Holding a report (`held`) needs no claim. Leaving `held`, filing (`open`) and closing need the Mac that holds the approval (taken atomically if nobody holds it, otherwise 409 with who does). Before it is filed the holder can release it, and an unrenewed approval lapses after seven days. Once it is filed or closed it does not lapse: that move names the maintainer on its timeline entry (`holder`, never shown to the member), the approval is taken for `HELD_MS`, and another Mac asking is answered 409 with that holder. A claim on a closed report is 409 `{ closed: true, status, claimedBy }` for everyone and writes nothing; only a move back to `open` (GitHub reopened it) is taken, by the Mac that filed it or by anyone when nobody is named. The owner may decline (`not-planned`) from `received` or `held`; that entry's actor is the owner, not GitHub.
 
 **What a storage adapter implements** (`HostedStore`). Every method that changes a report is narrow and atomic: `put` is create-only (`created`, `exists`, or `limit` when the member's day is full, counted in the same transaction), and `setFile` (never replaces a verified entry; an older pending never replaces a newer one), `addFollowUp` (the caps, a reused file name and an ended report are checked inside the write), `setStatus(expectFrom)`, `claimApproval`, `claim`, `settle` and `reopen` each change one thing. A real adapter implements these with a transaction or a precondition, never "read the report, change a copy, write it back": that rolls back a status or a claim written in between. Upload links must be create-only and one-time with the size and type fixed in their conditions (a Firebase or S3 signed PUT with `if-generation-match: 0` or `If-None-Match: *`), `discard` must delete a refused object, and `readUrl` links must expire after `ttlMs`.
 
@@ -230,6 +238,69 @@ await runStoreConformance(() => ({ store, now, advance, putViaLink, getViaLink, 
 // putViaLink / getViaLink do what your storage service does with a PUT on an upload link and a GET on a read link.
 ```
 
+## Suggestions as GitHub issues (`./github`)
+
+Zero runtime dependencies, web-standard `fetch` (pass your own as `fetch` anywhere). It turns a report into one plain GitHub issue that can be triaged like any other bug or feature request, from an app's server or from the owner's own machine with `gh`'s token.
+
+```ts
+import { privacyCatch, redact, mayFileAsIs, composeIssue, whatGoes, fileSuggestion, attachPending, branchHost, relayHost, issueStates, issueStatus, addFollowUp } from "@supersuit/suggest-a-change/github";
+
+// 1. Nothing is filed before the privacy catch has run over the words, the transcript and the follow-ups.
+const { hits } = privacyCatch({ ...report, transcript }, { people, secrets: [senderKey] });
+// hits: [{ kind: "credential" | "email" | "phone" | "person", text, field }]. Any hit: hold it for the owner.
+// mayFileAsIs(hits) is false when a credential is among them: that one only ever files as redact(report, hits).
+
+// 2. The issue first (saying what is being added), then each file against it, then the links edited in.
+const filed = await fileSuggestion({ repo: "acme/notes", token }, {
+  report,                                                       // redacted, if the owner chose that
+  compose: { appName: "Notes", appVersion: "1.2.3", filerName: "Alex Kim", filerRole: "member", transcript },
+  files: [{ name: "image-1.png", type: "image/png", bytes }],   // the report's own file names
+  attachments: branchHost({ repo: "acme/notes", token }),       // or relayHost(...) for a filer who cannot push
+});
+// { number, url, attached: { "image-1.png": url }, pending: [] }
+// A file that failed stays in `pending`, and the issue keeps saying it is being added. Retry it later:
+await attachPending({ repo: "acme/notes", token }, { number: filed.number, report, compose, files, attachments, attached: filed.attached });
+
+// 3. Follow-ups are comments; the person's status is the issue's own.
+await addFollowUp({ repo: "acme/notes", token }, filed.number, "one more thing");
+const states = await issueStates({ token }, [{ repo: "acme/notes", number: filed.number }]); // one GraphQL call
+issueStatus(states[0]); // "open" | "done" | "not-planned"; a closed issue's `reason` is its last comment's first line
+```
+
+- `composeIssue(report, { appName, appVersion, filerName, filerRole, attachmentUrls, transcript, pending })` answers `{ title, body, labels, carries }`. The title is the first sentence of the words (else the transcript), at most 70 characters, else "Suggestion from <app>". Labels are GitHub's own (`enhancement`, `bug`, `feedback`) plus `app:<slug>`. The body's sections are What they said, Voice note, Screenshots (pictures inline, videos and recordings linked), Where, About and Filed by, which ends `Report <id>.`, exactly: a relay requires that line before it saves a file. The body never carries the sender's key or an email, and stays under GitHub's limit (`BODY_LIMIT`) by cutting the transcript, with a note. Any file without a link yet is written as "being added"; `pending: true` writes every file that way.
+- `whatGoes(draft, destination)` is the sheet's list, one item per piece of `carries`, and `destinationWords(destination)` its headline, privacy line and account line.
+- `fileIssue`, `updateIssue`, `addFollowUp` are the REST calls; `fileIssue` creates missing labels first and skips one it may not create (a read-only filer; GitHub then keeps only the labels they may set).
+- `AttachmentHost` is `{ put({ repo, issue, reportId }, { name, type, bytes }) -> { url } }`. Every file goes to `attachments/<report id>/<file>` on the repo's own `suggestion-attachments` branch (made the first time, as an orphan sharing no history with the code), linked as `https://github.com/<repo>/blob/suggestion-attachments/<path>?raw=true`, which renders for exactly the people who can read the repo. `branchHost({ repo, token })` writes with a token that can push. `relayHost({ url, headers })` sends the file to an attachment relay (below) with whatever header your relay checks, for the many filers who can open an issue but cannot push.
+
+### Run your own attachment relay
+
+A relay is one route on a server you run. It acts as a GitHub App you own, so a filer's screenshots reach their issue without them having push access, and without your repo trusting anyone else's server.
+
+1. **Create the GitHub App** (Settings, Developer settings, GitHub Apps, New GitHub App). Repository permissions: **Contents: Read and write**, **Issues: Read-only**, nothing else. No webhook is needed. Generate a private key (GitHub gives you a PKCS#1 `.pem`; the relay takes that or PKCS#8) and note the App ID.
+2. **Install it** on each repo suggestions file to. Uninstalling it stops every write at once; the files already saved stay in the repo, because they are just a branch.
+3. **Mount the handler.** In a Next.js app (app router), `app/api/suggestions/attach/route.ts`:
+
+```ts
+import { createAttachRelay } from "@supersuit/suggest-a-change/github";
+
+const relay = createAttachRelay({
+  app: { id: process.env.SUGGESTIONS_APP_ID!, privateKey: process.env.SUGGESTIONS_APP_KEY! },
+  identity: async (req) => {
+    // Whoever your app already knows: a session cookie, an API key in the authorization header. Null refuses.
+    const user = await userFromRequest(req);
+    return user ? { account: user.id } : null;
+  },
+  // limits: { perPersonPerDay: 10 },   // may lower any limit, never raise one
+  // usage: myDatabaseUsage,            // the daily count; the default is in memory, per server instance
+});
+
+export const POST = relay;
+```
+
+4. **Point the filers at it:** `relayHost({ url: "https://your.app/api/suggestions/attach", headers: { authorization: `Bearer ${apiKey}` } })`.
+
+On every call the relay refuses (each refusal has a test): anything but POST (405); a caller `identity` does not know (401); a malformed repo, issue number, report id, file name or base64 body (400); bytes that are not an accepted picture, video or recording, or not the type declared, judged by the bytes (422); a file over the size caps (413); a repo the App is not installed on (403, "the app is not installed on <repo>"); an issue that does not exist (404), is a pull request, does not carry `Report <report id>`, or closed more than a week ago (403); a path already written, which is never overwritten (409); a report already holding all the pictures, videos or recordings it may (422); more different reports in a day than the cap for that account (429). It writes only `attachments/<report id>/<file>` on `suggestion-attachments`, with an installation token scoped to that one repo, and answers `{ url }`. Reading the issue is what proves the caller could file there, so nobody can store a file in a repo they could not open an issue on. A host that limits request bodies (several serverless platforms stop at a few MB) also limits the file size the relay can take; a video near the 100 MB ceiling needs a route that accepts a body that large.
+
 ## What is here, and what is coming
 
 | Export | State |
@@ -240,12 +311,13 @@ await runStoreConformance(() => ({ store, now, advance, putViaLink, getViaLink, 
 | `"./styles.css"` optional defaults | here |
 | `"./check"` and the `suggest-a-change-check` and `suggest-a-change init` commands | here |
 | `"./server"` the receiving side: handlers, store conformance suite, byte sniffing | here |
+| `"./github"` suggestions as issues: privacy catch, issue body, filing, attachment hosts, your own relay | here |
 
 Each export is added to `package.json` in the same change as its code, so nothing here points at a file that does not exist.
 
 ## Status
 
-Version 0.1.0 is the first release and is published once by its owner (the first publish of a new package name cannot be a tag push). Every release after that is a pushed `v<version>` tag (GitHub Actions, npm trusted publishing). Below 1.0, additions are patch versions, so apps on `^0.1.0` take them without a change.
+Version 0.1.0 is the first release and is published once by its owner (the first publish of a new package name cannot be a tag push). Every release after that is a pushed `v<version>` tag (GitHub Actions, npm trusted publishing). Below 1.0, additions are patch versions, so apps take them without a change; a change to the statuses is a minor version (0.2.0 moved them onto GitHub's), which an app on `^0.1` takes on purpose.
 
 ## License
 

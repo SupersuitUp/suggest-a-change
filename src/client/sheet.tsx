@@ -6,7 +6,8 @@
 // through the outbox, so a closed app loses nothing. A voice note alone is a whole report.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { isAcceptedMedia, sanitizeRoute, typeForFile, validateReport } from '../contract.mjs'
-import type { Adapters, FieldProps, Kind } from './adapters.ts'
+import type { Adapters, FieldProps, Kind, SheetDestination } from './adapters.ts'
+import { destinationWords, whatGoes } from '../github/compose.ts'
 import { useDialog } from './dialog.ts'
 import { DefaultField } from './default-field.tsx'
 import { draftKey, loadDraft, saveDraft } from './drafts.ts'
@@ -83,6 +84,14 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   const [announce, setAnnounce] = useState('')
   const [sent, setSent] = useState<{ id: string; files: { file: string; name: string; bytes: number }[] } | null>(null)
   const [loaded, setLoaded] = useState(false)
+  const [dest, setDest] = useState<SheetDestination | null>(null)
+  // Where it files, asked once when the sheet opens; until it answers (or with none) the one-line note stays.
+  useEffect(() => {
+    if (!adapters.destination) return
+    let live = true
+    adapters.destination().then((d) => { if (live) setDest(d && typeof d.repo === 'string' ? d : null) }, () => { if (live) setDest(null) })
+    return () => { live = false }
+  }, [adapters])
   const chain = useRef<Promise<unknown>>(Promise.resolve())
   // What is on the sheet, kept in step with state so a second take or picture added a moment later counts the first.
   const voiceRef = useRef<Voice[]>([])
@@ -265,6 +274,16 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   ] as { name: Diag; label: string; value: string | undefined }[]).filter((d): d is { name: Diag; label: string; value: string } => Boolean(d.value))
   const lineParts = [`this screen (${where.screen}, ${sanitizeRoute(where.route)})`, ...avail.map((d) => d.label)]
   const summary = `${S.goesTo(adapters.words.owner)} ${S.includes(lineParts)}`
+  // With a destination, the one line becomes the list of exactly what the issue will carry, built by the same function
+  // the issue is written from (`whatGoes`), so the list and the issue cannot drift. It follows the draft as it changes.
+  const goes = dest ? whatGoes({
+    kind, words, voice: voice.map((v) => ({ file: v.file, ms: v.ms })), media: media.map((m) => ({ file: m.file, type: m.type })),
+    where: { screen: where.screen, route: sanitizeRoute(where.route) },
+    diagnostics: Object.fromEntries(avail.map((d) => [d.name, d.value])),
+    appName: adapters.about?.app ?? adapters.words.app,
+    ...(dest.name ? { filerName: dest.name } : {}),
+  }, dest) : null
+  const destWords = dest ? destinationWords(dest) : null
 
   const hasAnything = Boolean(words.trim() || voice.length || media.length)
 
@@ -398,7 +417,14 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
               ) : null}
             </fieldset>
 
-            <p className="sac-muted sac-fyi" data-sac-summary="">{summary}</p>
+            {goes && destWords ? (
+              <div className="sac-goes sac-fyi" data-sac-goes="">
+                <p className="sac-goes-head"><strong>{destWords.headline}</strong>{' ('}<span className={destWords.danger ? 'sac-danger' : 'sac-muted'}>{destWords.privacy}</span>)</p>
+                <p className="sac-muted">It will carry:</p>
+                <ul className="sac-goes-list">{goes.map((g) => <li key={g.key} data-goes={g.key}>{g.text}</li>)}</ul>
+                <p className="sac-muted">{destWords.account}</p>
+              </div>
+            ) : <p className="sac-muted sac-fyi" data-sac-summary="">{summary}</p>}
 
             {error ? <p role="alert" className="sac-error">{error}</p> : null}
             <div className="sac-actions">

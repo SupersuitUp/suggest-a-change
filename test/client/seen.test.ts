@@ -14,14 +14,22 @@ describe('seen statuses', () => {
   it('a report seen for the first time is recorded silently, so taking the release toasts nothing old', async () => {
     const s = await db()
     expect(await moved(s, SAM, [{ id: 'a', status: 'live' }, { id: 'b', status: 'received' }])).toEqual([])
-    expect(await seenStatuses(s, SAM)).toEqual({ a: 'live', b: 'received' })
+    expect(await seenStatuses(s, SAM)).toEqual({ a: 'done', b: 'received' }) // kept in the new words
+  })
+
+  it('an old status and the new one it means are the same news: an app upgrading its server announces nothing', async () => {
+    const s = await db()
+    await moved(s, SAM, [{ id: 'a', status: 'received' }])
+    await markSeen(s, SAM, 'a', 'live')
+    expect(await moved(s, SAM, [{ id: 'a', status: 'done' }])).toEqual([])
+    expect(await moved(s, SAM, [{ id: 'a', status: 'open' }])).toEqual([{ id: 'a', status: 'open' }]) // reopened is news
   })
 
   it('a move to a telling status is New until it is looked at; a quiet move is recorded silently', async () => {
     const s = await db()
     await moved(s, SAM, [{ id: 'a', status: 'received' }, { id: 'b', status: 'received' }])
     expect(await moved(s, SAM, [{ id: 'a', status: 'live' }, { id: 'b', status: 'with-freeda' }])).toEqual([{ id: 'a', status: 'live' }])
-    expect((await seenStatuses(s, SAM)).b).toBe('with-freeda')
+    expect((await seenStatuses(s, SAM)).b).toBe('received')
     // still New on the next open, until it is looked at
     expect(await moved(s, SAM, [{ id: 'a', status: 'live' }, { id: 'b', status: 'with-freeda' }])).toEqual([{ id: 'a', status: 'live' }])
     await markSeen(s, SAM, 'a', 'live')
@@ -35,7 +43,7 @@ describe('seen statuses', () => {
     expect(await moved(s, SAM, [{ id: 'a', status: 'live' }])).toEqual([{ id: 'a', status: 'live' }])
     await clearViewCache(s, SAM)
     expect(await seenStatuses(s, SAM)).toEqual({})
-    expect(await seenStatuses(s, JO)).toEqual({ a: 'live' })
+    expect(await seenStatuses(s, JO)).toEqual({ a: 'done' })
   })
 
   it('a move the last page load already saw is not fresh again; a newer move is, and an opened one drops out', async () => {
