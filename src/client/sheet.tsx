@@ -10,7 +10,7 @@ import type { Adapters, FieldProps, Kind, SheetDestination } from './adapters.ts
 import { destinationWords, whatGoes, type GoesItem } from '../github/compose.ts'
 import { validContact } from '../contract.mjs'
 import type { Contact } from './adapters.ts'
-import { collectContext, type ReportContext } from './context.ts'
+import { collectContext, contextOff, type ReportContext } from './context.ts'
 import { useDialog } from './dialog.ts'
 import { DefaultField } from './default-field.tsx'
 import { draftKey, loadDraft, saveDraft } from './drafts.ts'
@@ -99,10 +99,13 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     adapters.destination().then((d) => { if (live) setDest(d && typeof d.repo === 'string' ? d : null) }, () => { if (live) setDest(null) })
     return () => { live = false }
   }, [adapters])
+  // What the app turned off, as the list's keys: never collected, never listed, never sent.
+  const off = useMemo(() => contextOff(adapters.context), [adapters])
+  const offPieces = useMemo(() => new Set(off.map((k) => (k === 'pages' ? 'routes' : k === 'taps' || k === 'errors' ? k : `ctx:${k}`))), [off])
   const contextOptions = useCallback(() => {
     const c = adapters.context
-    return typeof c === 'function' ? { extra: c, precise: false } : { extra: c?.items ? () => c.items!() : undefined, precise: Boolean(c?.precise) }
-  }, [adapters])
+    return typeof c === 'function' ? { extra: c, precise: false, off } : { extra: c?.items ? () => c.items!() : undefined, precise: Boolean(c?.precise), off }
+  }, [adapters, off])
   const gather = useCallback(() => collectContext({ identity: who ?? null, where, about: adapters.about, ...contextOptions(), ...(adapters.phone?.now ? { now: adapters.phone.now } : {}) }), [who, where, adapters, contextOptions])
   useEffect(() => {
     if (!who) return
@@ -293,6 +296,8 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     { name: 'screen', label: S.diagScreen, value: screenSize() },
     { name: 'device', label: S.diagDevice, value: adapters.device ? adapters.device() : phoneType() },
   ] as { name: Diag; label: string; value: string | undefined }[]).filter((d): d is { name: Diag; label: string; value: string } => Boolean(d.value))
+    // A diagnostic whose context item the app turned off is not said, listed or sent either.
+    .filter((d) => !offPieces.has(({ device: 'ctx:device', screen: 'ctx:screen', at: 'ctx:time' } as Record<string, string>)[d.name] ?? ''))
   const lineParts = [`this screen (${where.screen}, ${sanitizeRoute(where.route)})`, ...avail.map((d) => d.label)]
   const summary = `${S.goesTo(adapters.words.owner)} ${S.includes(lineParts)}`
   // With a destination, the one line becomes the list of exactly what the issue will carry, built by the same function
@@ -307,7 +312,7 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     ...(ctx ? { context: ctx } : {}),
     ...(contact ? { who: { contact } } : {}),
   }, dest ?? { repo: '', public: false, account: '', attaches: true })
-  const isOn = (key: string, fallback = true) => choice[key] ?? rows.find((r) => r.key === key)?.on ?? fallback
+  const isOn = (key: string, fallback = true) => !offPieces.has(key) && (choice[key] ?? rows.find((r) => r.key === key)?.on ?? fallback)
   const goes = dest ? rows : null
   const destWords = dest ? destinationWords(dest) : null
   const optionalRow = (g: GoesItem) => (
@@ -473,6 +478,9 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
                 {rows.some((g) => g.optional) ? <ul className="sac-goes-opts" aria-label={S.contextLegend}>{rows.filter((g) => g.optional).map(optionalRow)}</ul> : null}
               </div>
             )}
+
+            {/* The app's own note: under the list, before Send, never instead of it. */}
+            {S.destinationNote ? <p className="sac-note" data-sac-note="">{S.destinationNote}</p> : null}
 
             {error ? <p role="alert" className="sac-error">{error}</p> : null}
             <div className="sac-actions">

@@ -18,8 +18,10 @@ import { effectiveCeilings, receiptWords } from '../../src/client/words.ts'
 import { Receipt } from '../../src/client/receipt.tsx'
 import { getRuntime, refreshIdentity } from '../../src/client/runtime.ts'
 import { Toasts } from '../../src/client/toast.tsx'
+import { resetContext } from '../../src/client/context.ts'
 import { clearToasts } from '../../src/client/toast.tsx'
 import { textFieldsWithoutVoice } from './voice-rule.ts'
+import { composeIssue, whatGoes } from '../../src/github/compose.ts'
 import { useState } from 'react'
 
 afterEach(() => { cleanup(); clearToasts(); vi.restoreAllMocks() })
@@ -288,6 +290,60 @@ describe('the sheet', () => {
     await sheet(adapters)
     fireEvent.change(images(), { target: { files: [png('big.png', 2048)] } })
     await screen.findByText(/image-1\.png is over the 1 KB acme\/app can take, so it does not reach the issue/)
+  })
+
+  it('context the app turns off is never listed, never sent, and never in the issue: the list and the body still agree', async () => {
+    const { adapters, submitted } = await setup({
+      context: { off: ['taps', 'pages', 'device'] },
+      destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }),
+    })
+    render(<KeepSending adapters={adapters} />) // the trail starts on the module's first mount
+    const tapped = document.createElement('button'); tapped.textContent = 'Open the chart'; document.body.appendChild(tapped)
+    tapped.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    history.pushState({}, '', '/charts/visit')
+    await sheet(adapters)
+    await screen.findByRole('checkbox', { name: /Your local time/ })
+    const listed = [...document.querySelectorAll('[data-sac-goes] [data-goes]')].map((li) => li.getAttribute('data-goes'))
+    for (const off of ['taps', 'routes', 'ctx:device']) expect(listed, off).not.toContain(off)
+    fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'bigger please' } })
+    fireEvent.click(sendButton())
+    await waitFor(() => expect(submitted).toHaveLength(1))
+    const r = submitted[0] as unknown as Record<string, unknown> & { context: { items: { key: string; label: string; value: string; why: string }[]; taps: { label: string; at: string }[]; routes: { route: string; at: string }[] } }
+    expect(r.context.taps).toEqual([])
+    expect(r.context.routes).toEqual([])
+    expect(r.context.items.map((i) => i.key)).not.toContain('device')
+    expect((r.diagnostics as Record<string, string>).device).toBeUndefined() // off means off everywhere
+    const dest = { repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }
+    const composed = composeIssue(r, { appName: 'notes' })
+    expect(whatGoes(r, dest).map((g) => g.key)).toEqual(composed.carries)
+    expect(composed.body).not.toMatch(/Last taps|Pages visited|Open the chart|Your device/)
+    tapped.remove()
+    resetContext() // turning off holds for the page; the next test starts a fresh one
+  })
+
+  it('an app note sits under the list, before Send, and never replaces it', async () => {
+    const note = 'The people who fix this are outside your family. A photo or video of your child goes too, and a video keeps where it was filmed.'
+    const { adapters } = await setup({
+      words: { app: `note${++n}`, owner: 'Alex', text: { destinationNote: note } },
+      destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }),
+    })
+    await sheet(adapters)
+    const goes = await waitFor(() => { const g = document.querySelector('[data-sac-goes]'); expect(g).toBeTruthy(); return g as HTMLElement })
+    const shown = document.querySelector('[data-sac-note]') as HTMLElement
+    expect(shown.textContent).toBe(note)
+    expect(goes.querySelector('.sac-goes-list')).toBeTruthy() // the list is still there
+    expect(goes.compareDocumentPosition(shown) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy() // after the list
+    expect(shown.compareDocumentPosition(sendButton()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy() // before Send
+    cleanup()
+    // with no destination the note sits under the one line the same way; with no note nothing extra renders
+    const plain = await setup({ words: { app: `note${++n}`, owner: 'Alex', text: { destinationNote: note } } })
+    await sheet(plain.adapters)
+    expect(document.querySelector('[data-sac-summary]')).toBeTruthy()
+    expect(document.querySelector('[data-sac-note]')!.textContent).toBe(note)
+    cleanup()
+    const none = await setup()
+    await sheet(none.adapters)
+    expect(document.querySelector('[data-sac-note]')).toBeNull()
   })
 
   it('a destination that answers nothing keeps today\'s line', async () => {

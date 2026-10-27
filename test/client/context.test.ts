@@ -96,6 +96,30 @@ describe('the trail, kept in memory from the moment the module mounts', () => {
     expect(contextTrail().taps.filter((t) => t.label === 'Twice?')).toHaveLength(1) // and both copies see the one trail
   })
 
+  it('never takes text from an element marked data-private, or anything inside one', () => {
+    document.body.innerHTML = `
+      <ul data-private><li><button id="kid">Mia's checkup</button></li></ul>
+      <button id="named" data-private aria-label="Open Mia's chart">Mia</button>
+      <button id="mixed">Visit for <span data-private>Mia</span></button>
+      <button id="plain">Save</button>`
+    for (const id of ['kid', 'named', 'mixed', 'plain']) document.getElementById(id)!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    const labels = contextTrail().taps.map((t) => t.label)
+    expect(labels).toEqual(['something private', 'something private', 'Visit for', 'Save'])
+    expect(JSON.stringify(contextTrail())).not.toMatch(/Mia/)
+  })
+
+  it('an item turned off is never kept: taps, pages and errors off record nothing from then on, and forget what they had', () => {
+    document.body.innerHTML = '<button id="b">Before</button>'
+    document.getElementById('b')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    history.pushState({}, '', '/before-off')
+    installContextListeners({ off: ['taps', 'pages', 'errors'] })
+    expect(contextTrail()).toEqual({ routes: [], taps: [], errors: [] })
+    document.getElementById('b')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    history.pushState({}, '', '/after-off')
+    window.dispatchEvent(new ErrorEvent('error', { message: 'boom' }))
+    expect(contextTrail()).toEqual({ routes: [], taps: [], errors: [] })
+  })
+
   it('installs once, however many screens mount it', () => {
     installContextListeners(); installContextListeners()
     document.body.innerHTML = '<button id="b">Once</button>'
@@ -153,6 +177,17 @@ describe('collectContext', () => {
     const precise = await collectContext({ ...base(), precise: true })
     expect(getCurrentPosition).toHaveBeenCalledTimes(1)
     expect(precise.items.find((i) => i.key === 'place')!.value).toBe('41.878, -87.630')
+  })
+
+  it('an item the app turns off is never collected and never in the result, the trail included', async () => {
+    document.body.innerHTML = '<button id="b">Tap me</button>'
+    document.getElementById('b')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    history.pushState({}, '', '/somewhere')
+    const ctx = await collectContext({ ...base(), off: ['taps', 'pages', 'device', 'account'] })
+    expect(ctx.items.map((i) => i.key)).toEqual(['time', 'language', 'screen', 'appearance', 'connection', 'age'])
+    expect(ctx.taps).toEqual([])
+    expect(ctx.routes).toEqual([])
+    expect(JSON.stringify(ctx)).not.toMatch(/Tap me|somewhere|iPhone|Pat Okafor/)
   })
 
   it('carries the trail with it', async () => {

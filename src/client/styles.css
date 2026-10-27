@@ -58,6 +58,7 @@
 .sac-error { color: var(--sac-danger); margin: 0; }
 .sac-danger { color: var(--sac-danger); font-weight: 600; }
 .sac-goes p { margin: 0; }
+.sac-note { font-size: 0.8rem; margin: 0; color: var(--sac-fg); }
 .sac-goes-list { margin: 2px 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 2px 0; }
 .sac-goes-list li:not(:last-child)::after { content: " \00b7 "; white-space: pre; color: var(--sac-muted); }
 .sac-issue-link { color: var(--sac-accent); font-size: 0.9rem; }

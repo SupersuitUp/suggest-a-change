@@ -8,7 +8,7 @@ import type { StoreAdapter } from './reports.ts'
 import type { startTake } from './recorder.ts'
 import type { Words } from './words.ts'
 import type { Destination } from '../github/compose.ts'
-import type { AppContextItem } from './context.ts'
+import type { AppContextItem, ContextKey } from './context.ts'
 
 export type Role = 'operator' | 'member' | 'maintainer'
 export type Kind = 'change' | 'broken' | 'feedback'
@@ -84,8 +84,9 @@ export interface Adapters {
    *  (the same list the issue is written from); null or absent keeps the one-line note. */
   destination?(): Promise<SheetDestination | null>
   /** Anything app-specific that would help fix it, each with why it is shared (an item without a why is dropped). Or
-   *  `{ items?, precise? }`, where `precise: true` also asks the browser for the person's location (its permission prompt). */
-  context?: (() => Promise<AppContextItem[]>) | { items?(): Promise<AppContextItem[]>; precise?: boolean }
+   *  `{ items?, precise?, off? }`, where `precise: true` also asks the browser for the person's location (its permission
+   *  prompt) and `off` turns built-in items off: an item off is never collected, never listed and never in the issue. */
+  context?: (() => Promise<AppContextItem[]>) | { items?(): Promise<AppContextItem[]>; precise?: boolean; off?: readonly ContextKey[] }
   /** How to reach the sender, from what the app already knows. Shared by default to a private repo, off for a public one. */
   contact?(): Promise<Contact | null>
 }

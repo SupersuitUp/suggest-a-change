@@ -109,6 +109,9 @@ export interface Strings {
   issueLink: (n: number) => string
   /** The accessible name of the list of context, each row a tick box. */
   contextLegend: string
+  /** The app's own note, shown under the what-goes list (or the one line) and before Send, never instead of it: what
+   *  only the app can say about where a report goes and what it carries. Empty shows nothing. */
+  destinationNote: string
 }
 
 export const DEFAULT_STRINGS: Strings = {
@@ -199,6 +202,7 @@ export const DEFAULT_STRINGS: Strings = {
   movedToast: (words, note) => (note ? `Your suggestion: ${words}. ${note}` : `Your suggestion: ${words}`),
   issueLink: (n) => `Issue #${n}`,
   contextLegend: 'Also shared, so it can be fixed (untick anything to leave it out)',
+  destinationNote: '',
 }
 
 export function stringsFor(words: Words): Strings {
