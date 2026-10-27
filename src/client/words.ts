@@ -63,6 +63,7 @@ export interface Strings {
   mineTitle: string
   mineEmpty: string
   back: string
+  /** The microphone's name while idle. The key keeps its old name; a tap starts it, and holding works too. */
   holdToTalk: string
   stopTalking: string
   micDenied: string
@@ -143,9 +144,9 @@ export const DEFAULT_STRINGS: Strings = {
   optional: 'optional',
   sayItLegend: 'Say it',
   sayItLabel: 'Your suggestion',
-  sayItPlaceholder: 'What would you change? Type it, or hold the microphone and say it',
-  sayItPlaceholderBroken: 'What happened, what you expected, and how to make it happen again. Type it, or hold the microphone and say it',
-  sayItPlaceholderFeedback: 'Whatever is on your mind. Type it, or hold the microphone and say it',
+  sayItPlaceholder: 'What would you change? Type it, or tap the microphone and say it',
+  sayItPlaceholderBroken: 'What happened, what you expected, and how to make it happen again. Type it, or tap the microphone and say it',
+  sayItPlaceholderFeedback: 'Whatever is on your mind. Type it, or tap the microphone and say it',
   showItLegend: 'Show it',
   addImages: 'Add a screenshot or photo',
   addVideo: 'Add a short video',
@@ -174,8 +175,8 @@ export const DEFAULT_STRINGS: Strings = {
   mineTitle: 'My suggestions',
   mineEmpty: 'You have not sent a suggestion yet.',
   back: 'Back',
-  holdToTalk: 'Hold to talk',
-  stopTalking: 'Stop and keep the recording',
+  holdToTalk: 'Tap to talk',
+  stopTalking: 'Tap to stop',
   micDenied: 'The microphone could not be used. You can type it instead.',
   voiceUnavailable: 'Voice notes cannot be added here',
   loading: 'Loading',
