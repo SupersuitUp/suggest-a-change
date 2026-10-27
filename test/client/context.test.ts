@@ -129,6 +129,15 @@ describe('collectContext', () => {
     expect(JSON.stringify(ctx)).not.toMatch(/mk_7Hq2|secret/)
   })
 
+  it('rounds a fractional pixel ratio to two places, so the issue never shows float noise', async () => {
+    const was = window.devicePixelRatio
+    Object.defineProperty(window, 'devicePixelRatio', { value: 1.600000023841858, configurable: true })
+    try {
+      const ctx = await collectContext(base())
+      expect(ctx.items.find((i) => i.key === 'screen')!.value).toMatch(/, 1\.6x pixels$/)
+    } finally { Object.defineProperty(window, 'devicePixelRatio', { value: was, configurable: true }) }
+  })
+
   it('appends what the app adds with its own why, and drops an app item that does not say why', async () => {
     const ctx = await collectContext({ ...base(), extra: async () => [{ label: 'Plan', value: 'Pro, yearly', why: 'some features only exist on Pro' }, { label: 'No reason', value: 'x', why: '' }] })
     const added = ctx.items.filter((i) => i.key.startsWith('app:'))

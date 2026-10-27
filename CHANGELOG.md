@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 (2026-10-26)
+
+- The pixel ratio in a report's context is rounded to two places (it read `1.600000023841858x` on a real Mac).
+
 ## 0.2.1 (2026-10-26)
 
 - **The sheet says when a relay opens the issue.** `Destination` takes `via: 'direct' | 'relay'` and `relayApp` (the relay's app name as people see it). With `via: 'relay'`, `destinationWords` says "Opened by the Supersuit Suggestions app on GitHub, which says it came from <name>." instead of naming a GitHub account that does not open it ("Filed from <account>'s GitHub account."); without a name it says "came from you", without an app name "a suggestions app". The Helm is the first user: its own Mac's account usually cannot push to the repo, so Supersuit files through the relay.

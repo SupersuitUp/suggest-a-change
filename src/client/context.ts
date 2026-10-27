@@ -211,7 +211,7 @@ export async function collectContext(o: CollectOptions = {}): Promise<ReportCont
   add('device', 'Your device', await deviceWords(o.userAgent), 'so the fixer can try it on the same kind of device and browser')
   if (typeof window !== 'undefined') {
     const s = typeof screen === 'undefined' ? null : screen
-    add('screen', 'Screen and window', `${s ? `${s.width}x${s.height} screen, ` : ''}${window.innerWidth}x${window.innerHeight} window, ${window.devicePixelRatio || 1}x pixels`, 'how things are laid out depends on the size of the screen and window')
+    add('screen', 'Screen and window', `${s ? `${s.width}x${s.height} screen, ` : ''}${window.innerWidth}x${window.innerHeight} window, ${Math.round((window.devicePixelRatio || 1) * 100) / 100}x pixels`, 'how things are laid out depends on the size of the screen and window')
     const look = [media('(prefers-color-scheme: dark)') ? 'dark mode' : 'light mode', ...(media('(prefers-reduced-motion: reduce)') ? ['reduced motion'] : [])]
     add('appearance', 'Appearance', look.join(', '), 'some problems only show in dark mode or with animations turned down')
   }
