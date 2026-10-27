@@ -61,6 +61,13 @@
 .sac-note { font-size: 0.8rem; margin: 0; color: var(--sac-fg); }
 .sac-goes-list { margin: 2px 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 2px 0; }
 .sac-goes-list li:not(:last-child)::after { content: " \00b7 "; white-space: pre; color: var(--sac-muted); }
+/* The fold over the itemized list of what goes: a quiet text-weight toggle, still a 44px target. */
+.sac-fold { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; border-color: transparent; background: transparent; padding-left: 0; color: var(--sac-muted); font-size: 0.9rem; margin: 2px 0 0; }
+.sac-fold-mark { width: 0; height: 0; border-top: 5px solid transparent; border-bottom: 5px solid transparent; border-left: 6px solid currentColor; }
+.sac-fold[aria-expanded="true"] .sac-fold-mark { transform: rotate(90deg); }
+.sac-fold-body { display: flex; flex-direction: column; gap: 4px; }
+.sac-goes-opts { margin: 0; padding: 0; list-style: none; }
+.sac-goes-opt label { display: block; min-height: 44px; padding: 4px 0; box-sizing: border-box; }
 .sac-issue-link { color: var(--sac-accent); font-size: 0.9rem; }
 .sac-receipt-line { font-weight: 600; margin: 0; }
 .sac-strip { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
@@ -79,4 +86,4 @@
 .sac-entry-why { margin-left: 8px; color: var(--sac-muted); font-size: 0.9rem; }
 .sac-sheet :focus-visible, .sac-entry:focus-visible, .sac-button:focus-visible, .sac-record:focus-visible, .sac-row-button:focus-visible { outline: 3px solid var(--sac-focus); outline-offset: 2px; }
 @media (min-width: 640px) { .sac-backdrop { align-items: center; } .sac-sheet { border-radius: var(--sac-radius); } }
-@media (prefers-reduced-motion: no-preference) { .sac-voice[data-recording] .sac-record { transition: box-shadow 0.15s; } }
+@media (prefers-reduced-motion: no-preference) { .sac-voice[data-recording] .sac-record { transition: box-shadow 0.15s; } .sac-fold-mark { transition: transform 0.15s; } }

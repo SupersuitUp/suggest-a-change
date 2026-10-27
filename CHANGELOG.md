@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4 (2026-10-26)
+
+- **The list of what a suggestion carries is folded by default.** With a destination, the sheet above Send says one line, "Files an issue on <repo> (private)" or, in `--sac-danger` and never folded, "(public: anyone can read it)", then a toggle "What it carries (N)" counting what will go (the always rows plus each ticked one). Tapping it opens the full list with its tick boxes, reasons and account line; unticking inside still leaves an item out and lowers the count. Without a destination the tick boxes fold under the one line as "Also shared (N)". The toggle is a `<button aria-expanded aria-controls>` with a 44px target (`.sac-fold`); the app's `destinationNote` stays visible outside the fold. New replaceable words: `filesOn`, `privateShort`, `publicShort`, `carriesToggle`, `alsoSharedToggle`, `carriesLead`. `destinationWords` is unchanged. Earned by the operator's read of the open list on a phone: "it's a little bit disturbing with all the checkboxes shown."
+
 ## 0.2.3 (2026-10-26)
 
 - **An app can turn any built-in context item off.** `context: { items?, precise?, off: ContextKey[] }`, with keys `taps`, `pages`, `errors`, `time`, `language`, `device`, `screen`, `appearance`, `connection`, `age`, `account` (`CONTEXT_KEYS`, `contextOff`). An item off is never collected (the trail keeps nothing of it from the first mount and forgets what it had), never listed by the sheet, and never in the report or the issue; `device`, `screen` and `time` off drop the matching diagnostic too. `installContextListeners({ off })` and `collectContext({ off })` take the same list. Earned by a family app whose taps were a child's name, a visit or a medicine: it stripped taps on its server while the sheet still promised "your last taps".

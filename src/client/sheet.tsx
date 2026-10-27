@@ -92,6 +92,9 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
   const [ctx, setCtx] = useState<ReportContext | null>(null)
   const [contact, setContact] = useState<Contact | null>(null)
   const [choice, setChoice] = useState<Record<string, boolean>>({})
+  // The itemized list of what goes, with its tick boxes, is folded until the person opens it: a wall of checkboxes was
+  // "a little bit disturbing" (the operator, 2026-10-26). Where it files, and a public repo's warning, are never folded.
+  const [open, setOpen] = useState(false)
   // Where it files, asked once when the sheet opens; until it answers (or with none) the one-line note stays.
   useEffect(() => {
     if (!adapters.destination) return
@@ -325,6 +328,15 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     </li>
   )
 
+  // What the fold's toggle counts: everything that will go, the always rows plus each ticked one.
+  const goingCount = (list: GoesItem[]) => list.filter((g) => !g.optional || isOn(g.key)).length
+  const foldId = `${titleId}-fold`
+  const foldToggle = (label: string) => (
+    <button type="button" className="sac-button sac-fold" aria-expanded={open} aria-controls={foldId} data-sac-fold="" onClick={() => setOpen((o) => !o)}>
+      <span className="sac-fold-mark" aria-hidden="true" />{label}
+    </button>
+  )
+
   const hasAnything = Boolean(words.trim() || voice.length || media.length)
 
   async function send() {
@@ -466,16 +478,26 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
 
             {goes && destWords ? (
               <div className="sac-goes sac-fyi" data-sac-goes="">
-                <p className="sac-goes-head"><strong>{destWords.headline}</strong>{' ('}<span className={destWords.danger ? 'sac-danger' : 'sac-muted'}>{destWords.privacy}</span>)</p>
-                <p className="sac-muted">It will carry:</p>
-                <ul className="sac-goes-list">{goes.filter((g) => !g.optional).map((g) => <li key={g.key} data-goes={g.key}>{g.text}</li>)}</ul>
-                {goes.some((g) => g.optional) ? <ul className="sac-goes-opts" aria-label={S.contextLegend}>{goes.filter((g) => g.optional).map(optionalRow)}</ul> : null}
-                <p className="sac-muted">{destWords.account}</p>
+                <p className="sac-goes-head" data-sac-where="">{S.filesOn(dest!.repo)}{' ('}<span className={destWords.danger ? 'sac-danger' : 'sac-muted'}>{destWords.danger ? S.publicShort : S.privateShort}</span>)</p>
+                {foldToggle(S.carriesToggle(goingCount(goes)))}
+                {open ? (
+                  <div id={foldId} className="sac-fold-body">
+                    <p className="sac-muted">{S.carriesLead}</p>
+                    <ul className="sac-goes-list">{goes.filter((g) => !g.optional).map((g) => <li key={g.key} data-goes={g.key}>{g.text}</li>)}</ul>
+                    {goes.some((g) => g.optional) ? <ul className="sac-goes-opts" aria-label={S.contextLegend}>{goes.filter((g) => g.optional).map(optionalRow)}</ul> : null}
+                    <p className="sac-muted">{destWords.account}</p>
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div className="sac-fyi">
                 <p className="sac-muted sac-fyi" data-sac-summary="">{summary}</p>
-                {rows.some((g) => g.optional) ? <ul className="sac-goes-opts" aria-label={S.contextLegend}>{rows.filter((g) => g.optional).map(optionalRow)}</ul> : null}
+                {rows.some((g) => g.optional) ? foldToggle(S.alsoSharedToggle(rows.filter((g) => g.optional && isOn(g.key)).length)) : null}
+                {open && rows.some((g) => g.optional) ? (
+                  <div id={foldId} className="sac-fold-body">
+                    <ul className="sac-goes-opts" aria-label={S.contextLegend}>{rows.filter((g) => g.optional).map(optionalRow)}</ul>
+                  </div>
+                ) : null}
               </div>
             )}
 
