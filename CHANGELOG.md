@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 (2026-10-26)
+
+- **An app can turn any built-in context item off.** `context: { items?, precise?, off: ContextKey[] }`, with keys `taps`, `pages`, `errors`, `time`, `language`, `device`, `screen`, `appearance`, `connection`, `age`, `account` (`CONTEXT_KEYS`, `contextOff`). An item off is never collected (the trail keeps nothing of it from the first mount and forgets what it had), never listed by the sheet, and never in the report or the issue; `device`, `screen` and `time` off drop the matching diagnostic too. `installContextListeners({ off })` and `collectContext({ off })` take the same list. Earned by a family app whose taps were a child's name, a visit or a medicine: it stripped taps on its server while the sheet still promised "your last taps".
+- **`data-private`.** A tap on an element marked `data-private`, or inside one, is kept only as "something private", and a button's `data-private` parts are left out of its label.
+- **The app's own note beside the list.** `words.text.destinationNote` renders under the what-goes list (or the one line), before Send, in `.sac-note`, never replacing the list, so an app that turns `destination()` on no longer loses its consent sentence.
+
 ## 0.2.2 (2026-10-26)
 
 - The pixel ratio in a report's context is rounded to two places (it read `1.600000023841858x` on a real Mac).

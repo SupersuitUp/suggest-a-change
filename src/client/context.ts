@@ -2,7 +2,9 @@
 // for the person sending, why it is shared; the sheet lists them all, on by default, and any one can be left out.
 //
 // The trail (the last pages, taps and errors) is kept from the moment the module first mounts, in memory only, in
-// small ring buffers. NEVER captured: what anyone typed (an input's value), cookies, storage, or a query string.
+// small ring buffers. NEVER captured: what anyone typed (an input's value), cookies, storage, or a query string, nor
+// any text of an element marked `data-private` or inside one. An app turns any built-in item off (`ContextKey`): an item
+// off is never kept, never listed and never sent.
 import type { Identity } from './adapters.ts'
 
 export interface ContextItem { key: string; label: string; value: string; why: string }
@@ -11,14 +13,20 @@ export interface ReportContext extends Trail { items: ContextItem[] }
 /** What an app adds through the `context` adapter: anything app-specific, each with why it helps. */
 export interface AppContextItem { label: string; value: string; why: string }
 
+/** Every built-in item an app can turn off. `pages`, `taps` and `errors` are the trail; the rest are the items' keys. */
+export const CONTEXT_KEYS = ['taps', 'pages', 'errors', 'time', 'language', 'device', 'screen', 'appearance', 'connection', 'age', 'account'] as const
+export type ContextKey = typeof CONTEXT_KEYS[number]
+
 const MAX = { routes: 10, taps: 20, errors: 10, items: 40 }
 // ONE trail per page, however many copies of the module a host bundles: the state lives on the global object under a
 // registered symbol, so a second copy finds the first one's listeners installed and shares its trail.
-type Shared = { trail: Trail; installedAt: number; undo: (() => void) | null }
+type Shared = { trail: Trail; installedAt: number; undo: (() => void) | null; off?: Set<string> }
 const SHARED = Symbol.for('@supersuit/suggest-a-change/context')
 const shared: Shared = ((globalThis as Record<symbol, unknown>)[SHARED] as Shared | undefined)
   ?? ((globalThis as Record<symbol, unknown>)[SHARED] = { trail: { routes: [], taps: [], errors: [] }, installedAt: 0, undo: null }) as Shared
 const trail = shared.trail
+// What the app turned off, for the page: once off, the listeners keep nothing of it until a reset.
+const offSet = () => (shared.off ??= new Set())
 
 const clip = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1).trimEnd()}…`)
 const iso = () => new Date().toISOString()
@@ -44,15 +52,30 @@ const routeOf = (href: string) => {
 }
 
 function recordRoute() {
-  if (typeof location === 'undefined') return
+  if (typeof location === 'undefined' || offSet().has('pages')) return
   const route = routeOf(location.href)
   if (trail.routes.at(-1)?.route === route) return
   push(trail.routes, { route: clip(route, 300), at: iso() }, MAX.routes)
 }
 
-/** What a tapped thing is called: its label or its text, never what was typed into it. */
+const PRIVATE = '[data-private]:not([data-private="false"])'
+/** An element's text with every `data-private` part left out. */
+function publicText(el: Element): string {
+  let out = ''
+  const walk = (n: Node) => {
+    if (n.nodeType === 3) out += n.textContent ?? ''
+    else if (n instanceof Element && !n.matches(PRIVATE)) n.childNodes.forEach(walk)
+    else if (!(n instanceof Element)) n.childNodes.forEach(walk)
+  }
+  el.childNodes.forEach(walk)
+  return out
+}
+
+/** What a tapped thing is called: its label or its text, never what was typed into it, and never the text of
+ *  anything marked `data-private` (a child's name on a button): a tap there is only "something private". */
 function labelOf(target: EventTarget | null): string | null {
   if (!(target instanceof Element)) return null
+  if (target.closest(PRIVATE)) return 'something private'
   // Anything someone types into is "a text field", by its own label at most and never its text: an editable region,
   // a text, search or combo box, wherever inside it the tap landed.
   const typing = target.closest('[contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="searchbox"], [role="combobox"]')
@@ -69,7 +92,8 @@ function labelOf(target: EventTarget | null): string | null {
     return type === 'checkbox' ? 'a checkbox' : type === 'radio' ? 'a choice' : type === 'button' || type === 'submit' ? clip(el.value ? 'a button' : 'a button', 60) : 'a text field'
   }
   if (aria) return clip(aria, 60)
-  const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim()
+  if (el.closest(PRIVATE)) return 'something private'
+  const text = publicText(el).replace(/\s+/g, ' ').trim()
   if (text) return clip(text, 60)
   const title = el.getAttribute('title')?.trim()
   return title ? clip(title, 60) : el.tagName.toLowerCase()
@@ -82,17 +106,30 @@ const firstFrame = (stack: unknown): string | undefined => {
 }
 const messageOf = (x: unknown): string => (x instanceof Error ? x.message : typeof x === 'string' ? x : x === undefined ? '' : typeof x === 'number' || typeof x === 'boolean' ? String(x) : '[object]')
 function recordError(message: string, stack?: unknown) {
+  if (offSet().has('errors')) return
   push(trail.errors, { message: clip(withoutQueries(message || 'An error with no message'), 300), ...(firstFrame(stack) ? { frame: firstFrame(stack) } : {}), at: iso() }, MAX.errors)
 }
 
-/** Starts keeping the trail. Idempotent: every screen of the module calls it on mount, and it installs once. */
-export function installContextListeners(): void {
+/** Empties the parts of the trail an app turned off. */
+function forgetOff() {
+  const off = offSet()
+  if (off.has('pages')) trail.routes.length = 0
+  if (off.has('taps')) trail.taps.length = 0
+  if (off.has('errors')) trail.errors.length = 0
+}
+
+/** Starts keeping the trail. Idempotent: every screen of the module calls it on mount, and it installs once. `off`
+ *  turns trail items off for the page (`taps`, `pages`, `errors`): from then on nothing of them is kept, and what was
+ *  kept is forgotten. */
+export function installContextListeners(o: { off?: readonly string[] } = {}): void {
+  for (const k of o.off ?? []) offSet().add(k)
+  forgetOff()
   if (shared.undo || typeof window === 'undefined' || typeof document === 'undefined') return
   shared.installedAt = Date.now()
   // A wrapper a host put on top of ours may outlive a reset; once reset, ours only passes the call through.
   let live = true
   recordRoute()
-  const onClick = (e: Event) => { const l = labelOf(e.target); if (l) push(trail.taps, { label: l, at: iso() }, MAX.taps) }
+  const onClick = (e: Event) => { if (offSet().has('taps')) return; const l = labelOf(e.target); if (l) push(trail.taps, { label: l, at: iso() }, MAX.taps) }
   const onError = (e: Event) => { const ev = e as ErrorEvent; recordError(ev.message || messageOf(ev.error), (ev.error as { stack?: unknown } | undefined)?.stack) }
   const onRejection = (e: Event) => { const reason = (e as PromiseRejectionEvent).reason; recordError(`Unhandled rejection: ${messageOf(reason)}`, (reason as { stack?: unknown } | undefined)?.stack) }
   const onNav = () => recordRoute()
@@ -129,6 +166,7 @@ export function installContextListeners(): void {
 /** Stops keeping the trail and forgets it (tests, and a host that signs someone out). */
 export function resetContext(): void {
   shared.undo?.(); shared.undo = null
+  offSet().clear()
   trail.routes.length = 0; trail.taps.length = 0; trail.errors.length = 0
 }
 
@@ -196,19 +234,28 @@ export interface CollectOptions {
   /** A user agent to read instead of the browser's (tests). */
   userAgent?: string
   now?: () => number
+  /** Built-in items the app turned off: never collected, so never listed and never sent. */
+  off?: readonly ContextKey[]
+}
+
+/** The `off` list from the `context` adapter, whatever form it takes; unknown keys are ignored. */
+export function contextOff(c: unknown): ContextKey[] {
+  const off = c && typeof c === 'object' ? (c as { off?: unknown }).off : undefined
+  return Array.isArray(off) ? off.filter((k): k is ContextKey => (CONTEXT_KEYS as readonly string[]).includes(k)) : []
 }
 
 /** Everything the module knows that would help fix it, each item with why it is shared, and the trail. */
 export async function collectContext(o: CollectOptions = {}): Promise<ReportContext> {
   const now = new Date(o.now?.() ?? Date.now())
   const items: ContextItem[] = []
-  const add = (key: string, label: string, value: string | undefined | null, why: string) => { if (value) items.push({ key, label: clip(label, 80), value: clip(value, 500), why: clip(why, 200) }) }
+  const off = new Set<string>(o.off ?? [])
+  const add = (key: string, label: string, value: string | undefined | null, why: string) => { if (off.has(key)) return; if (value) items.push({ key, label: clip(label, 80), value: clip(value, 500), why: clip(why, 200) }) }
   const who = o.identity as (Identity & { name?: string; username?: string }) | null | undefined
   add('account', 'Your name in the app', who?.name || who?.username, 'so whoever fixes it knows who to thank, and can look at your account if the problem is in it')
   add('time', 'Your local time', timeWords(now), 'so the fixer can line it up with what the app logged at that moment')
   const langs = typeof navigator === 'undefined' ? [] : (navigator.languages?.length ? [...navigator.languages] : navigator.language ? [navigator.language] : [])
   add('language', 'Your languages', langs.join(', '), 'some problems only happen in one language or date format')
-  add('device', 'Your device', await deviceWords(o.userAgent), 'so the fixer can try it on the same kind of device and browser')
+  add('device', 'Your device', off.has('device') ? '' : await deviceWords(o.userAgent), 'so the fixer can try it on the same kind of device and browser')
   if (typeof window !== 'undefined') {
     const s = typeof screen === 'undefined' ? null : screen
     add('screen', 'Screen and window', `${s ? `${s.width}x${s.height} screen, ` : ''}${window.innerWidth}x${window.innerHeight} window, ${Math.round((window.devicePixelRatio || 1) * 100) / 100}x pixels`, 'how things are laid out depends on the size of the screen and window')
@@ -239,5 +286,6 @@ export async function collectContext(o: CollectOptions = {}): Promise<ReportCont
       })
     } catch { /* the app's own context failing never blocks a suggestion */ }
   }
-  return { items: items.slice(0, MAX.items), ...contextTrail() }
+  const t = contextTrail()
+  return { items: items.slice(0, MAX.items), routes: off.has('pages') ? [] : t.routes, taps: off.has('taps') ? [] : t.taps, errors: off.has('errors') ? [] : t.errors }
 }
