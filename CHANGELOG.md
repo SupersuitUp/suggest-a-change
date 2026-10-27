@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5 (2026-10-26)
+
+- **A tap on the microphone records.** `DefaultField` was hold-only: on a tap the release ended the take before the microphone had answered, so nothing was recorded and nothing said to hold (seen on iPhone Safari). Now a press shorter than 350 ms starts a take that keeps recording until the next tap (or the time limit), and a longer press records until it is let go. Leaving the button, or a pointer the browser cancels (iOS Safari does when its permission prompt appears), never ends a tapped take. `startTake` is still called synchronously inside the press, with nothing awaited before it. While recording the dot turns to a stop square and pulses (under `prefers-reduced-motion: no-preference`).
+- **The microphone sits inside its text box.** Bottom right of a text area, centred at the right of a one-line input, a 44px target, with the box's padding keeping text clear of it (`.sac-voice-box`, `.sac-voice-multi`, `.sac-voice-single`). The `[data-voice-field]` / `[data-voice-control]` contract is unchanged.
+- **Words.** `holdToTalk` now defaults to "Tap to talk", `stopTalking` to "Tap to stop", and the placeholders say "tap the microphone and say it". The keys keep their names.
+
 ## 0.2.4 (2026-10-26)
 
 - **The list of what a suggestion carries is folded by default.** With a destination, the sheet above Send says one line, "Files an issue on <repo> (private)" or, in `--sac-danger` and never folded, "(public: anyone can read it)", then a toggle "What it carries (N)" counting what will go (the always rows plus each ticked one). Tapping it opens the full list with its tick boxes, reasons and account line; unticking inside still leaves an item out and lowers the count. Without a destination the tick boxes fold under the one line as "Also shared (N)". The toggle is a `<button aria-expanded aria-controls>` with a 44px target (`.sac-fold`); the app's `destinationNote` stays visible outside the fold. New replaceable words: `filesOn`, `privateShort`, `publicShort`, `carriesToggle`, `alsoSharedToggle`, `carriesLead`. `destinationWords` is unchanged. Earned by the operator's read of the open list on a phone: "it's a little bit disturbing with all the checkboxes shown."

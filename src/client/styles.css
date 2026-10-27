@@ -37,11 +37,22 @@
 .sac-select { font: inherit; font-size: 16px; min-height: 36px; padding: 4px 10px; color: inherit; background: var(--sac-bg); border: 1px solid var(--sac-border); border-radius: var(--sac-radius); }
 /* Saying it is the sheet's biggest thing, whatever field the host puts in it. */
 .sac-sayit textarea { min-height: 9rem; }
-.sac-voice { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.sac-voice { min-width: 0; }
 .sac-input, .sac-voice textarea, .sac-voice input { flex: 1; min-width: 0; min-height: 44px; font: inherit; font-size: 16px; color: inherit; background: var(--sac-bg); border: 1px solid var(--sac-border); border-radius: var(--sac-radius); padding: 10px 12px; box-sizing: border-box; }
 .sac-record { flex: none; width: 48px; height: 48px; min-width: 44px; min-height: 44px; border-radius: 50%; border: 1px solid var(--sac-border); background: var(--sac-bg); display: grid; place-items: center; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; cursor: pointer; }
 .sac-record-dot { width: 18px; height: 18px; border-radius: 50%; background: var(--sac-danger); }
 .sac-voice[data-recording] .sac-record { border-color: var(--sac-danger); box-shadow: 0 0 0 4px color-mix(in srgb, var(--sac-danger) 25%, transparent); }
+/* Recording: the dot becomes a stop square, so a tapped take reads as "tap to stop". */
+.sac-voice[data-recording] .sac-record-dot { border-radius: 3px; width: 16px; height: 16px; }
+/* The microphone sits inside its text box: bottom right of a text area, centred at the right of a one-line input.
+   The box keeps its text clear of it. */
+.sac-voice-box { position: relative; display: flex; min-width: 0; }
+.sac-voice-box > textarea, .sac-voice-box > input { padding-right: 60px; }
+.sac-voice-multi > textarea { padding-bottom: 56px; }
+.sac-voice-single > input { min-height: 56px; }
+.sac-voice-box > .sac-record { position: absolute; right: 6px; }
+.sac-voice-multi > .sac-record { bottom: 6px; }
+.sac-voice-single > .sac-record { top: 50%; transform: translateY(-50%); }
 .sac-button, .sac-entry, .sac-row-button { font: inherit; font-size: 16px; min-height: 44px; min-width: 44px; padding: 8px 14px; border-radius: var(--sac-radius); border: 1px solid var(--sac-border); background: var(--sac-bg); color: var(--sac-fg); cursor: pointer; }
 .sac-primary { background: var(--sac-accent); color: var(--sac-accent-fg); border-color: var(--sac-accent); }
 .sac-button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -86,4 +97,5 @@
 .sac-entry-why { margin-left: 8px; color: var(--sac-muted); font-size: 0.9rem; }
 .sac-sheet :focus-visible, .sac-entry:focus-visible, .sac-button:focus-visible, .sac-record:focus-visible, .sac-row-button:focus-visible { outline: 3px solid var(--sac-focus); outline-offset: 2px; }
 @media (min-width: 640px) { .sac-backdrop { align-items: center; } .sac-sheet { border-radius: var(--sac-radius); } }
-@media (prefers-reduced-motion: no-preference) { .sac-voice[data-recording] .sac-record { transition: box-shadow 0.15s; } .sac-fold-mark { transition: transform 0.15s; } }
+@keyframes sac-pulse { 0%, 100% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--sac-danger) 25%, transparent); } 50% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--sac-danger) 10%, transparent); } }
+@media (prefers-reduced-motion: no-preference) { .sac-voice[data-recording] .sac-record { transition: box-shadow 0.15s; animation: sac-pulse 1.4s ease-in-out infinite; } .sac-fold-mark { transition: transform 0.15s; } }

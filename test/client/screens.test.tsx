@@ -618,7 +618,7 @@ describe('the sheet', () => {
     const startTake = vi.fn(async (_s: unknown, key: string) => ({ started: 0, level: () => null, stop: async () => ({ key, blob, ms: 400 }), cancel: async () => {} }))
     const { adapters, submitted } = await setup({ Field: undefined, limits: { voiceMs: 100 }, startTake: startTake as unknown as Adapters['startTake'] })
     await sheet(adapters)
-    fireEvent.pointerDown(screen.getByRole('button', { name: 'Hold to talk: Your suggestion' }))
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Tap to talk: Your suggestion' }))
     await screen.findByText('Voice note 1, 0:00', undefined, { timeout: 2000 })
     fireEvent.click(sendButton())
     await waitFor(() => expect(submitted).toHaveLength(1))
@@ -972,9 +972,9 @@ describe('My suggestions and the detail view', () => {
       append: async (_i, more) => { order.push('append'); appended.push(more); return 'done' },
     })
     render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
-    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Hold to talk: Add to it' }))
-    await screen.findByRole('button', { name: /Stop and keep/ })
-    fireEvent.pointerUp(screen.getByRole('button', { name: /Stop and keep/ }))
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Tap to talk: Add to it' }))
+    fireEvent.pointerUp(screen.getByRole('button', { name: /Add to it/ })) // a tap: it keeps recording
+    fireEvent.pointerDown(await screen.findByRole('button', { name: /Tap to stop/ })) // the second tap stops it
     await screen.findByText('Voice note 1, 0:02')
     expect(order).toEqual([])
     expect((await db0.all('blobs')).map((b) => b.key).filter((k) => k.startsWith('take:'))).toEqual([])
@@ -1069,7 +1069,7 @@ describe('My suggestions and the detail view', () => {
     const startTake = vi.fn(async () => { throw new Error('denied') })
     const { adapters } = await setup({ Field: undefined, startTake: startTake as unknown as Adapters['startTake'] }, SAM, { one: async (id) => ({ id, status: 'received', words: 'w' }) })
     render(<SuggestionDetail adapters={adapters} id="r-20261012120000-abcdef" />)
-    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Hold to talk: Add to it' }))
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Tap to talk: Add to it' }))
     expect(await screen.findByText('The microphone could not be used. You can type it instead.')).toBeTruthy()
   })
 
@@ -1129,18 +1129,68 @@ describe('the default field', () => {
     const startTake = vi.fn(async (_s: unknown, key: string) => ({ started: 0, level: () => null, stop: async () => ({ key, blob, ms }), cancel: async () => {} }))
     return { startTake: startTake as unknown as FieldProps['startTake'] }
   }
-  it('records while the button is held and hands the take to upload; transcription is not its job', async () => {
+  it('a long press records until release and hands the take to upload; transcription is not its job', async () => {
     const store = await openStore(`field-${++n}`)
     const { startTake } = fakeTake()
     const upload = vi.fn(async (_k: string, _b: Blob, _ms: number) => ({ audio: 'k', text: '' }))
     const onChange = vi.fn()
     render(<DefaultField rt={{ store }} id="words" label="Your suggestion" value="" onChange={onChange} upload={upload} startTake={startTake} />)
-    fireEvent.pointerDown(screen.getByRole('button', { name: /Hold to talk/ }))
-    await waitFor(() => expect(screen.getByRole('button', { name: /Stop and keep/ }).getAttribute('aria-pressed')).toBe('true'))
-    fireEvent.pointerUp(screen.getByRole('button', { name: /Stop and keep/ }))
+    fireEvent.pointerDown(screen.getByRole('button', { name: /Tap to talk/ }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /Tap to stop/ }).getAttribute('aria-pressed')).toBe('true'))
+    await new Promise((r) => setTimeout(r, 420)) // held past a tap
+    expect(upload).not.toHaveBeenCalled()
+    fireEvent.pointerUp(screen.getByRole('button', { name: /Tap to stop/ }))
     await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
     expect(upload.mock.calls[0][2]).toBe(1500)
     expect(onChange).not.toHaveBeenCalled()
+  })
+  it('a short tap starts a take that keeps recording, and a second tap stops and uploads it', async () => {
+    const store = await openStore(`field-${++n}`)
+    const { startTake } = fakeTake()
+    const upload = vi.fn(async (_k: string, _b: Blob, _ms: number) => ({ audio: 'k', text: '' }))
+    render(<DefaultField rt={{ store }} id="words" label="Say" value="" onChange={() => {}} upload={upload} startTake={startTake} />)
+    const button = screen.getByRole('button')
+    // a tap: the release comes before the microphone has even answered, and must not cancel the take
+    fireEvent.pointerDown(button)
+    expect(startTake).toHaveBeenCalledTimes(1) // asked inside the gesture, with nothing awaited first (iOS Safari)
+    fireEvent.pointerUp(button)
+    await waitFor(() => expect(button.getAttribute('aria-pressed')).toBe('true'))
+    expect(button.getAttribute('aria-label')).toBe('Tap to stop: Say')
+    await new Promise((r) => setTimeout(r, 50))
+    expect(upload).not.toHaveBeenCalled()
+    expect(button.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.pointerDown(button)
+    fireEvent.pointerUp(button)
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+    expect(button.getAttribute('aria-pressed')).toBe('false')
+    expect(startTake).toHaveBeenCalledTimes(1)
+  })
+  it('leaving the button, or a cancelled pointer (the permission prompt), during a tapped take does not stop it', async () => {
+    const store = await openStore(`field-${++n}`)
+    const { startTake } = fakeTake()
+    const upload = vi.fn(async (_k: string, _b: Blob, _ms: number) => ({ audio: 'k', text: '' }))
+    render(<DefaultField rt={{ store }} id="words" label="Say" value="" onChange={() => {}} upload={upload} startTake={startTake} />)
+    const button = screen.getByRole('button')
+    fireEvent.pointerDown(button)
+    fireEvent.pointerCancel(button)
+    await waitFor(() => expect(button.getAttribute('aria-pressed')).toBe('true'))
+    fireEvent.pointerLeave(button)
+    fireEvent.pointerCancel(button)
+    await new Promise((r) => setTimeout(r, 50))
+    expect(button.getAttribute('aria-pressed')).toBe('true')
+    expect(upload).not.toHaveBeenCalled()
+  })
+  it('the voice control sits inside the text box, for a text area and for a one-line input', async () => {
+    const store = await openStore(`field-${++n}`)
+    const { container } = render(<DefaultField rt={{ store }} id="words" label="Say" value="" onChange={() => {}} upload={async () => ({ audio: 'k', text: '' })} multiline />)
+    const box = container.querySelector('[data-voice-field] .sac-voice-box')!
+    expect(box.querySelector('textarea')).toBeTruthy()
+    expect(box.querySelector('[data-voice-control]')).toBeTruthy()
+    cleanup()
+    const one = render(<DefaultField rt={{ store }} id="name" label="Name" value="" onChange={() => {}} upload={async () => ({ audio: 'k', text: '' })} />)
+    const box1 = one.container.querySelector('[data-voice-field] .sac-voice-box')!
+    expect(box1.querySelector('input')).toBeTruthy()
+    expect(box1.querySelector('[data-voice-control]')).toBeTruthy()
   })
   it('can be used from the keyboard: Space starts a take and Space stops it', async () => {
     const store = await openStore(`field-${++n}`)

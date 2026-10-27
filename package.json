@@ -1,6 +1,6 @@
 {
   "name": "@supersuit/suggest-a-change",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "The report format and flow behind a Suggest a change button: what a report is, who acts at each step, the screens, and the check every app runs. The contract has zero dependencies.",
   "type": "module",
   "bin": {
