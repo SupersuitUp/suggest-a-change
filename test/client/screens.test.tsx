@@ -86,6 +86,9 @@ const record = () => fireEvent.click(screen.getByRole('button', { name: 'Say it:
 const png = (name: string, size = 2048) => new File([new Uint8Array(size)], name, { type: 'image/png' })
 const images = () => document.querySelector<HTMLInputElement>('[data-sac-images]')!
 const video = () => document.querySelector<HTMLInputElement>('[data-sac-video]')!
+// The itemized list of what a suggestion carries is folded by default (the operator, 2026-10-26): open it to reach the tick boxes.
+const foldToggle = () => screen.findByRole('button', { name: /^(What it carries|Also shared) \(\d+\)$/ })
+const openFold = async () => { const t = await foldToggle(); if (t.getAttribute('aria-expanded') !== 'true') fireEvent.click(t); return t }
 
 describe('the sheet', () => {
   it('a voice note alone is a whole report', async () => {
@@ -186,9 +189,9 @@ describe('the sheet', () => {
     await sheet(adapters)
     const goes = await waitFor(() => { const g = document.querySelector('[data-sac-goes]'); expect(g).toBeTruthy(); return g as HTMLElement })
     expect(document.querySelector('[data-sac-summary]')).toBeNull()
-    expect(goes.textContent).toContain('Sending this files an issue on acme/app')
-    expect(goes.textContent).toContain("private: people with access to acme/app's code can read it")
+    expect(goes.querySelector('[data-sac-where]')!.textContent).toBe('Files an issue on acme/app (private)')
     expect(goes.querySelector('.sac-danger')).toBeNull()
+    await openFold()
     expect(goes.textContent).toContain("Filed from sam-gh's GitHub account.")
     const items = () => [...goes.querySelectorAll('.sac-goes-list > li')].map((li) => li.textContent)
     // What always goes, in order; the context rows (device, time and the rest) follow as tick boxes.
@@ -204,14 +207,16 @@ describe('the sheet', () => {
     const { adapters } = await setup({ destination: async () => ({ repo: 'acme/open', public: true, account: 'sam-gh', attaches: false }) })
     await sheet(adapters)
     const danger = await waitFor(() => { const d = document.querySelector('[data-sac-goes] .sac-danger'); expect(d).toBeTruthy(); return d! })
-    expect(danger.textContent).toBe('public: anyone on the internet can read this')
+    expect(danger.textContent).toBe('public: anyone can read it')
     fireEvent.change(images(), { target: { files: [png('a.png')] } })
+    await openFold()
     await screen.findByText('1 screenshot, added once acme/open can take attachments')
   })
 
   it('every piece of context is listed with its value and why, on by default, and one left out never leaves the phone', async () => {
     const { adapters, submitted } = await setup({ destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }) })
     await sheet(adapters)
+    await openFold()
     const device = await screen.findByRole('checkbox', { name: /Your device/ }) as HTMLInputElement
     expect(device.checked).toBe(true)
     expect(device.closest('label')!.textContent).toMatch(/so the fixer can/)
@@ -231,6 +236,7 @@ describe('the sheet', () => {
   it('with no destination, the context is still listed and can be left out', async () => {
     const { adapters, submitted } = await setup()
     await sheet(adapters)
+    await openFold()
     fireEvent.click(await screen.findByRole('checkbox', { name: /Your local time/ }))
     fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
     fireEvent.click(sendButton())
@@ -242,6 +248,7 @@ describe('the sheet', () => {
   it('what the app adds through context() is listed with its own why', async () => {
     const { adapters, submitted } = await setup({ context: async () => [{ label: 'Plan', value: 'Pro, yearly', why: 'some features only exist on Pro' }] })
     await sheet(adapters)
+    await openFold()
     const plan = await screen.findByRole('checkbox', { name: /Plan/ })
     expect(plan.closest('label')!.textContent).toContain('some features only exist on Pro')
     fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
@@ -254,6 +261,7 @@ describe('the sheet', () => {
     const contact = async () => ({ email: 'sam@example.com', handle: '@sam' })
     const priv = await setup({ contact, destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }) })
     await sheet(priv.adapters)
+    await openFold()
     expect(((await screen.findByRole('checkbox', { name: /How to reach you/ })) as HTMLInputElement).checked).toBe(true)
     fireEvent.change(screen.getByLabelText('Your suggestion'), { target: { value: 'x' } })
     fireEvent.click(sendButton())
@@ -262,6 +270,7 @@ describe('the sheet', () => {
     cleanup()
     const pub = await setup({ contact, destination: async () => ({ repo: 'acme/open', public: true, account: 'sam-gh', attaches: true }) })
     await sheet(pub.adapters)
+    await openFold()
     const box = await screen.findByRole('checkbox', { name: /How to reach you/ }) as HTMLInputElement
     expect(box.checked).toBe(false)
     expect(box.closest('label')!.textContent).toContain('this repo is public, so anyone could read it')
@@ -289,6 +298,7 @@ describe('the sheet', () => {
     const { adapters } = await setup({ destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true, maxInlineBytes: 1000 }) })
     await sheet(adapters)
     fireEvent.change(images(), { target: { files: [png('big.png', 2048)] } })
+    await openFold()
     await screen.findByText(/image-1\.png is over the 1 KB acme\/app can take, so it does not reach the issue/)
   })
 
@@ -302,6 +312,7 @@ describe('the sheet', () => {
     tapped.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     history.pushState({}, '', '/charts/visit')
     await sheet(adapters)
+    await openFold()
     await screen.findByRole('checkbox', { name: /Your local time/ })
     const listed = [...document.querySelectorAll('[data-sac-goes] [data-goes]')].map((li) => li.getAttribute('data-goes'))
     for (const off of ['taps', 'routes', 'ctx:device']) expect(listed, off).not.toContain(off)
@@ -331,6 +342,7 @@ describe('the sheet', () => {
     const goes = await waitFor(() => { const g = document.querySelector('[data-sac-goes]'); expect(g).toBeTruthy(); return g as HTMLElement })
     const shown = document.querySelector('[data-sac-note]') as HTMLElement
     expect(shown.textContent).toBe(note)
+    await openFold()
     expect(goes.querySelector('.sac-goes-list')).toBeTruthy() // the list is still there
     expect(goes.compareDocumentPosition(shown) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy() // after the list
     expect(shown.compareDocumentPosition(sendButton()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy() // before Send
@@ -344,6 +356,89 @@ describe('the sheet', () => {
     const none = await setup()
     await sheet(none.adapters)
     expect(document.querySelector('[data-sac-note]')).toBeNull()
+  })
+
+  it('the list of what it carries is folded by default: one line says where, a toggle gives the count, no tick box shows', async () => {
+    const { adapters } = await setup({ destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true, name: 'Sam Lee' }) })
+    await sheet(adapters)
+    const toggle = await foldToggle()
+    await waitFor(() => expect(toggle.textContent).not.toBe('What it carries (3)')) // the context rows have arrived
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(toggle.tagName).toBe('BUTTON')
+    expect(document.querySelector('[data-sac-where]')!.textContent).toBe('Files an issue on acme/app (private)')
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(document.querySelector('.sac-goes-list')).toBeNull()
+    expect(document.querySelector('[data-goes]')).toBeNull()
+    expect(document.body.textContent).not.toContain("Filed from sam-gh's GitHub account.")
+    // the count is everything that will go: the always rows plus every ticked one
+    const rows = Number(/\((\d+)\)/.exec(toggle.textContent!)![1])
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(document.querySelectorAll('[data-sac-goes] [data-goes]').length).toBe(rows)
+  })
+
+  it('opening the fold shows every item with its tick box, and unticking one lowers the count', async () => {
+    const { adapters } = await setup({ destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true, name: 'Sam Lee' }) })
+    await sheet(adapters)
+    const toggle = await openFold()
+    const device = await screen.findByRole('checkbox', { name: /Your device/ }) as HTMLInputElement
+    const fold = document.getElementById(toggle.getAttribute('aria-controls')!)!
+    expect(fold.contains(device)).toBe(true)
+    expect(fold.querySelector('.sac-goes-list')).toBeTruthy()
+    expect(fold.textContent).toContain("Filed from sam-gh's GitHub account.")
+    const before = Number(/\((\d+)\)/.exec(toggle.textContent!)![1])
+    expect(screen.getAllByRole('checkbox').length + fold.querySelectorAll('.sac-goes-list > li').length).toBe(before)
+    fireEvent.click(device)
+    expect(toggle.textContent).toBe(`What it carries (${before - 1})`)
+    fireEvent.click(toggle) // folding it again keeps what was unticked
+    fireEvent.click(toggle)
+    expect((screen.getByRole('checkbox', { name: /Your device/ }) as HTMLInputElement).checked).toBe(false)
+  })
+
+  it('a public destination\'s warning shows while the list is folded', async () => {
+    const { adapters } = await setup({ destination: async () => ({ repo: 'acme/open', public: true, account: 'sam-gh', attaches: true }) })
+    await sheet(adapters)
+    const toggle = await foldToggle()
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    const where = document.querySelector('[data-sac-where]')!
+    expect(where.textContent).toBe('Files an issue on acme/open (public: anyone can read it)')
+    expect(where.querySelector('.sac-danger')!.textContent).toBe('public: anyone can read it')
+    expect(document.getElementById(toggle.getAttribute('aria-controls')!)?.contains(where) ?? false).toBe(false)
+  })
+
+  it('the app\'s note shows while the list is folded, outside the fold', async () => {
+    const note = 'The people who fix this are outside your family.'
+    const { adapters } = await setup({
+      words: { app: `note${++n}`, owner: 'Alex', text: { destinationNote: note } },
+      destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }),
+    })
+    await sheet(adapters)
+    const toggle = await foldToggle()
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(document.querySelector('[data-sac-note]')!.textContent).toBe(note)
+    fireEvent.click(toggle)
+    expect(document.getElementById(toggle.getAttribute('aria-controls')!)!.contains(document.querySelector('[data-sac-note]'))).toBe(false)
+  })
+
+  it('without a destination the tick boxes are folded too, under the one line', async () => {
+    const { adapters } = await setup()
+    await sheet(adapters)
+    const toggle = await foldToggle()
+    expect(toggle.textContent).toMatch(/^Also shared \(\d+\)$/)
+    expect(document.querySelector('[data-sac-summary]')).toBeTruthy()
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    fireEvent.click(toggle)
+    expect(screen.getAllByRole('checkbox').length).toBe(Number(/\((\d+)\)/.exec(toggle.textContent!)![1]))
+  })
+
+  it('the folded line and the toggle take their words from words.text', async () => {
+    const { adapters } = await setup({
+      words: { app: `w${++n}`, owner: 'Alex', text: { filesOn: (repo: string) => `Goes to ${repo}`, privateShort: 'closed', carriesToggle: (k: number) => `Details, ${k}` } },
+      destination: async () => ({ repo: 'acme/app', public: false, account: 'sam-gh', attaches: true }),
+    })
+    await sheet(adapters)
+    await screen.findByRole('button', { name: /^Details, \d+$/ })
+    expect(document.querySelector('[data-sac-where]')!.textContent).toBe('Goes to acme/app (closed)')
   })
 
   it('a destination that answers nothing keeps today\'s line', async () => {

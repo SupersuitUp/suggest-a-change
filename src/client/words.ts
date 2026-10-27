@@ -112,6 +112,18 @@ export interface Strings {
   /** The app's own note, shown under the what-goes list (or the one line) and before Send, never instead of it: what
    *  only the app can say about where a report goes and what it carries. Empty shows nothing. */
   destinationNote: string
+  /** The one line above Send that says where a suggestion files, before its privacy word ("Files an issue on acme/notes"). */
+  filesOn: (repo: string) => string
+  /** The privacy word after it for a private repo. */
+  privateShort: string
+  /** The same for a public repo, in the danger colour and never folded: the one fact that must not be missed. */
+  publicShort: string
+  /** The toggle that opens the itemized list of what the issue will carry, with how many things go. */
+  carriesToggle: (n: number) => string
+  /** The toggle without a destination, opening the context tick boxes, with how many are ticked. */
+  alsoSharedToggle: (n: number) => string
+  /** The lead-in of the list once it is open. */
+  carriesLead: string
 }
 
 export const DEFAULT_STRINGS: Strings = {
@@ -203,6 +215,12 @@ export const DEFAULT_STRINGS: Strings = {
   issueLink: (n) => `Issue #${n}`,
   contextLegend: 'Also shared, so it can be fixed (untick anything to leave it out)',
   destinationNote: '',
+  filesOn: (repo) => `Files an issue on ${repo}`,
+  privateShort: 'private',
+  publicShort: 'public: anyone can read it',
+  carriesToggle: (n) => `What it carries (${n})`,
+  alsoSharedToggle: (n) => `Also shared (${n})`,
+  carriesLead: 'It will carry:',
 }
 
 export function stringsFor(words: Words): Strings {
