@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **My suggestions sets nothing once it is gone.** A report marked seen starts a recount; if the screen unmounted while that recount was reading the seen record, its late answer still set state, which threw `window is not defined` inside React when the page had been torn down (seen 2026-10-29 as an unhandled rejection failing the Helm's vitest run under load). Unmounting now retires every load and recount still in flight, as switching account already did.
+
 ## 0.2.5 (2026-10-26)
 
 - **A tap on the microphone records.** `DefaultField` was hold-only: on a tap the release ended the take before the microphone had answered, so nothing was recorded and nothing said to hold (seen on iPhone Safari). Now a press shorter than 350 ms starts a take that keeps recording until the next tap (or the time limit), and a longer press records until it is let go. Leaving the button, or a pointer the browser cancels (iOS Safari does when its permission prompt appears), never ends a tapped take. `startTake` is still called synchronously inside the press, with nothing awaited before it. While recording the dot turns to a stop square and pulses (under `prefers-reduced-motion: no-preference`).

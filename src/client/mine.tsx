@@ -36,6 +36,8 @@ export function MySuggestions({ adapters, onOpen }: { adapters: Adapters; onOpen
   const answered = useRef(false)
   useClearOnSignOut(rt, who, adapters.words.app)
   useEffect(() => { loads.current++; known.current = null; answered.current = false; setRows(null); setOpen(null); setBad(''); setUpdating(false); setFresh(new Set()) }, [rt])
+  // Leaving the screen retires every load and recount still running, as a new account does: none may set state after.
+  useEffect(() => () => { loads.current++ }, [])
 
   const recount = useCallback(async () => {
     if (!rt || !known.current) return
