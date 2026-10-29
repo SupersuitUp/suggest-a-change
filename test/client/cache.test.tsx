@@ -2,7 +2,7 @@
 // The last answer is kept on the phone: My suggestions and the detail view draw it at once and refresh behind.
 import 'fake-indexeddb/auto'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Adapters, Identity } from '../../src/client/adapters.ts'
 import { SuggestionDetail } from '../../src/client/detail.tsx'
 import { SuggestEntry } from '../../src/client/entry.tsx'
@@ -10,6 +10,7 @@ import { openStore } from '../../src/client/idb.ts'
 import { MySuggestions } from '../../src/client/mine.tsx'
 import type { Report, StoreAdapter, Summary } from '../../src/client/reports.ts'
 import { getRuntime, refreshIdentity } from '../../src/client/runtime.ts'
+import { markSeen } from '../../src/client/seen.ts'
 
 afterEach(() => cleanup())
 
@@ -285,5 +286,47 @@ describe('the cache is kept tidy (fix round 1)', () => {
     await act(async () => { await rt.outbox.enqueue({ id: 'noise', kind: 'other', body: {}, at: 1 }); await rt.outbox.refresh(); await new Promise((r) => setTimeout(r, 60)) })
     await waitFor(() => expect(calls).toBeGreaterThan(2))
     expect(screen.queryByText('Updating')).toBeNull()
+  })
+})
+
+describe('My suggestions after it is gone', () => {
+  // 2026-10-29: the Helm's suite under load caught `window is not defined` from mine.js: a report marked seen started a
+  // recount, the screen unmounted (and the test page with it) while the seen record was being read, and the late answer
+  // still set state. A recount that lands after the screen is gone must not touch it.
+  it('a recount that answers after unmount sets nothing', async () => {
+    const t = await setup({ mine: async () => [{ id: 'a', status: 'received', at: 1, words: 'row' }] })
+    const view = render(<MySuggestions adapters={t.adapters} />)
+    await screen.findByText('row')
+    const rt = await getRuntime(t.adapters, SAM)
+    // The first answer records what it saw; let that write land before holding anything.
+    await waitFor(async () => expect(await t.phone.get('kv', `sac:${t.app}:sam#view:seen`)).toBeTruthy())
+    // Hold the recount's read of the seen record once markSeen's own write is done.
+    let armed = false
+    let held = false
+    let release = () => {}
+    const get = rt.store.get.bind(rt.store)
+    const put = rt.store.put.bind(rt.store)
+    rt.store.put = async (s, k, v) => { await put(s, k, v); if (armed && k.endsWith('#view:seen')) { armed = false; held = true } }
+    rt.store.get = (async (s: Parameters<typeof get>[0], k: string) => {
+      if (held && k.endsWith('#view:seen')) { held = false; await new Promise<void>((r) => { release = r }) }
+      return get(s, k)
+    }) as typeof rt.store.get
+    const late: unknown[] = []
+    const catchLate = (e: unknown) => { late.push(e) }
+    process.prependListener('unhandledRejection', catchLate)
+    try {
+      armed = true
+      await markSeen(rt.store, { app: t.app, account: 'sam' }, 'a', 'shipped')
+      await waitFor(() => expect(held).toBe(false)) // the recount is reading, and waits
+      view.unmount()
+      // What a torn-down page looks like to React: no window to read the update priority from.
+      vi.stubGlobal('window', undefined)
+      release()
+      await new Promise((r) => setTimeout(r, 30))
+    } finally {
+      vi.unstubAllGlobals()
+      process.off('unhandledRejection', catchLate)
+    }
+    expect(late).toEqual([])
   })
 })
