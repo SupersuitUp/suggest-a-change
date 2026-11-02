@@ -33,7 +33,7 @@ export interface FieldProps {
   placeholder?: string
   multiline?: boolean
   type?: 'text' | 'search'
-  /** Gets each finished take. The sheet keeps the recording; transcription is the receiving Mac's job. */
+  /** Gets each finished take. The sheet keeps the recording; the transcript is written where it is received (a relay with `transcribe`, or the owner's Mac). */
   upload?: HeardUpload
   onHeard?(h: { audio: string; text: string }): void
   onKept?(t: { key: string; ms: number }): void

@@ -198,7 +198,7 @@ export function SuggestSheet({ adapters, where, onClose, initial }: { adapters: 
     return (await saveDraft(rt!.store, key!, {})).reportId
   }, [rt, key])
 
-  // A finished take: kept as a copy under this report, and listed. Transcription is the Mac's job.
+  // A finished take: kept as a copy under this report, and listed. The transcript is written where it is received.
   const keepTake = useCallback(async (fieldId: string, original: string, blob: Blob, ms: number) => {
     if (!rt || !key) return { refused: S.loading }
     if (ms > ceilings.voiceMs) return { refused: S.voiceTooLong }

@@ -709,3 +709,89 @@ describe('branchHost and a contents API refusal that is not "already written"', 
     await expect(host.put({ repo: 'acme/app', issue: 7, reportId: ID }, { name: 'image-5.png', type: 'image/png', bytes: PNG })).rejects.toMatchObject({ status: 422 })
   })
 })
+
+// TRANSCRIPTION ON THE RELAY. A voice note reached GitHub as "Not transcribed." under "Suggestion from <app>" once the
+// receiving Mac stopped writing transcripts (ContinentalWorks/supersuit-dev#1546). A host that passes `transcribe` has
+// the relay make the transcript itself, before the privacy catch, and a failure never stops the filing.
+describe('createSuggestionRelay: transcribe', () => {
+  const OGG = Uint8Array.from([0x4f, 0x67, 0x67, 0x53, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4])
+  const voiceOnly = () => report({ words: '', media: [], voice: [{ file: 'voice-1.ogg', ms: 4000 }] })
+  const voiceFiling = (over: Record<string, unknown> = {}) => filing({ report: voiceOnly(), files: [{ name: 'voice-1.ogg', type: 'audio/ogg', bytes: toBase64(OGG) }], ...over })
+  const said = 'I feel like every recommendations card should have a snooze. Build a snooze component.'
+
+  it('transcribes each voice note when the request carries no transcript, titles the issue from it, and says the relay made it', async () => {
+    const g = fakeGitHub()
+    const heard: { name: string; mimeType: string; bytes: Uint8Array }[] = []
+    const res = await suggestions(g, { transcribe: async (v: { name: string; mimeType: string; bytes: Uint8Array }) => { heard.push(v); return said } })(act('file', voiceFiling()))
+    expect(res.status).toBe(200)
+    expect(heard).toHaveLength(1)
+    expect(heard[0].name).toBe('voice-1.ogg')
+    expect(heard[0].mimeType).toBe('audio/ogg')
+    expect([...heard[0].bytes]).toEqual([...OGG])
+    const issue = g.opened[0]
+    expect(issue.title).toBe('I feel like every recommendations card should have a snooze.')
+    expect(issue.body).toContain('## Voice note (transcribed automatically)')
+    expect(issue.body).toContain(said)
+    expect(issue.body).not.toContain('Not transcribed.')
+    expect(issue.body).not.toContain("owner's Mac")
+    expect(issue.body).toMatch(/\[voice-1\.ogg\]\(https:\/\/github\.com\/acme\/app\/blob\/suggestion-attachments\/attachments\/.+\/voice-1\.ogg\?raw=true\)/)
+  })
+
+  it('runs the privacy catch over the transcript it made', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g, { transcribe: async () => 'mail me at sam@example.com about it' })
+    const held = await r(act('file', voiceFiling()))
+    expect(held.status).toBe(409)
+    expect(await held.json()).toEqual({ held: true, hits: [{ kind: 'email', field: 'transcript' }] })
+    expect(g.opened).toHaveLength(0)
+    expect((await r(act('file', voiceFiling({ redacted: true })))).status).toBe(200)
+    expect(g.opened[0].body).not.toContain('sam@example.com')
+  })
+
+  it('a transcriber that fails or never answers still files, with the recording and the reason in plain words', async () => {
+    const failing = fakeGitHub()
+    expect((await suggestions(failing, { transcribe: async () => { throw new Error('Deepgram 401 secret-ish detail') } })(act('file', voiceFiling()))).status).toBe(200)
+    expect(failing.opened[0].title).toBe('Suggestion from Notes')
+    expect(failing.opened[0].body).toContain('The transcript could not be made: the transcription service failed or refused the recording. The recording is attached.')
+    expect(failing.opened[0].body).not.toContain('Deepgram 401')
+    expect(failing.opened[0].body).toContain('voice-1.ogg?raw=true')
+
+    const slow = fakeGitHub()
+    let aborted = false
+    const never = (_v: unknown, o: { signal: AbortSignal }) => new Promise<string>(() => { o.signal.addEventListener('abort', () => { aborted = true }) })
+    expect((await suggestions(slow, { transcribe: never, transcribeTimeoutMs: 20 })(act('file', voiceFiling()))).status).toBe(200)
+    expect(slow.opened[0].body).toContain('The transcript could not be made: the transcription service did not answer in time. The recording is attached.')
+    expect(aborted).toBe(true)
+
+    const silent = fakeGitHub()
+    await suggestions(silent, { transcribe: async () => '  ' })(act('file', voiceFiling()))
+    expect(silent.opened[0].body).toContain('The transcript could not be made: no speech was heard in the recording.')
+  })
+
+  it('leaves a transcript the request carries alone, and transcribes nothing without a voice note', async () => {
+    let calls = 0
+    const g = fakeGitHub()
+    const t = async () => { calls++; return 'made here' }
+    await suggestions(g, { transcribe: t })(act('file', voiceFiling({ transcript: 'Written on the Mac.' })))
+    expect(g.opened[0].body).toContain("## Voice note (transcribed on the owner's Mac)")
+    expect(g.opened[0].body).toContain('Written on the Mac.')
+    await suggestions(fakeGitHub(), { transcribe: t })(act('file', filing()))
+    expect(calls).toBe(0)
+  })
+
+  it('transcribes a voice note added in a follow-up', async () => {
+    const g = fakeGitHub()
+    const r = suggestions(g, { transcribe: async () => 'one more thing.' })
+    expect((await r(act('file', filing()))).status).toBe(200)
+    const res = await r(act('follow-up', { repo: 'acme/app', number: 101, reportId: ID, words: '', files: [{ name: 'added-1.ogg', type: 'audio/ogg', bytes: toBase64(OGG) }] }))
+    expect(res.status).toBe(200)
+    expect(g.comments[0].body).toContain('### Voice note')
+    expect(g.comments[0].body).toContain('one more thing.')
+  })
+
+  it('says in its capabilities whether it transcribes', async () => {
+    const get = new Request('https://relay.test/api/suggestions/capabilities', { method: 'GET' })
+    expect(await (await suggestions(fakeGitHub())(get)).json()).toMatchObject({ transcribes: false })
+    expect(await (await suggestions(fakeGitHub(), { transcribe: async () => 'x' })(get.clone())).json()).toMatchObject({ transcribes: true })
+  })
+})

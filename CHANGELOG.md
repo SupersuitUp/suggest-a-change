@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-01)
 
+- **The relay transcribes voice notes.** `createSuggestionRelay({ transcribe })` takes a transcriber, `({ name, mimeType, bytes, staged? }, { signal }) => Promise<string>`, and calls it for each voice note a `file` or `follow-up` brings with no `transcript`, before the privacy catch, so the transcript is caught like the words. A report with only a voice note is now titled from the transcript's first sentence instead of "Suggestion from <app>", under "Voice note (transcribed automatically)" rather than a claim about the owner's Mac. A transcriber that fails, hears nothing, or takes longer than `transcribeTimeoutMs` (default 25 s) never stops the filing: the issue files with the recording and says in plain words why there is no transcript, never the transcriber's error. `capabilities` answers `transcribes`; `RelayCapabilities`, `ComposeOptions.transcriptBy` and `transcriptNote` are new. Earned when voice-only suggestions reached GitHub as "Not transcribed." after the receiving Mac stopped writing transcripts.
 - **My suggestions sets nothing once it is gone.** A report marked seen starts a recount; if the screen unmounted while that recount was reading the seen record, its late answer still set state, which threw `window is not defined` inside React when the page had been torn down (seen 2026-10-29 as an unhandled rejection failing the Helm's vitest run under load). Unmounting now retires every load and recount still in flight, as switching account already did.
 
 ## 0.2.5 (2026-10-26)

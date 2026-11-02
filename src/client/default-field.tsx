@@ -3,7 +3,7 @@
 // INSIDE the box (bottom right; centred at the right of a one-line input), in one [data-voice-field]
 // container with nothing else typeable in it. A take is
 // recorded with the module's recorder (written to the phone's database as it is made). Transcription is
-// not done here: the take goes to `upload`, and the receiving Mac writes the transcript. A voice note
+// not done here: the take goes to `upload`, and whoever receives it (a relay with `transcribe`, or the owner's Mac) writes the transcript. A voice note
 // alone is a whole report, so a field with no words and one take is a complete answer.
 //
 // A tap starts a take that keeps recording until the next tap (or the time limit); a press held longer
