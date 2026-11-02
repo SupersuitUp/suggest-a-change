@@ -9,6 +9,9 @@
 // - attach: for a filer who opened the issue themselves but cannot push; the relay proves they could file there by
 //   reading the issue and requiring it to carry the report.
 //
+// With `transcribe`, the relay also writes the transcript of each voice note a request brings without one, before the
+// privacy catch, so the transcript is caught like the words. A transcriber that fails or is slow never stops a filing.
+//
 // Web-standard only: Request, Response, fetch, crypto.subtle.
 import { CEILINGS, isRepoName, isReportId, validContact, validateReport } from '../contract.mjs'
 import { cappedText, json } from '../server/http.ts'
@@ -145,6 +148,22 @@ export interface RelayIdentity {
   contact?: { email?: string; phone?: string; handle?: string }
 }
 
+/** One voice recording handed to the host's transcriber: its file name, its type as audio, and its bytes (read from
+ *  staging already when it was staged; `staged` is then its staging key, for a host that would rather sign a read link). */
+export interface RelayVoice { name: string; mimeType: string; bytes: Uint8Array; staged?: string }
+/** Answers the words said in one recording. `signal` aborts when the relay stops waiting. */
+export type RelayTranscriber = (voice: RelayVoice, o: { signal: AbortSignal }) => Promise<string>
+/** How long the relay waits for all of a request's transcripts before it files without them. Serverless hosts cap a
+ *  request (Vercel's default is 60 s), so this leaves room for GitHub. */
+export const TRANSCRIBE_TIMEOUT_MS = 25_000
+/** The plain words an issue uses for why a transcript is missing. Never the transcriber's own error, which can carry
+ *  anything (a key, a URL, a provider's internals). */
+export const TRANSCRIPT_MISSING = {
+  timeout: 'the transcription service did not answer in time',
+  failed: 'the transcription service failed or refused the recording',
+  silent: 'no speech was heard in the recording',
+} as const
+
 export interface SuggestionRelayOptions {
   /** The GitHub App the relay acts as: its numeric id and its private key (PEM, PKCS#1 as GitHub issues it, or PKCS#8). */
   app: { id: number | string; privateKey: string }
@@ -164,6 +183,11 @@ export interface SuggestionRelayOptions {
   staging?: StagingAdapter
   /** May lower any limit, never raise one. */
   limits?: Partial<RelayLimits>
+  /** Writes the transcript of each voice note a `file` or `follow-up` brings with no `transcript`. Without it the issue
+   *  says the note was not transcribed, and `capabilities` says `transcribes: false`. */
+  transcribe?: RelayTranscriber
+  /** Default TRANSCRIBE_TIMEOUT_MS; all of a request's notes are transcribed at once inside it. */
+  transcribeTimeoutMs?: number
   usage?: RelayUsage
   fetch?: Fetch
   now?: () => number
@@ -335,6 +359,30 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     if (bytes.length > max) return json(413, { error: `that file is larger than the ${max} bytes allowed` })
     return { name: x.name, type: real, kind, bytes, ...(stagedKey ? { stagedKey } : {}) }
   }
+  /** The transcript for a request's voice notes: the request's own when it carries one, else the relay's (with a plain
+   *  note for any note it could not transcribe), else none. Never throws. */
+  async function transcriptFor(files: Checked[], given: unknown): Promise<{ transcript?: string; by?: 'relay'; note?: string }> {
+    if (typeof given === 'string' && given.trim()) return { transcript: given }
+    const voices = files.filter((f) => f.kind === 'voice')
+    if (!opts.transcribe || !voices.length) return {}
+    const ms = opts.transcribeTimeoutMs ?? TRANSCRIBE_TIMEOUT_MS
+    const stop = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const late = new Promise<'late'>((res) => { timer = setTimeout(() => { stop.abort(); res('late') }, ms) })
+    const one = (v: Checked) => Promise.resolve()
+      .then(() => opts.transcribe!({ name: v.name, mimeType: v.type.replace(/^video\//, 'audio/'), bytes: v.bytes, ...(v.stagedKey ? { staged: v.stagedKey } : {}) }, { signal: stop.signal }))
+      .then((t) => (typeof t === 'string' && t.trim() ? { text: t.trim() } : { fail: TRANSCRIPT_MISSING.silent }), () => ({ fail: TRANSCRIPT_MISSING.failed }))
+    const got = await Promise.race([Promise.all(voices.map(one)), late])
+    clearTimeout(timer)
+    const results: ({ text: string } | { fail: string })[] = got === 'late' ? voices.map(() => ({ fail: TRANSCRIPT_MISSING.timeout })) : got
+    const many = voices.length > 1
+    const texts = results.flatMap((r, i) => ('text' in r ? [many ? `(${voices[i].name})\n${r.text}` : r.text] : []))
+    const fails = results.flatMap((r, i) => ('fail' in r ? [many ? `${voices[i].name}: ${r.fail}` : r.fail] : []))
+    const note = fails.length
+      ? `The transcript${many ? ` of ${fails.length === voices.length ? 'the recordings' : `${fails.length} of ${voices.length} recordings`}` : ''} could not be made: ${fails.join('; ')}.${texts.length ? '' : ` The recording${many ? 's are' : ' is'} attached.`}`
+      : undefined
+    return { ...(texts.length ? { transcript: texts.join('\n\n'), by: 'relay' as const } : {}), ...(note ? { note } : {}) }
+  }
   /** The bytes a request still has to hold today: inline files only, since upload-url held a staged file's up front. */
   const inlineBytesOf = (files: Checked[]) => files.reduce((n, f) => n + (f.stagedKey ? 0 : f.bytes.length), 0)
   const discardStaged = async (files: Checked[]) => {
@@ -409,12 +457,14 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     const appId = body.app
     if (appId !== undefined && opts.apps && (typeof appId !== 'string' || !Object.prototype.hasOwnProperty.call(opts.apps, appId))) return bad('unknown app')
     const app = opts.apps && typeof appId === 'string' ? opts.apps[appId] : undefined
+    // The transcript is made before the catch reads anything, so it is caught like the words.
+    const heard = await transcriptFor(files, body.transcript)
     // Who it is from comes from the host, never the request: the name, the role and the contact.
     const contact = contactFor(me, (report.who as { contact?: unknown } | undefined)?.contact)
     const appVersion = typeof (report.diagnostics as { appVersion?: unknown } | undefined)?.appVersion === 'string' ? (report.diagnostics as { appVersion: string }).appVersion : undefined
     const readable = {
       words: report.words, followUps: report.followUps, where: report.where, diagnostics: report.diagnostics,
-      context: report.context, transcript: typeof body.transcript === 'string' ? body.transcript : undefined,
+      context: report.context, transcript: heard.transcript,
       filerName: me.name, appName: app?.name, who: { contact },
       files: files.map((f) => ({ name: f.name })),
     }
@@ -450,6 +500,8 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
         filerName: typeof clean.filerName === 'string' && clean.filerName.trim() ? clean.filerName.trim().slice(0, 100) : 'Someone',
         filerRole: role,
         transcript: clean.transcript,
+        ...(heard.by && clean.transcript ? { transcriptBy: heard.by } : {}),
+        ...(heard.note ? { transcriptNote: heard.note } : {}),
         attachmentUrls,
       })
       const made = await fileIssue({ repo, token, fetch: opts.fetch, api: opts.api }, issue)
@@ -477,7 +529,8 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     const checked = await checkMany(Array.isArray(body.files) ? body.files : [], () => undefined, account, reportId)
     if (checked instanceof Response) return checked
     const files = checked
-    const readable = { words: typeof body.words === 'string' ? body.words.slice(0, 20_000) : '', transcript: typeof body.transcript === 'string' ? body.transcript : undefined, files: files.map((f) => ({ name: f.name })) }
+    const heard = await transcriptFor(files, body.transcript)
+    const readable = { words: typeof body.words === 'string' ? body.words.slice(0, 20_000) : '', transcript: heard.transcript, files: files.map((f) => ({ name: f.name })) }
     const caught = catchIt(readable, account, body.redacted === true); if ('res' in caught) return caught.res
     const { words, transcript } = caught.clean
     if (!words.trim() && !transcript && !files.length) return bad('a follow-up needs words or a file')
@@ -486,7 +539,7 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
     const links = files.map((f) => { const url = attachmentUrl(repo, ATTACHMENTS_BRANCH, `${folder}/${f.name}`); return f.kind === 'image' ? `![${f.name}](${url})` : `[${f.name}](${url})` })
     // A follow-up is the person's own words, so it sits in a fence like the words of the report.
     const fenced = (s: string) => { const run = Math.max(0, ...[...s.matchAll(/`+/g)].map((m) => m[0].length)); const f = '`'.repeat(Math.max(3, run + 1)); return `${f}\n${s}\n${f}` }
-    const text = ['## Added later', words.trim() ? fenced(words.trim()) : '', transcript ? `\n### Voice note\n${fenced(transcript.trim())}` : '', links.length ? `\n${links.join('\n')}` : ''].filter(Boolean).join('\n')
+    const text = ['## Added later', words.trim() ? fenced(words.trim()) : '', transcript ? `\n### Voice note\n${fenced(transcript.trim())}` : '', heard.note ? `\n${heard.note}` : '', links.length ? `\n${links.join('\n')}` : ''].filter(Boolean).join('\n')
     if (text.length > BODY_LIMIT) return json(413, { error: `that follow-up is longer than GitHub takes in a comment (${BODY_LIMIT} characters)` })
     const held = await reserve(account, reportId, inlineBytesOf(files))
     if (held instanceof Response) return held
@@ -613,6 +666,7 @@ export function createSuggestionRelay(opts: SuggestionRelayOptions, only?: Actio
   const capabilities = () => json(200, {
     actions: ACTIONS.filter((a) => (only ? a === only : a !== 'upload-url' || Boolean(opts.staging))),
     staging: Boolean(opts.staging),
+    transcribes: Boolean(opts.transcribe),
     inlineBytes: limits.inlineBytes,
     maxBytes: { image: limits.imageBytes, video: limits.videoBytes, voice: limits.voiceBytes },
   })

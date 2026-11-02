@@ -38,7 +38,9 @@ const raw = (b: RelayFile['bytes']): Uint8Array => {
   if (b instanceof ArrayBuffer) return new Uint8Array(b)
   const bin = atob(b); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out
 }
-export interface RelayCapabilities { actions: string[]; staging: boolean; inlineBytes: number; maxBytes?: Record<string, number> }
+/** `transcribes`: the relay writes a voice note's transcript itself (a host passed `transcribe`); set the sheet's
+ *  `Destination.transcribes` from it. */
+export interface RelayCapabilities { actions: string[]; staging: boolean; inlineBytes: number; maxBytes?: Record<string, number>; transcribes?: boolean }
 
 /** `url` is where the relay is mounted; each action is posted to `<url>/<action>`. */
 export function relayFiler({ url, headers = {}, fetch }: { url: string; headers?: Record<string, string>; fetch?: Fetch }): RelayFiler {

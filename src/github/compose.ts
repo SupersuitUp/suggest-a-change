@@ -24,7 +24,8 @@ export interface Destination {
   account: string
   /** False when files cannot reach this repo yet (no App installed and the filer cannot push): they wait. */
   attaches: boolean
-  /** False when nobody transcribes voice notes (an app's own server): the list does not promise a transcript. */
+  /** False when nobody transcribes voice notes (no relay `transcribe` and no Mac that writes one; a relay says which in
+   *  its `capabilities`): the list does not promise a transcript. */
   transcribes?: boolean
   /** The largest file this destination takes; a larger one is named in the list as staying on the phone. */
   maxInlineBytes?: number
@@ -61,8 +62,12 @@ export interface ComposeOptions {
   filerRole?: string
   /** file name -> its link, from an AttachmentHost. A file with no link yet is written as still being added. */
   attachmentUrls?: Record<string, string>
-  /** The voice notes' transcript, made on the owner's Mac. */
+  /** The voice notes' transcript. */
   transcript?: string
+  /** Who made it: 'relay' when the relay transcribed it as it filed; otherwise it came with the request (the owner's Mac). */
+  transcriptBy?: 'relay' | 'mac'
+  /** A plain sentence saying a transcript, or part of one, could not be made and why; written under the voice note. */
+  transcriptNote?: string
   /** The first body, written before any file is saved: every attachment is "being added". */
   pending?: boolean
 }
@@ -247,6 +252,7 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
   }
   const words = scrub(text(report.words).trim())
   const transcript = scrub(text(opts.transcript).trim())
+  const note = inline(text(opts.transcriptNote).trim())
   // Only links the host produced, and only plain https ones, become images or links; anything else is still "being added".
   const urls: Record<string, string> = opts.pending ? {} : Object.fromEntries(Object.entries(opts.attachmentUrls ?? {}).flatMap(([k, u]) => (safeUrl(u) ? [[k, u]] : [])))
   const media = report.media ?? []
@@ -274,7 +280,8 @@ export function composeIssue(report: Draft, opts: ComposeOptions = {}): Composed
     const out: string[] = []
     if (has.has('words')) out.push('## What they said', fence(said), '')
     if (has.has('voice')) {
-      out.push(transcript ? "## Voice note (transcribed on the owner's Mac)" : '## Voice note', heard ? fence(heard) : 'Not transcribed.')
+      out.push(transcript ? (opts.transcriptBy === 'relay' ? '## Voice note (transcribed automatically)' : "## Voice note (transcribed on the owner's Mac)") : '## Voice note', heard ? fence(heard) : (note || 'Not transcribed.'))
+      if (heard && note) out.push('', note)
       const links = voice.filter((v) => urls[v.file]).map((v) => `[${inline(v.file)}](${urls[v.file]})`)
       if (links.length) out.push('', ...links)
       if (coming && !has.has('images') && !has.has('video')) out.push('', coming)
