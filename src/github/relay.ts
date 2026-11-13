@@ -25,9 +25,9 @@ import { privacyCatch, redact, type Person } from './privacy.ts'
 /** A voice recording's ceiling; the same number as the server half's VOICE_FILE_BYTES (a test holds them together). */
 export const RELAY_VOICE_BYTES = 25 * 2 ** 20
 export interface RelayLimits {
-  /** Different reports one identity may file or attach to in a day. */
+  /** Different reports one identity may file or attach to in a day. Infinity (the default): no cap. */
   perPersonPerDay: number
-  /** Bytes of files one identity may send in a day, across every action. */
+  /** Bytes of files one identity may send in a day, across every action. Infinity (the default): no cap. */
   bytesPerPersonPerDay: number
   images: number
   imageBytes: number
@@ -44,7 +44,7 @@ export interface RelayLimits {
 }
 export const RELAY_LIMITS: RelayLimits = {
   perPersonPerDay: CEILINGS.perPersonPerDay,
-  bytesPerPersonPerDay: 300 * 2 ** 20,
+  bytesPerPersonPerDay: Infinity,
   images: CEILINGS.images, imageBytes: CEILINGS.imageBytes,
   videos: CEILINGS.videos, videoBytes: CEILINGS.videoBytes,
   voice: 60, voiceBytes: RELAY_VOICE_BYTES,

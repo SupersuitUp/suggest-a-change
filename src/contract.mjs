@@ -11,7 +11,8 @@ export const CEILINGS = {
   images: 6, imageBytes: 10 * 2 ** 20,
   videos: 1, videoBytes: 100 * 2 ** 20, videoMs: 60_000,
   voiceMs: 300_000, voiceTotalMs: 900_000,
-  perPersonPerDay: 20,
+  // No daily cap by default (2026-11-13: there is no cap on reports). A host may set its own, any positive number.
+  perPersonPerDay: Infinity,
 };
 
 // A suggestion becomes one ordinary GitHub issue (suggestions-as-github-issues design, section 3), so the statuses a

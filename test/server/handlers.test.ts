@@ -162,21 +162,20 @@ describe('hosted report handlers', () => {
     expect((await h.finalize(call('POST', 'f', { user: 'amy' }, { file: 'a.png' }), id)).status).toBe(422)
   })
 
-  it('the twenty-first report in a day is refused', async () => {
-    const { send, mem } = setup()
-    for (let i = 0; i < 20; i++) expect((await send('amy')).res.status).toBe(200)
+  it('has no daily limit unless the app sets one', async () => {
+    const { send } = setup()
+    for (let i = 0; i < 30; i++) expect((await send('amy')).res.status).toBe(200)
+  })
+
+  it('an app may set its own daily limit, per member and per day', async () => {
+    const { send, mem } = setup({ limits: { perPersonPerDay: 2 } })
+    expect((await send('amy')).res.status).toBe(200)
+    expect((await send('amy')).res.status).toBe(200)
     expect((await send('amy')).res.status).toBe(429)
     expect((await send('ben')).res.status).toBe(200) // the limit is per member
     mem.advance(24 * 3600_000)
     expect((await send('amy')).res.status).toBe(200) // and per day
-  })
-
-  it('an app may lower the daily limit and never raise it', async () => {
-    const low = setup({ limits: { perPersonPerDay: 2 } })
-    expect((await low.send('amy')).res.status).toBe(200)
-    expect((await low.send('amy')).res.status).toBe(200)
-    expect((await low.send('amy')).res.status).toBe(429)
-    expect(() => setup({ limits: { perPersonPerDay: 21 } })).toThrow(/never raise/)
+    expect(() => setup({ limits: { perPersonPerDay: 0 } })).toThrow(/positive/)
   })
 
   it('the same id submitted twice is one report', async () => {
@@ -440,7 +439,7 @@ describe('what a report may carry', () => {
 
 describe('submit and the existence of other members\' reports', () => {
   it('an id that belongs to someone else is refused, nothing is overwritten, and at the limit it answers as a fresh one does', async () => {
-    const { h, call, send, mem } = setup()
+    const { h, call, send, mem } = setup({ limits: { perPersonPerDay: 20 } })
     const first = await send('amy')
     const clash = await h.submit(call('POST', 'x', { user: 'ben' }, { ...first.body, words: 'mine' }))
     expect(clash.status).toBe(409)

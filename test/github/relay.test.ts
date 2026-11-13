@@ -2,7 +2,7 @@
 // push, through the operator's own GitHub App. Every refusal the relay makes has a test here.
 import { createPublicKey, generateKeyPairSync, verify } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { branchHost, canFileDirectly, createAttachRelay, createSuggestionRelay, fileSuggestion, memoryUsage, relayFiler, relayHost, toBase64 } from '../../src/github/index.ts'
+import { branchHost, canFileDirectly, createAttachRelay, createSuggestionRelay, fileSuggestion, memoryUsage, RELAY_LIMITS, relayFiler, relayHost, toBase64 } from '../../src/github/index.ts'
 
 const API = 'https://api.github.com'
 const ID = 'r-20261026170412-ab12cd'
@@ -293,7 +293,14 @@ describe('createSuggestionRelay: file', () => {
     expect(g.opened).toHaveLength(0)
   })
 
-  it('holds each identity to a daily cap of reports and of bytes', async () => {
+  it('has no daily cap on reports or bytes unless the host sets one', async () => {
+    expect(RELAY_LIMITS.perPersonPerDay).toBe(Infinity)
+    expect(RELAY_LIMITS.bytesPerPersonPerDay).toBe(Infinity)
+    const r = suggestions(fakeGitHub())
+    for (let i = 0; i < 25; i++) expect((await r(act('file', filing({ report: report({ id: `r-20261026170412-${String(i).padStart(6, 'a')}`, media: [] }), files: [] })))).status).toBe(200)
+  })
+
+  it('holds each identity to a daily cap of reports and of bytes the host sets', async () => {
     const g = fakeGitHub()
     const r = suggestions(g, { limits: { perPersonPerDay: 1 } })
     expect((await r(act('file', filing()))).status).toBe(200)

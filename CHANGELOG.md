@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0 (2026-11-13)
+
+- **No daily cap by default.** `CEILINGS.perPersonPerDay` and the relay's `RELAY_LIMITS.perPersonPerDay` and `bytesPerPersonPerDay` are now `Infinity`, where they were 20 reports and 300 MiB per member per day. A host that sets nothing never answers 429 for a day's count, and the server half no longer asks the store to count (`countToday` is not called and `put` gets no `dailyLimit`). A host may still set its own daily cap, any positive number, in `limits`. The per-request and per-file size caps are unchanged. A `RelayUsage` store now receives `Infinity` in `reserve`'s limits when no cap is set. Decided 2026-11-13: there is no cap on bug reports.
+
 ## 0.3.0 (2026-11-01)
 
 - **The relay transcribes voice notes.** `createSuggestionRelay({ transcribe })` takes a transcriber, `({ name, mimeType, bytes, staged? }, { signal }) => Promise<string>`, and calls it for each voice note a `file` or `follow-up` brings with no `transcript`, before the privacy catch, so the transcript is caught like the words. A report with only a voice note is now titled from the transcript's first sentence instead of "Suggestion from <app>", under "Voice note (transcribed automatically)" rather than a claim about the owner's Mac. A transcriber that fails, hears nothing, or takes longer than `transcribeTimeoutMs` (default 25 s) never stops the filing: the issue files with the recording and says in plain words why there is no transcript, never the transcriber's error. `capabilities` answers `transcribes`; `RelayCapabilities`, `ComposeOptions.transcriptBy` and `transcriptNote` are new. Earned when voice-only suggestions reached GitHub as "Not transcribed." after the receiving Mac stopped writing transcripts.

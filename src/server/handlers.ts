@@ -325,11 +325,13 @@ export function createReportHandlers(opts: ReportHandlerOptions) {
     const existing = await store.get(id)
     // The same member sending the same id again is a repeat, even at the day's limit: it was stored.
     if (existing?.who?.member === member) return json(200, { id, status: cur(existing) })
-    if ((await store.countToday(member)) >= limits.perPersonPerDay) return json(429, { error: 'you have reached today\'s limit of suggestions' })
+    // No daily limit unless the app set one: then the store is never asked to count.
+    const capped = Number.isFinite(limits.perPersonPerDay)
+    if (capped && (await store.countToday(member)) >= limits.perPersonPerDay) return json(429, { error: 'you have reached today\'s limit of suggestions' })
     const at = iso(now())
     const made = await store.put(
       { ...(report as { id: string; who: { member: string; role: string } }), receivedAt: at, timeline: [{ status: 'received', by: 'app', at }] },
-      { dailyLimit: limits.perPersonPerDay },
+      capped ? { dailyLimit: limits.perPersonPerDay } : undefined,
     )
     if (made === 'limit') return json(429, { error: 'you have reached today\'s limit of suggestions' })
     if (made === 'exists') {
