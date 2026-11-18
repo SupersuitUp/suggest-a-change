@@ -251,8 +251,9 @@ export function linkableIssue(issue: unknown): { number: number; url: string } |
 export type ReceiptState = 'on-phone' | 'received' | 'on-mac'
 
 /** The receipt's one line (design section 2). `received` is only ever asked for after the adapter said `done`. */
-export function receiptWords(state: ReceiptState, words: Pick<Words, 'owner'>): string {
-  if (state === 'received') return `Got it. Pluma picks it up next time ${words.owner}'s Mac is on.`
+export function receiptWords(state: ReceiptState, _words?: Pick<Words, 'owner'>): string {
+  // The relay files a report as it arrives, so nothing waits for anyone's Mac (supersuit-dev#1494).
+  if (state === 'received') return 'Got it. You can follow it in My suggestions.'
   if (state === 'on-mac') return 'On your Mac.'
   return 'On this phone, waiting to send.'
 }

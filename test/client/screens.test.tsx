@@ -125,7 +125,7 @@ describe('the sheet', () => {
     await waitFor(() => expect(submitted).toHaveLength(1))
     expect(screen.queryByText(/Got it/)).toBeNull()
     await act(async () => { release('done'); await gate })
-    expect((await screen.findAllByText("Got it. Pluma picks it up next time Alex's Mac is on.")).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText('Got it. You can follow it in My suggestions.')).length).toBeGreaterThan(0)
   })
 
   it('a rebuilt adapters object (a parent re-render) does not start a second outbox, and the receipt still lands', async () => {
@@ -155,7 +155,9 @@ describe('the sheet', () => {
 
   it('the receipt words are the design\'s three lines', () => {
     expect(receiptWords('on-phone', { owner: 'Alex' })).toBe('On this phone, waiting to send.')
-    expect(receiptWords('received', { owner: 'Sam' })).toBe("Got it. Pluma picks it up next time Sam's Mac is on.")
+    // supersuit-dev#1494: a report goes straight to the relay, so no Mac has to wake for it.
+    expect(receiptWords('received', { owner: 'Sam' })).toBe('Got it. You can follow it in My suggestions.')
+    expect(receiptWords('received', { owner: 'Sam' })).not.toMatch(/Mac|Sam/)
     expect(receiptWords('on-mac', { owner: 'Alex' })).toBe('On your Mac.')
   })
 

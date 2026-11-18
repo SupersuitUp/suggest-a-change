@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **The receipt says what happens now.** A received report reads "Got it. You can follow it in My suggestions." It used to say Pluma would pick it up the next time the owner's Mac was on, which stopped being true when reports began to file straight through the relay (supersuit-dev#1494).
+
 ## 0.4.0 (2026-11-13)
 
 - **No daily cap by default.** `CEILINGS.perPersonPerDay` and the relay's `RELAY_LIMITS.perPersonPerDay` and `bytesPerPersonPerDay` are now `Infinity`, where they were 20 reports and 300 MiB per member per day. A host that sets nothing never answers 429 for a day's count, and the server half no longer asks the store to count (`countToday` is not called and `put` gets no `dailyLimit`). A host may still set its own daily cap, any positive number, in `limits`. The per-request and per-file size caps are unchanged. A `RelayUsage` store now receives `Infinity` in `reserve`'s limits when no cap is set. Decided 2026-11-13: there is no cap on bug reports.
