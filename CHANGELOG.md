@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 (2026-11-25)
 
 - **The receipt says what happens now.** A received report reads "Got it. You can follow it in My suggestions." It used to say Pluma would pick it up the next time the owner's Mac was on, which stopped being true when reports began to file straight through the relay (supersuit-dev#1494).
 
